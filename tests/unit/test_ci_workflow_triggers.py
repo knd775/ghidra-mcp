@@ -138,3 +138,20 @@ def test_build_status_script_checks_every_job_it_depends_on():
         f"needs.<job>.result for them, so their failures do not affect the "
         f"reported build status."
     )
+
+
+def test_python_unit_job_is_ubuntu_312_only():
+    """This fork CI-tests the bridge on Ubuntu 3.12, matching the Docker base.
+
+    eclipse-temurin:21-jdk is Ubuntu 24.04 (Python 3.12). A version matrix or a
+    Windows pytest job is a different deployment method and is not gated here.
+    """
+    python_tests = _load("tests.yml")["jobs"]["python-tests"]
+    assert python_tests["runs-on"] == "ubuntu-latest"
+    assert "matrix" not in python_tests.get("strategy", {})
+    script = "\n".join(
+        str(step.get("run", "")) for step in python_tests.get("steps", [])
+    )
+    assert "3.12" in script
+    assert "python-tests-windows" not in _load("tests.yml")["jobs"]
+    assert "pester-tests" not in _load("tests.yml")["jobs"]

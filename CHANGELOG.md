@@ -89,7 +89,8 @@ and `GHIDRA_MCP_FUNCTION_CASE`. Error JSON may include `status` of
 Same-repo pull requests get README's API Reference block and the user-visible
 "N MCP tools" counts rewritten onto the PR branch by the `sync-generated-docs`
 job in `tests.yml`. Pytest still gates those files, so a stale listing cannot
-merge. Main is never left wrong until a follow-up workflow runs.
+merge. Main is never left wrong until a follow-up workflow runs. CI on this
+fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
 
 ### Tool consolidation (breaking) — 272 → 251 tools
 

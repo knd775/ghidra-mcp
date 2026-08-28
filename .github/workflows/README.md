@@ -7,7 +7,7 @@ workflows for GhidraMCP.
 
 | Workflow | Trigger | Runner | Purpose |
 |----------|---------|--------|---------|
-| `tests.yml` | Push, pull request, and `workflow_dispatch` to `main`/`develop` | GitHub-hosted Ubuntu/Windows | Merge-gating build, unit, offline Java, Pester, and docs checks. Same-repo PRs also rewrite README API Reference and "N MCP tools" counts onto the PR branch (`sync-generated-docs` job) so main never lands stale. |
+| `tests.yml` | Push, pull request, and `workflow_dispatch` to `main`/`develop` | GitHub-hosted Ubuntu | Merge-gating Maven build, Python 3.12 unit tests, and docs checks. Same-repo PRs also rewrite README API Reference and "N MCP tools" counts onto the PR branch (`sync-generated-docs` job) so main never lands stale. |
 | `build.yml` | Project build triggers | GitHub-hosted | Build-focused CI path. |
 | `release-regression.yml` | Manual, reusable workflow call, PR label | Self-hosted Windows | Live Ghidra deploy and benchmark regression. |
 | `release.yml` | Version tags or manual dispatch | GitHub-hosted, optional self-hosted regression | Stable release artifact creation. |
