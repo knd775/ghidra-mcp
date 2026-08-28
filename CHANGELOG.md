@@ -97,8 +97,10 @@ fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
 `docker/Dockerfile.bridge` builds the Python MCP bridge on `python:3.12-slim`.
 `.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless` and
 `ghidra-mcp-bridge` to GHCR on push to `main`/`dev`/`develop` and on version
-tags. Compose runs the bridge in the headless server's network namespace so
-`GHIDRA_MCP_URL` can stay on loopback (the bridge refuses non-loopback TCP).
+tags. Compose is Ghidra Server + headless + bridge (shared netns, loopback
+`GHIDRA_MCP_URL`) + a Cloudflare Tunnel. Env for that file is
+`docker/.env.template`. 8089/8081 are published on loopback only. There is
+no Traefik.
 
 ### Tool consolidation (breaking) — 272 → 251 tools
 

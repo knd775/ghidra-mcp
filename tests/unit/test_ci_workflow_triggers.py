@@ -184,4 +184,9 @@ def test_bridge_dockerfile_is_python_312_and_loopback_oriented():
     compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "Dockerfile.bridge" in compose
     assert "network_mode: \"service:ghidra-mcp\"" in compose
-    assert "GHIDRA_MCP_URL=http://127.0.0.1:8089" in compose
+    assert "GHIDRA_MCP_URL: http://127.0.0.1:8089" in compose
+    assert "ghidra-server:" in compose
+    assert "cloudflared:" in compose
+    assert "traefik" not in compose.lower()
+    assert "13100:13100" in compose
+    assert "GHIDRA_MCP_FILE_ROOT: /data" in compose

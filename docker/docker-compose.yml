@@ -1,64 +1,141 @@
-# GhidraMCP Headless Server - Single Instance Deployment
-# Usage: docker-compose up -d
+# Production-shaped stack for this fork.
+#
+#   cp docker/.env.template docker/.env   # fill it
+#   docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+#
+# Headless + bridge images come from GHCR (or `docker compose build`).
+# Ghidra Server is blacktop/ghidra. RMI is published on BIND_ADDR, not
+# 0.0.0.0 — the server advertises that address and clients must dial it.
+#
+# The bridge shares ghidra-mcp's network namespace. That is required:
+# validate_server_url() only accepts loopback, so GHIDRA_MCP_URL cannot
+# be http://ghidra-mcp:8089. cloudflared still reaches the bridge at
+# http://ghidra-mcp:8081 because that name is the headless container.
 
-version: '3.8'
+name: ghidra
 
 services:
+  ghidra-server:
+    image: blacktop/ghidra:${GHIDRA_VERSION:-12.1.2}
+    container_name: ghidra-server
+    command: server
+    hostname: ${GHIDRA_PUBLIC_HOSTNAME:?set in .env}
+    init: true
+    restart: unless-stopped
+    environment:
+      MAXMEM: 1G
+      GHIDRA_USERS: ${GHIDRA_USERS:?set in .env}
+      # wrapper.app.parameter.3=-ip. External clients hang with no useful
+      # error if this stays 0.0.0.0. Use the same address as BIND_ADDR.
+      GHIDRA_IP: ${BIND_ADDR:?set in .env}
+    volumes:
+      - ghidra-repos:/repos
+    ports:
+      - "${BIND_ADDR:?set in .env}:13100:13100"
+      - "${BIND_ADDR}:13101:13101"
+      - "${BIND_ADDR}:13102:13102"
+    networks:
+      - ghidra
+
   ghidra-mcp:
+    image: ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-headless:${GHIDRA_MCP_VERSION:-dev}
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: ghidra-mcp-headless:latest
+    pull_policy: missing
     container_name: ghidra-mcp
-    ports:
-      - "8089:8089"
-      # Bridge MCP (streamable-http) shares this netns. See ghidra-mcp-bridge.
-      - "8081:8081"
-    volumes:
-      # Persistent data storage
-      - ghidra-data:/data
-      # Ghidra projects directory
-      - ghidra-projects:/projects
-      # Optional: Mount local binaries for analysis
-      # - ./binaries:/binaries:ro
-    environment:
-      - GHIDRA_MCP_PORT=8089
-      - JAVA_OPTS=-Xmx4g -XX:+UseG1GC
-      - GHIDRA_MCP_AUTH_TOKEN=${GHIDRA_MCP_AUTH_TOKEN:-}
-      # Optional: Auto-load a program on startup
-      # - PROGRAM_FILE=/binaries/target.exe
     restart: unless-stopped
+    depends_on:
+      - ghidra-server
+    environment:
+      GHIDRA_MCP_PORT: "8089"
+      GHIDRA_MCP_BIND_ADDRESS: "0.0.0.0"
+      JAVA_OPTS: "${JAVA_OPTS:--Xmx8g -XX:+UseG1GC}"
+
+      # Must be the RMI-advertised address (BIND_ADDR), not the compose
+      # service name. A name that is not on the Ghidra Server TLS SAN
+      # fails as certificate_unknown and looks like a connection error.
+      GHIDRA_SERVER_HOST: ${BIND_ADDR}
+      GHIDRA_SERVER_PORT: "13100"
+
+      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
+      GHIDRA_MCP_FILE_ROOT: /data
+
+      # -Duser.name. Must match the Ghidra Server account.
+      GHIDRA_USER: ${GHIDRA_SERVER_USER:?set in .env}
+      GHIDRA_SERVER_USER: ${GHIDRA_SERVER_USER}
+      GHIDRA_SERVER_PASSWORD: ${GHIDRA_SERVER_PASSWORD:?set in .env}
+
+      # Executes Java inside the Ghidra process. Off unless you set 1.
+      GHIDRA_MCP_ALLOW_SCRIPTS: ${GHIDRA_MCP_ALLOW_SCRIPTS:-}
+    volumes:
+      # Absolute host path. Relative paths are unreliable in Portainer.
+      - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
+      - ghidra-mcp-home:/home/ghidra
+      - ghidra-mcp-projects:/projects
+    ports:
+      # Loopback only. Remote MCP goes through cloudflared, not these.
+      - "127.0.0.1:8089:8089"
+      - "127.0.0.1:8081:8081"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8089/health"]
       interval: 30s
       timeout: 10s
       start_period: 60s
       retries: 3
-    deploy:
-      resources:
-        limits:
-          memory: 6g
-        reservations:
-          memory: 2g
+    networks:
+      - ghidra
 
-  # Shares the headless server's network namespace so GHIDRA_MCP_URL can stay
-  # on loopback. The bridge refuses non-loopback TCP URLs.
+  # No networks: or ports: here — it inherits ghidra-mcp's. Anything that
+  # can reach 8081 on that namespace can also reach 8089.
   ghidra-mcp-bridge:
+    image: ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-bridge:${GHIDRA_MCP_VERSION:-dev}
     build:
       context: ..
       dockerfile: docker/Dockerfile.bridge
-    image: ghidra-mcp-bridge:latest
-    network_mode: "service:ghidra-mcp"
+    pull_policy: missing
+    container_name: ghidra-mcp-bridge
+    restart: unless-stopped
     depends_on:
       ghidra-mcp:
         condition: service_healthy
+    network_mode: "service:ghidra-mcp"
+    command:
+      - --transport
+      - streamable-http
+      - --mcp-host
+      - "0.0.0.0"
+      - --mcp-port
+      - "8081"
     environment:
-      - GHIDRA_MCP_URL=http://127.0.0.1:8089
-      - GHIDRA_MCP_AUTH_TOKEN=${GHIDRA_MCP_AUTH_TOKEN:-}
+      GHIDRA_MCP_URL: http://127.0.0.1:8089
+      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
+      GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS: "1"
+      GHIDRA_MCP_MAX_CONCURRENT_REQUESTS: ${GHIDRA_MCP_MAX_CONCURRENT_REQUESTS:-4}
+      # Must include the tunnel hostname or forwarded Host headers are rejected.
+      GHIDRA_MCP_ALLOWED_HOSTS: ${GHIDRA_MCP_ALLOWED_HOSTS:?set in .env}
+
+  # Dashboard tunnel: HTTP origin http://ghidra-mcp:8081 (bridge shares
+  # that namespace). Register https://<hostname>/mcp in Zero Trust AI
+  # controls and put an Access policy on the origin. The tunnel does not
+  # authenticate; leave Access Managed OAuth off (the bridge ignores the JWT).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ghidra-cloudflared
     restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    depends_on:
+      - ghidra-mcp
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set in .env}
+    networks:
+      - ghidra
 
 volumes:
-  ghidra-data:
-    driver: local
-  ghidra-projects:
-    driver: local
+  ghidra-repos:
+  ghidra-mcp-home:
+  ghidra-mcp-projects:
+
+networks:
+  ghidra:
+    driver: bridge
