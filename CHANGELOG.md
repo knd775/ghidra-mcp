@@ -92,6 +92,14 @@ job in `tests.yml`. Pytest still gates those files, so a stale listing cannot
 merge. Main is never left wrong until a follow-up workflow runs. CI on this
 fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
 
+### Docker
+
+`docker/Dockerfile.bridge` builds the Python MCP bridge on `python:3.12-slim`.
+`.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless` and
+`ghidra-mcp-bridge` to GHCR on push to `main`/`dev`/`develop` and on version
+tags. Compose runs the bridge in the headless server's network namespace so
+`GHIDRA_MCP_URL` can stay on loopback (the bridge refuses non-loopback TCP).
+
 ### Tool consolidation (breaking) — 272 → 251 tools
 
 Redundant tools were folded into "one-or-many" survivors. **No capability was

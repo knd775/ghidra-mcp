@@ -12,6 +12,8 @@ services:
     container_name: ghidra-mcp
     ports:
       - "8089:8089"
+      # Bridge MCP (streamable-http) shares this netns. See ghidra-mcp-bridge.
+      - "8081:8081"
     volumes:
       # Persistent data storage
       - ghidra-data:/data
@@ -22,6 +24,7 @@ services:
     environment:
       - GHIDRA_MCP_PORT=8089
       - JAVA_OPTS=-Xmx4g -XX:+UseG1GC
+      - GHIDRA_MCP_AUTH_TOKEN=${GHIDRA_MCP_AUTH_TOKEN:-}
       # Optional: Auto-load a program on startup
       # - PROGRAM_FILE=/binaries/target.exe
     restart: unless-stopped
@@ -37,6 +40,22 @@ services:
           memory: 6g
         reservations:
           memory: 2g
+
+  # Shares the headless server's network namespace so GHIDRA_MCP_URL can stay
+  # on loopback. The bridge refuses non-loopback TCP URLs.
+  ghidra-mcp-bridge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bridge
+    image: ghidra-mcp-bridge:latest
+    network_mode: "service:ghidra-mcp"
+    depends_on:
+      ghidra-mcp:
+        condition: service_healthy
+    environment:
+      - GHIDRA_MCP_URL=http://127.0.0.1:8089
+      - GHIDRA_MCP_AUTH_TOKEN=${GHIDRA_MCP_AUTH_TOKEN:-}
+    restart: unless-stopped
 
 volumes:
   ghidra-data:

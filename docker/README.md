@@ -44,9 +44,25 @@ docker-compose -f docker-compose.multi.yml up -d --scale ghidra-mcp=3
 ### Build Docker Image
 
 ```bash
-# From project root
+# From project root — Java headless server
 docker build -t ghidra-mcp-headless:latest -f docker/Dockerfile .
+
+# Python MCP bridge (python:3.12-slim)
+docker build -t ghidra-mcp-bridge:latest -f docker/Dockerfile.bridge .
 ```
+
+Images are also published to GHCR on push to `main`/`dev`/`develop`:
+
+```text
+ghcr.io/<owner>/ghidra-mcp-headless
+ghcr.io/<owner>/ghidra-mcp-bridge
+```
+
+The compose file runs the bridge in the headless server's network namespace
+and sets `GHIDRA_MCP_URL=http://127.0.0.1:8089`. The bridge refuses a
+non-loopback TCP URL, so do not point it at a Docker DNS name. MCP is on
+host port 8081; the headless REST API stays on 8089.
+
 
 ### Build with Maven
 
