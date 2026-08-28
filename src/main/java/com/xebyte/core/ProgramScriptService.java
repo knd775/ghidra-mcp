@@ -19,9 +19,6 @@ import ghidra.program.model.util.PropertyMapManager;
 import ghidra.program.model.util.StringPropertyMap;
 import ghidra.program.model.util.VoidPropertyMap;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
-import ghidra.app.util.importer.AutoImporter;
-import ghidra.app.util.importer.MessageLog;
-import ghidra.app.util.opinion.LoadResults;
 import ghidra.util.Msg;
 import ghidra.util.task.ConsoleTaskMonitor;
 import ghidra.util.task.TimeoutTaskMonitor;
@@ -1458,12 +1455,7 @@ public class ProgramScriptService {
     @McpTool(path = "/list_project_files", description = "List files in the current project", category = "program")
     public Response listProjectFiles(
             @Param(value = "folder", description = "Project folder path") String folderPath) {
-        PluginTool tool = getToolFromProvider();
-        if (tool == null) {
-            return Response.err("Project listing requires GUI mode (PluginTool not available)");
-        }
-
-        ghidra.framework.model.Project project = tool.getProject();
+        ghidra.framework.model.Project project = resolveProject();
         if (project == null) {
             return Response.err("No project is currently open");
         }
@@ -1520,14 +1512,6 @@ public class ProgramScriptService {
     public Response createFolder(
             @Param(value = "path", source = ParamSource.BODY, description = "Project folder path to create") String folderPath,
             @Param(value = "program", description = "Target program name", defaultValue = "") String programName) {
-        PluginTool tool = getToolFromProvider();
-        if (tool == null) {
-            return Response.err("Folder creation requires GUI mode (PluginTool not available)");
-        }
-        ghidra.framework.model.Project project = tool.getProject();
-        if (project == null) {
-            return Response.err("No project is currently open");
-        }
         if (folderPath == null || folderPath.trim().isEmpty() || folderPath.equals("/")) {
             return Response.err("path parameter is required");
         }
@@ -1536,17 +1520,14 @@ public class ProgramScriptService {
         if (!SecurityConfig.getInstance().isPathInProjectScope(folderPath)) {
             return Response.err("Access denied: path is outside the configured project scope.");
         }
+        if (resolveProject() == null) {
+            return Response.err("No project is currently open");
+        }
 
         try {
-            ghidra.framework.model.DomainFolder current = project.getProjectData().getRootFolder();
-            String cleanPath = folderPath.startsWith("/") ? folderPath.substring(1) : folderPath;
-            for (String part : cleanPath.split("/")) {
-                if (part.isEmpty()) continue;
-                ghidra.framework.model.DomainFolder next = current.getFolder(part);
-                if (next == null) {
-                    next = current.createFolder(part);
-                }
-                current = next;
+            ghidra.framework.model.DomainFolder current = programProvider.ensureProjectFolder(folderPath);
+            if (current == null) {
+                return Response.err("No project is currently open");
             }
             return Response.ok(JsonHelper.mapOf("success", true, "folder", current.getPathname()));
         } catch (Exception e) {
@@ -1557,12 +1538,7 @@ public class ProgramScriptService {
     @McpTool(path = "/delete_file", method = "POST", description = "Delete a file from the project", category = "project")
     public Response deleteFile(
             @Param(value = "filePath", source = ParamSource.BODY, description = "Project file path to delete") String filePath) {
-        PluginTool tool = getToolFromProvider();
-        if (tool == null) {
-            return Response.err("File deletion requires GUI mode (PluginTool not available)");
-        }
-        ghidra.framework.model.Project project = tool.getProject();
-        if (project == null) {
+        if (resolveProject() == null) {
             return Response.err("No project is currently open");
         }
         if (filePath == null || filePath.trim().isEmpty()) {
@@ -1577,13 +1553,10 @@ public class ProgramScriptService {
         }
 
         try {
-            ghidra.framework.model.DomainFile domainFile = project.getProjectData().getFile(filePath);
-            if (domainFile == null) {
-                return Response.ok(JsonHelper.mapOf("success", true, "deleted", false, "filePath", filePath));
-            }
-            closeOpenProgramForFile(tool, filePath);
-            domainFile.delete();
-            return Response.ok(JsonHelper.mapOf("success", true, "deleted", true, "filePath", filePath));
+            closeProgram(filePath, true);
+            boolean deleted = programProvider.deleteProjectFile(filePath);
+            return Response.ok(JsonHelper.mapOf(
+                "success", true, "deleted", deleted, "filePath", filePath));
         } catch (Exception e) {
             return Response.err("Failed to delete file: " + e.getMessage());
         }
@@ -1818,11 +1791,7 @@ public class ProgramScriptService {
         }
 
         PluginTool tool = getToolFromProvider();
-        if (tool == null) {
-            return Response.err("Opening programs requires GUI mode (PluginTool not available)");
-        }
-
-        ghidra.framework.model.Project project = tool.getProject();
+        ghidra.framework.model.Project project = resolveProject();
         if (project == null) {
             return Response.err("No project is currently open");
         }
@@ -1854,7 +1823,37 @@ public class ProgramScriptService {
             }
         }
 
-        // Open the program
+        if (tool == null) {
+            try {
+                Program program = programProvider.openProjectFile(path);
+                if (program == null) {
+                    return Response.err("Failed to open program: " + path);
+                }
+                boolean analyzed = false;
+                if (autoAnalyze) {
+                    analyzed = runAutoAnalysisAndPersistFlags(program, true);
+                } else {
+                    try {
+                        suppressAnalysisPrompt(program);
+                    } catch (Exception e) {
+                        Msg.warn(this, "Failed to save analysis prompt flags: " + e.getMessage());
+                    }
+                }
+                programProvider.setCurrentProgram(program);
+                return Response.ok(JsonHelper.mapOf(
+                    "success", true,
+                    "message", "Program opened successfully",
+                    "name", program.getName(),
+                    "path", path,
+                    "auto_analyzed", analyzed,
+                    "function_count", program.getFunctionManager().getFunctionCount()
+                ));
+            } catch (Exception e) {
+                return Response.err("Failed to open program: " + describeOpenFailure(e, path));
+            }
+        }
+
+        // Open the program (GUI: ProgramManager / CodeBrowser)
         try {
             // Find a ProgramManager from an existing CodeBrowser, or launch one
             ProgramManager pm = findOrCreateProgramManager(tool);
@@ -1959,13 +1958,15 @@ public class ProgramScriptService {
 
     @McpTool(path = "/import_file", method = "POST",
             description = "Import a binary file from disk into the current Ghidra project and open it. "
-                + "For raw firmware binaries, specify language (e.g. 'ARM:LE:32:Cortex') and optionally compiler_spec (e.g. 'default').",
+                + "format and language are independent: omit both to auto-detect; pass language to pin "
+                + "the processor while keeping ELF/PE/Mach-O layout; pass format=binary for raw firmware.",
             category = "program")
     public Response importFile(
             @Param(value = "file_path", source = ParamSource.BODY, description = "Absolute path to the binary file on disk") String filePath,
             @Param(value = "project_folder", source = ParamSource.BODY, defaultValue = "/", description = "Destination folder in the Ghidra project") String projectFolder,
-            @Param(value = "language", source = ParamSource.BODY, defaultValue = "", description = "Language ID for raw binaries (e.g. 'ARM:LE:32:Cortex', 'x86:LE:64:default'). If omitted, auto-detect.") String languageId,
+            @Param(value = "language", source = ParamSource.BODY, defaultValue = "", description = "Language ID (e.g. 'ARM:LE:32:Cortex'). Pins the processor; does not force a raw load unless format=binary.") String languageId,
             @Param(value = "compiler_spec", source = ParamSource.BODY, defaultValue = "", description = "Compiler spec ID (e.g. 'default', 'gcc', 'windows'). If omitted, uses language default.") String compilerSpecId,
+            @Param(value = "format", source = ParamSource.BODY, defaultValue = "", description = "Optional loader: omit for auto-detect / language-pinned container load; 'binary' for raw (headerless) firmware.") String format,
             @Param(value = "auto_analyze", source = ParamSource.BODY, defaultValue = "true", description = "Start auto-analysis after import") boolean autoAnalyze) {
 
         if (filePath == null || filePath.trim().isEmpty()) {
@@ -1987,68 +1988,17 @@ public class ProgramScriptService {
             return Response.err("File not found: " + filePath);
         }
 
-        PluginTool tool = getToolFromProvider();
-        if (tool == null) {
-            return Response.err("Import requires GUI mode (PluginTool not available)");
-        }
-
-        ghidra.framework.model.Project project = tool.getProject();
-        if (project == null) {
+        if (resolveProject() == null) {
             return Response.err("No project is currently open");
         }
 
-        boolean hasLanguage = languageId != null && !languageId.isEmpty();
-
         try {
-            MessageLog log = new MessageLog();
-            Program program;
-
-            if (hasLanguage) {
-                // Resolve language and compiler spec
-                ghidra.program.model.lang.LanguageService langService =
-                    ghidra.program.util.DefaultLanguageService.getLanguageService();
-                ghidra.program.model.lang.Language language = langService.getLanguage(
-                    new ghidra.program.model.lang.LanguageID(languageId));
-
-                ghidra.program.model.lang.CompilerSpec compilerSpec;
-                if (compilerSpecId != null && !compilerSpecId.isEmpty()) {
-                    compilerSpec = language.getCompilerSpecByID(
-                        new ghidra.program.model.lang.CompilerSpecID(compilerSpecId));
-                } else {
-                    compilerSpec = language.getDefaultCompilerSpec();
-                }
-
-                // Import as raw binary with explicit language/compiler spec
-                ghidra.app.util.opinion.Loaded<Program> loaded = AutoImporter.importAsBinary(
-                    file, project, projectFolder, language, compilerSpec,
-                    this, log, ghidra.util.task.TaskMonitor.DUMMY);
-
-                if (loaded == null) {
-                    return Response.err("Import failed: no results. Log: " + log);
-                }
-                // getDomainObject(consumer) registers us as a consumer so the program stays open
-                program = loaded.getDomainObject(this);
-                if (program == null) {
-                    return Response.err("Import failed: no primary program. Log: " + log);
-                }
-                // Save to project folder (creates DomainFile)
-                loaded.save(ghidra.util.task.TaskMonitor.DUMMY);
-            } else {
-                // Auto-detect format
-                LoadResults<Program> loadResults = AutoImporter.importByUsingBestGuess(
-                    file, project, projectFolder,
-                    this, log, ghidra.util.task.TaskMonitor.DUMMY);
-
-                if (loadResults == null) {
-                    return Response.err("Import failed: no load spec found. Specify 'language' for raw binaries. Log: " + log);
-                }
-                program = loadResults.getPrimaryDomainObject();
-                if (program == null) {
-                    return Response.err("Import failed: no primary program. Log: " + log);
-                }
-                // Save to project folder before releasing (prevents "Database is closed")
-                loadResults.save(ghidra.util.task.TaskMonitor.DUMMY);
+            ProgramImporter.Result imported = programProvider.importBinaryFile(
+                file, projectFolder, languageId, compilerSpecId, format);
+            if (!imported.success()) {
+                return Response.err(imported.error != null ? imported.error : "Import failed");
             }
+            Program program = imported.program;
 
             // NOTE: do NOT call markProgramNotToAskToAnalyze here, ahead of the
             // branches below. It mutates the program DB, and AutoAnalysisManager's
@@ -2082,22 +2032,29 @@ public class ProgramScriptService {
             }
 
             // Open after the analysis flags are persisted so CodeBrowser does not prompt.
-            ProgramManager pm = findOrCreateProgramManager(tool);
-            if (pm == null) {
-                return Response.err("Could not find or create a CodeBrowser tool");
-            }
+            PluginTool tool = getToolFromProvider();
+            if (tool != null) {
+                ProgramManager pm = findOrCreateProgramManager(tool);
+                if (pm == null) {
+                    return Response.err("Could not find or create a CodeBrowser tool");
+                }
 
-            Program finalProgram = program;
-            SwingUtilities.invokeAndWait(() -> {
-                pm.openProgram(finalProgram);
-                pm.setCurrentProgram(finalProgram);
-            });
+                Program finalProgram = program;
+                SwingUtilities.invokeAndWait(() -> {
+                    pm.openProgram(finalProgram);
+                    pm.setCurrentProgram(finalProgram);
+                });
+            } else {
+                programProvider.setCurrentProgram(program);
+            }
 
             return Response.ok(JsonHelper.mapOf(
                 "success", true,
                 "name", program.getName(),
                 "path", program.getDomainFile().getPathname(),
                 "language", program.getLanguageID().getIdAsString(),
+                "executable_format", program.getExecutableFormat() != null
+                    ? program.getExecutableFormat() : "",
                 "analyzing", false,
                 "auto_analyzed", autoAnalyzed
             ));

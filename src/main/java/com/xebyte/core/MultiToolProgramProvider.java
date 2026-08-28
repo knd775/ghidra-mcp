@@ -1,6 +1,7 @@
 package com.xebyte.core;
 
 import ghidra.app.services.ProgramManager;
+import ghidra.framework.model.Project;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 
@@ -192,5 +193,11 @@ public class MultiToolProgramProvider implements ProgramProvider {
         }
         var iter = tools.values().iterator();
         return iter.hasNext() ? iter.next() : null;
+    }
+
+    @Override
+    public Project getProject() {
+        PluginTool tool = getActiveTool();
+        return tool != null ? tool.getProject() : null;
     }
 }

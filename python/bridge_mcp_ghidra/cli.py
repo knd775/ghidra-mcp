@@ -15,6 +15,26 @@ from .server import mcp
 from .static_tools import _auto_connect, _start_auto_connect_retry
 
 
+def _append_allowed_host(allowed: list[str], host: str) -> None:
+    """Allow both portless and explicit-port Host headers.
+
+    MCP's matcher exact-matches first, then for ``host:*`` requires the
+    presented Host to contain a colon. A standards-compliant proxy on
+    443 sends ``Host: example.com`` with no port, which matches neither
+    ``example.com:*`` (not an exact match) nor the wildcard branch
+    (no colon). Store both forms. Entries that already contain a colon
+    (``host:port`` or IPv6) are stored as-is.
+    """
+    h = host.strip()
+    if not h:
+        return
+    if ":" in h:
+        allowed.append(h)
+        return
+    allowed.append(h)
+    allowed.append(f"{h}:*")
+
+
 def _wildcard_allowed_hosts() -> list[str]:
     """Build the allowed-Host list for a 0.0.0.0/:: bind.
 
@@ -181,7 +201,7 @@ def main():
                 allowed = _wildcard_allowed_hosts()
                 extra = os.environ.get("GHIDRA_MCP_ALLOWED_HOSTS", "")
                 for h in (x.strip() for x in extra.split(",") if x.strip()):
-                    allowed.append(f"{h}:*")
+                    _append_allowed_host(allowed, h)
                 logger.info(
                     "Wildcard bind %s with DNS-rebinding protection ON; "
                     "allowed Host headers: %s. Extend with "
@@ -196,9 +216,12 @@ def main():
                     allowed_origins=[f"http://{h}" for h in allowed],
                 )
         else:
+            allowed = []
+            _append_allowed_host(allowed, _host)
+            allowed.extend(["localhost:*", "127.0.0.1:*"])
             mcp.settings.transport_security = TransportSecuritySettings(
                 enable_dns_rebinding_protection=True,
-                allowed_hosts=[f"{_host}:*", "localhost:*", "127.0.0.1:*"],
+                allowed_hosts=allowed,
                 allowed_origins=[f"http://{_host}:*", "http://localhost:*", "http://127.0.0.1:*"],
             )
     logger.info(f"Starting MCP bridge ({args.transport})")

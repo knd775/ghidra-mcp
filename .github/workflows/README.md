@@ -7,7 +7,7 @@ workflows for GhidraMCP.
 
 | Workflow | Trigger | Runner | Purpose |
 |----------|---------|--------|---------|
-| `tests.yml` | Push and pull request to `main`/`develop` | GitHub-hosted Ubuntu/Windows | Merge-gating build, unit, offline Java, Pester, and docs checks. |
+| `tests.yml` | Push, pull request, and `workflow_dispatch` to `main`/`develop` | GitHub-hosted Ubuntu/Windows | Merge-gating build, unit, offline Java, Pester, and docs checks. Same-repo PRs also rewrite README API Reference and "N MCP tools" counts onto the PR branch (`sync-generated-docs` job) so main never lands stale. |
 | `build.yml` | Project build triggers | GitHub-hosted | Build-focused CI path. |
 | `release-regression.yml` | Manual, reusable workflow call, PR label | Self-hosted Windows | Live Ghidra deploy and benchmark regression. |
 | `release.yml` | Version tags or manual dispatch | GitHub-hosted, optional self-hosted regression | Stable release artifact creation. |
@@ -17,6 +17,14 @@ workflows for GhidraMCP.
 
 `tests.yml` runs automatically on pull requests and is the default merge gate.
 Configure branch protection to require its status checks.
+
+The README API listing and "N MCP tools" counts are a PR check. Same-repo
+PRs get them rewritten onto the PR branch by the `sync-generated-docs` job
+before merge; pytest will not pass on a stale listing. A GITHUB_TOKEN push
+does not start a new `pull_request` run, so that job then
+`workflow_dispatch`es Tests on the rewritten commit. Direct pushes to main
+with a stale listing fail; they are not auto-fixed. Fork PRs must include
+`python -m tools.sync_generated_docs --write`.
 
 The live Ghidra regression is opt-in on pull requests. Add this PR label:
 

@@ -21,11 +21,15 @@ public sealed interface Response permits Response.Ok, Response.Err, Response.Tex
         }
     }
 
-    /** Error response: {"error": "message"}. */
-    record Err(String message) implements Response {
+    /** Error response: {"error": "message"} plus optional machine-readable status. */
+    record Err(String message, String status) implements Response {
+        public Err(String message) {
+            this(message, null);
+        }
+
         @Override
         public String toJson() {
-            return JsonHelper.errorJson(message);
+            return JsonHelper.errorJson(message, status);
         }
     }
 
@@ -40,6 +44,9 @@ public sealed interface Response permits Response.Ok, Response.Err, Response.Tex
     // Factory methods
     static Response ok(Object data) { return new Ok(data); }
     static Response err(String message) { return new Err(message); }
+    static Response err(String message, String status) { return new Err(message, status); }
+    static Response guiRequired(String message) { return new Err(message, "gui_required"); }
+    static Response notImplemented(String message) { return new Err(message, "not_implemented"); }
 
     /**
      * Success response for a write with no structured payload:

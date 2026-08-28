@@ -4,6 +4,8 @@ import com.xebyte.core.JsonHelper;
 import com.xebyte.core.ServiceUtils;
 import junit.framework.TestCase;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -69,5 +71,43 @@ public class JsonHelperTest extends TestCase {
         assertNotNull(regions);
         assertEquals(1, regions.size());
         assertEquals(16, JsonHelper.getInt(regions.get(0).get("length"), 0));
+    }
+
+    public void testParseBodyDetailedOk() {
+        byte[] json = "{\"filename\":\"a.bin\"}".getBytes(StandardCharsets.UTF_8);
+        JsonHelper.ParsedBody parsed = JsonHelper.parseBodyDetailed(new ByteArrayInputStream(json));
+        assertEquals(JsonHelper.BodyStatus.OK, parsed.status());
+        assertNull(parsed.errorOrNull());
+        assertEquals("a.bin", parsed.map().get("filename"));
+    }
+
+    public void testParseBodyDetailedMalformed() {
+        byte[] json = "not-json".getBytes(StandardCharsets.UTF_8);
+        JsonHelper.ParsedBody parsed = JsonHelper.parseBodyDetailed(new ByteArrayInputStream(json));
+        assertEquals(JsonHelper.BodyStatus.MALFORMED, parsed.status());
+        assertTrue(parsed.errorOrNull().toLowerCase().contains("malformed"));
+        assertTrue(parsed.map().isEmpty());
+    }
+
+    public void testParseBodyDetailedEmptyIsOk() {
+        JsonHelper.ParsedBody parsed = JsonHelper.parseBodyDetailed(new ByteArrayInputStream(new byte[0]));
+        assertEquals(JsonHelper.BodyStatus.OK, parsed.status());
+        assertTrue(parsed.map().isEmpty());
+    }
+
+    public void testParseBodyStillReturnsEmptyMapOnMalformed() {
+        // Back-compat wrapper: existing callers that only look at the map
+        // still see an empty map rather than a thrown exception.
+        Map<String, Object> map = JsonHelper.parseBody(
+            new ByteArrayInputStream("not-json".getBytes(StandardCharsets.UTF_8)));
+        assertTrue(map.isEmpty());
+    }
+
+    public void testErrorJsonIncludesOptionalStatus() {
+        String json = JsonHelper.errorJson("needs a GUI", "gui_required");
+        assertTrue(json.contains("\"error\""));
+        assertTrue(json.contains("gui_required"));
+        String bare = JsonHelper.errorJson("oops");
+        assertFalse(bare.contains("status"));
     }
 }

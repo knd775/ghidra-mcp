@@ -127,8 +127,16 @@ public class ServerManager {
             server.createContext(ep.path(), exchange -> {
                 try {
                     Map<String, String> query = parseQueryString(exchange.getRequestURI().getRawQuery());
-                    Map<String, Object> body = "POST".equalsIgnoreCase(exchange.getRequestMethod())
-                        ? JsonHelper.parseBody(exchange.getRequestBody()) : Map.of();
+                    Map<String, Object> body = Map.of();
+                    if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                        JsonHelper.ParsedBody parsed = JsonHelper.parseBodyDetailed(exchange.getRequestBody());
+                        String parseErr = parsed.errorOrNull();
+                        if (parseErr != null) {
+                            sendJsonResponse(exchange, Response.err(parseErr).toJson());
+                            return;
+                        }
+                        body = parsed.map();
+                    }
                     String json = ep.handler().handle(query, body).toJson();
                     sendJsonResponse(exchange, json);
                 } catch (Exception e) {

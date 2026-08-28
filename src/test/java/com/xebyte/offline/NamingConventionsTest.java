@@ -1,5 +1,6 @@
 package com.xebyte.offline;
 
+import com.xebyte.core.ConventionConfig;
 import com.xebyte.core.NamingConventions;
 import com.xebyte.core.NamingConventions.NameQualityResult;
 import com.xebyte.core.NamingPolicy;
@@ -1006,5 +1007,35 @@ public class NamingConventionsTest extends TestCase {
                 msg.contains("contains underscores"));
         assertFalse("digit-bearing module prefix read as a PascalCase violation: " + msg,
                 msg.contains("is not PascalCase"));
+    }
+
+    public void testDefaultPascalWarnsOnSnakeCase() {
+        java.util.List<String> warnings =
+                NamingConventions.validateFunctionName("flag_ingest_fragment", false);
+        assertTrue("default PascalCase gate should warn on snake_case",
+                warnings.stream().anyMatch(s -> s.contains("PascalCase") || s.contains("underscores")));
+    }
+
+    public void testSnakeCaseStyleDoesNotWarnPascalOrUnderscores() {
+        NamingPolicy policy = NamingPolicy.getInstance();
+        ConventionConfig saved = policy.getConfig();
+        String source = policy.getSource();
+        try {
+            policy.setConfig(new ConventionConfig(
+                    ConventionConfig.Mode.WARN,
+                    new ConventionConfig.FunctionNamingRules(
+                            8, java.util.Set.of(), java.util.Set.of(), java.util.Map.of(),
+                            java.util.Set.of(), java.util.Set.of(), ConventionConfig.CaseStyle.SNAKE),
+                    ConventionConfig.HungarianRules.defaults(),
+                    ConventionConfig.GlobalNamingRules.defaults(),
+                    ConventionConfig.PlateCommentRules.defaults()),
+                    "test-snake");
+            java.util.List<String> warnings =
+                    NamingConventions.validateFunctionName("flag_ingest_fragment", false);
+            assertTrue(warnings.stream().noneMatch(s -> s.contains("PascalCase")));
+            assertTrue(warnings.stream().noneMatch(s -> s.contains("contains underscores")));
+        } finally {
+            policy.setConfig(saved, source);
+        }
     }
 }

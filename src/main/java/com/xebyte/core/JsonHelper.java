@@ -42,7 +42,49 @@ public final class JsonHelper {
 
     /** Create a standard error JSON response: {"error": "message"} */
     public static String errorJson(String message) {
-        return GSON.toJson(Map.of("error", message != null ? message : "Unknown error"));
+        return errorJson(message, null);
+    }
+
+    /**
+     * Error JSON with an optional machine-readable {@code status}
+     * ({@code gui_required}, {@code not_implemented}, {@code identity_mismatch}, …).
+     * Never a success status: callers distinguish "attach a GUI" from "stop trying".
+     */
+    public static String errorJson(String message, String status) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("error", message != null ? message : "Unknown error");
+        if (status != null && !status.isBlank()) {
+            m.put("status", status);
+        }
+        return GSON.toJson(m);
+    }
+
+    /**
+     * Result of a bounded JSON body parse. Distinguishes oversized from
+     * malformed so {@code /upload_file} (and any other handler) can report
+     * the two cases separately instead of both looking like missing params.
+     */
+    public enum BodyStatus { OK, OVERSIZED, MALFORMED }
+
+    public record ParsedBody(BodyStatus status, Map<String, Object> map) {
+        public static ParsedBody ok(Map<String, Object> map) {
+            return new ParsedBody(BodyStatus.OK, map);
+        }
+        public static ParsedBody oversized() {
+            return new ParsedBody(BodyStatus.OVERSIZED, new LinkedHashMap<>());
+        }
+        public static ParsedBody malformed() {
+            return new ParsedBody(BodyStatus.MALFORMED, new LinkedHashMap<>());
+        }
+
+        /** Error text for OVERSIZED/MALFORMED, or null when the body is usable. */
+        public String errorOrNull() {
+            return switch (status) {
+                case OK -> null;
+                case OVERSIZED -> "Request body too large";
+                case MALFORMED -> "Malformed JSON body";
+            };
+        }
     }
 
     /**
@@ -51,20 +93,34 @@ public final class JsonHelper {
      * any declared Content-Length, so a chunked or mis-declared oversized body
      * cannot force an unbounded allocation. An overreading body yields an empty
      * map (fail-safe: the endpoint then errors on the missing required params).
+     *
+     * <p>Prefer {@link #parseBodyDetailed(InputStream)} when the caller needs
+     * to distinguish oversized from malformed.
      */
     @SuppressWarnings("unchecked")
     public static Map<String, Object> parseBody(InputStream input) {
+        return parseBodyDetailed(input).map();
+    }
+
+    /**
+     * Bounded JSON body parse that reports oversize vs malformed vs ok.
+     */
+    @SuppressWarnings("unchecked")
+    public static ParsedBody parseBodyDetailed(InputStream input) {
         try {
             int cap = (int) SecurityConfig.MAX_REQUEST_BODY_BYTES;
             byte[] bytes = input.readNBytes(cap + 1);
             if (bytes.length > SecurityConfig.MAX_REQUEST_BODY_BYTES) {
-                return new LinkedHashMap<>();  // oversized — refuse rather than allocate more
+                return ParsedBody.oversized();
+            }
+            if (bytes.length == 0) {
+                return ParsedBody.ok(new LinkedHashMap<>());
             }
             Map<String, Object> result = GSON.fromJson(
                 new String(bytes, StandardCharsets.UTF_8), LinkedHashMap.class);
-            return result != null ? result : new LinkedHashMap<>();
+            return ParsedBody.ok(result != null ? result : new LinkedHashMap<>());
         } catch (Exception e) {
-            return new LinkedHashMap<>();
+            return ParsedBody.malformed();
         }
     }
 

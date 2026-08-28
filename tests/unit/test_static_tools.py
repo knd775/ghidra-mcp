@@ -719,6 +719,23 @@ class TestImportFile(unittest.TestCase):
             },
         )
 
+    def test_format_is_forwarded_when_set(self):
+        with (
+            isolated_bridge() as bridge,
+            patch.object(bridge.dispatch, "dispatch_post", return_value='{"data": {}}') as post,
+        ):
+            asyncio.run(
+                bridge.import_file(
+                    "/fw/image.bin",
+                    language="ARM:LE:32:Cortex",
+                    format="binary",
+                )
+            )
+
+        payload = post.call_args[0][1]
+        self.assertEqual(payload["format"], "binary")
+        self.assertEqual(payload["language"], "ARM:LE:32:Cortex")
+
     def test_non_json_response_is_returned_verbatim(self):
         """The Ghidra server can answer with a plain-text error; import_file
         must pass it through instead of raising a JSONDecodeError."""

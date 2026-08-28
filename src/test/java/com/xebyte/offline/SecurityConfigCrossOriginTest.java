@@ -153,4 +153,12 @@ public class SecurityConfigCrossOriginTest extends TestCase {
         assertFalse(SecurityConfig.exceedsMaxBody("not-a-number"));
         assertFalse(SecurityConfig.exceedsMaxBody("  "));
     }
+
+    public void testExceedsMaxBodyCustomLimit() {
+        assertFalse(SecurityConfig.exceedsMaxBody("16", 16));
+        assertTrue(SecurityConfig.exceedsMaxBody("17", 16));
+        assertEquals(16L * 1024 * 1024, SecurityConfig.DEFAULT_MAX_UPLOAD_BYTES);
+        assertEquals(SecurityConfig.DEFAULT_MAX_UPLOAD_BYTES,
+            SecurityConfig.getInstance().getMaxUploadBytes());
+    }
 }

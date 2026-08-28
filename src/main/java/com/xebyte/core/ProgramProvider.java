@@ -15,7 +15,13 @@
  */
 package com.xebyte.core;
 
+import ghidra.framework.model.DomainFile;
+import ghidra.framework.model.DomainFolder;
+import ghidra.framework.model.Project;
 import ghidra.program.model.listing.Program;
+import ghidra.util.task.TaskMonitor;
+
+import java.io.File;
 
 /**
  * Interface for providing access to Ghidra programs.
@@ -79,17 +85,90 @@ public interface ProgramProvider {
     /**
      * Get the project this provider is serving programs from.
      *
-     * <p>GUI providers reach the project through their PluginTool, so the
-     * default is null and callers fall back to the tool. Headless providers
-     * own a Project directly and should override this — without it, project
-     * -level tools (move/create/delete) would be GUI-only, which is exactly
-     * the regression that converting {@code /move_file} to an {@code @McpTool}
-     * would otherwise have introduced.
+     * <p>GUI providers override this from their PluginTool. Headless providers
+     * own a Project directly. Project-level tools must go through here rather
+     * than reaching for PluginTool, or they become GUI-only.
      *
      * @return The active project, or null if this provider has no direct handle
      */
-    default ghidra.framework.model.Project getProject() {
+    default Project getProject() {
         return null;
+    }
+
+    /**
+     * Create (or reuse) each segment of {@code folderPath} under the open
+     * project. Returns null when no project is open.
+     */
+    default DomainFolder ensureProjectFolder(String folderPath) throws Exception {
+        Project project = getProject();
+        if (project == null) {
+            return null;
+        }
+        DomainFolder current = project.getProjectData().getRootFolder();
+        if (folderPath == null || folderPath.isBlank() || folderPath.equals("/")) {
+            return current;
+        }
+        String cleanPath = folderPath.startsWith("/") ? folderPath.substring(1) : folderPath;
+        for (String part : cleanPath.split("/")) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            DomainFolder next = current.getFolder(part);
+            if (next == null) {
+                next = current.createFolder(part);
+            }
+            current = next;
+        }
+        return current;
+    }
+
+    /**
+     * Delete a DomainFile by project path. Returns false when no project is
+     * open or the path does not exist.
+     */
+    default boolean deleteProjectFile(String path) throws Exception {
+        Project project = getProject();
+        if (project == null || path == null || path.isBlank()) {
+            return false;
+        }
+        DomainFile domainFile = project.getProjectData().getFile(path);
+        if (domainFile == null) {
+            return false;
+        }
+        domainFile.delete();
+        return true;
+    }
+
+    /**
+     * Open a program DomainFile from the project. GUI providers keep
+     * {@code okToUpgrade=false}; headless overrides to match its other open
+     * paths. Returns null when no project is open or the path is missing.
+     */
+    default Program openProjectFile(String path) throws Exception {
+        Project project = getProject();
+        if (project == null || path == null || path.isBlank()) {
+            return null;
+        }
+        DomainFile domainFile = project.getProjectData().getFile(path);
+        if (domainFile == null) {
+            return null;
+        }
+        return (Program) domainFile.getDomainObject(this, false, false, TaskMonitor.DUMMY);
+    }
+
+    /**
+     * Import a binary into the open project. Shares {@link ProgramImporter}
+     * loader-selection with headless {@code /load_program}. Fails if no
+     * project is open.
+     */
+    default ProgramImporter.Result importBinaryFile(File file, String folderPath,
+            String languageId, String compilerSpecId, String format) {
+        Project project = getProject();
+        if (project == null) {
+            return ProgramImporter.Result.fail("No project is currently open");
+        }
+        return ProgramImporter.importFile(file, project, folderPath,
+            languageId, compilerSpecId, format, this, TaskMonitor.DUMMY);
     }
 
     /**

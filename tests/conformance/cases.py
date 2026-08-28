@@ -34,6 +34,7 @@ DESTRUCTIVE = {
     "archive_project", "restore_project", "move_file", "move_folder",
     "create_project", "import_program", "export_program", "checkin_program",
     "load_program", "load_program_from_project", "close_project",
+    "upload_file", "refresh_project",
     "delete_property_map", "remove_program_option", "clear_flow_and_repair",
 }
 

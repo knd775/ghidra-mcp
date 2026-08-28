@@ -135,8 +135,10 @@ public final class ConventionConfigLoader {
                 section.get("verb_tier_overrides"), warnings);
         Set<String> weakAdd = asStringSet(section.get("weak_nouns_add"));
         Set<String> weakRemove = asStringSet(section.get("weak_nouns_remove"));
+        ConventionConfig.CaseStyle caseStyle =
+                ConventionConfig.CaseStyle.parse(asString(section.get("case_style")));
         return new ConventionConfig.FunctionNamingRules(
-                minLength, add, remove, tierOverrides, weakAdd, weakRemove);
+                minLength, add, remove, tierOverrides, weakAdd, weakRemove, caseStyle);
     }
 
     private static ConventionConfig.HungarianRules parseHungarian(

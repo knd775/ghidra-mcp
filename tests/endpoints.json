@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 253,
+  "total_endpoints": 255,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -385,7 +385,8 @@
       "params": [
         "path",
         "comment",
-        "keep_checked_out"
+        "keep_checked_out",
+        "dry_run"
       ],
       "description": "Check an open program back in to the shared Ghidra Server as a new version"
     },
@@ -449,7 +450,7 @@
       "method": "POST",
       "category": "headless",
       "params": [],
-      "description": "Close the currently open project"
+      "description": "Close the currently open project. Remaining lock files are reported; a successful close should leave the project openable."
     },
     {
       "path": "/compare_programs_documentation",
@@ -606,9 +607,10 @@
       "category": "headless",
       "params": [
         "parentDir",
-        "name"
+        "name",
+        "repo"
       ],
-      "description": "Create a new Ghidra project"
+      "description": "Create a new Ghidra project. Pass repo (after /server/connect) to create a server-bound shared project instead of a local-only one."
     },
     {
       "path": "/create_property_map",
@@ -1557,9 +1559,10 @@
         "project_folder",
         "language",
         "compiler_spec",
+        "format",
         "auto_analyze"
       ],
-      "description": "Import a binary file from disk into the current Ghidra project and open it. For raw firmware binaries, specify language (e.g. 'ARM:LE:32:Cortex') and optionally compiler_spec (e.g. 'default')."
+      "description": "Import a binary file from disk into the current Ghidra project and open it. format and language are independent: omit both to auto-detect; pass language to pin the processor while keeping ELF/PE/Mach-O layout; pass format=binary for raw firmware."
     },
     {
       "path": "/import_program",
@@ -1897,9 +1900,11 @@
       "params": [
         "file",
         "language",
-        "compiler_spec"
+        "compiler_spec",
+        "format",
+        "force_reimport"
       ],
-      "description": "Load a binary file into the headless server for analysis. For raw firmware (no recognizable header), pass `language` (e.g. 'ARM:LE:32:Cortex') and optionally `compiler_spec` (e.g. 'default'); the file is then imported as raw binary with the requested processor. When `language` is omitted, the loader auto-detects the format."
+      "description": "Load a binary file into the headless server for analysis. format and language are independent (matching the GUI import dialog). Omit both to auto-detect. Pass language alone to pin the processor while keeping the file's container format (ELF/PE/Mach-O). Pass format=binary to force a raw load of a headerless image. force_reimport replaces an existing same-named project file instead of silently reopening it."
     },
     {
       "path": "/load_program_from_project",
@@ -2063,6 +2068,13 @@
         "program"
       ],
       "description": "Replace a structure in one step: optionally remove an existing same-named type, then create with fields JSON (same shape as create_struct). Use when resize_struct cannot apply or you are rebuilding layout from get_struct_layout export. Set force=true to delete a non-stub type that is not referenced."
+    },
+    {
+      "path": "/refresh_project",
+      "method": "POST",
+      "category": "headless",
+      "params": [],
+      "description": "Close open programs and resync the open project's DomainFiles with the bound Ghidra Server repository. Use after the repository changes structurally or after copying a .gpr whose DomainFiles are stale."
     },
     {
       "path": "/remove_function_tag",
@@ -2364,9 +2376,10 @@
       "category": "server",
       "params": [
         "repo",
-        "path"
+        "path",
+        "dry_run"
       ],
-      "description": "Terminate all checkouts in a folder recursively"
+      "description": "Terminate all checkouts in a folder recursively. dry_run previews without terminating."
     },
     {
       "path": "/server/admin/terminate_checkout",
@@ -2376,9 +2389,10 @@
         "repo",
         "path",
         "checkoutId",
-        "checkout_id"
+        "checkout_id",
+        "dry_run"
       ],
-      "description": "Terminate all checkouts on a single file"
+      "description": "Terminate checkouts on a single file. checkout_id is required for the RMI admin path and is not defaulted to 0. dry_run previews without terminating."
     },
     {
       "path": "/server/admin/users",
@@ -2402,9 +2416,10 @@
       "method": "GET",
       "category": "server",
       "params": [
-        "path"
+        "path",
+        "repo"
       ],
-      "description": "List all checked-out files in a folder, including server-side checkouts"
+      "description": "List checked-out files. With an open project, walks DomainFiles (and server-side checkouts on those files). Pass repo when no project is open."
     },
     {
       "path": "/server/connect",
@@ -2474,9 +2489,11 @@
         "repo",
         "path",
         "comment",
-        "keepCheckedOut"
+        "keepCheckedOut",
+        "keep_checked_out",
+        "dry_run"
       ],
-      "description": "Add a file to version control"
+      "description": "Add a DomainFile in the open shared project to version control via DomainFile.addToVersionControl. dry_run previews without adding."
     },
     {
       "path": "/server/version_control/checkin",
@@ -2486,9 +2503,10 @@
         "repo",
         "path",
         "comment",
-        "keepCheckedOut"
+        "keepCheckedOut",
+        "dry_run"
       ],
-      "description": "Check in a version-controlled file"
+      "description": "Check in a version-controlled file through the open project's DomainFile (same path as checkin_program on the headless server)."
     },
     {
       "path": "/server/version_control/checkout",
@@ -2496,9 +2514,11 @@
       "category": "server",
       "params": [
         "repo",
-        "path"
+        "path",
+        "exclusive",
+        "dry_run"
       ],
-      "description": "Check out a version-controlled file"
+      "description": "Check out a version-controlled DomainFile in the open project. Refuses if the file is unversioned or hijacked so a server-side checkout cannot orphan the local copy."
     },
     {
       "path": "/server/version_control/undo_checkout",
@@ -2506,9 +2526,11 @@
       "category": "server",
       "params": [
         "repo",
-        "path"
+        "path",
+        "keep",
+        "dry_run"
       ],
-      "description": "Undo a file checkout"
+      "description": "Undo a file checkout via DomainFile.undoCheckout on the open project."
     },
     {
       "path": "/server/version_history",
@@ -2719,6 +2741,17 @@
       "category": "utility",
       "params": [],
       "description": "List all running Ghidra tool windows"
+    },
+    {
+      "path": "/upload_file",
+      "method": "POST",
+      "category": "headless",
+      "params": [
+        "filename",
+        "content_base64",
+        "overwrite"
+      ],
+      "description": "Write a local file into GHIDRA_MCP_FILE_ROOT/uploads/ so a subsequent import_file can load it with no host-filesystem access. Mutually exclusive with GHIDRA_MCP_ALLOW_SCRIPTS (upload plus script execution is arbitrary code execution). filename is a name, not a path: separators and '..' are rejected. Requires FILE_ROOT."
     },
     {
       "path": "/validate_data_type",

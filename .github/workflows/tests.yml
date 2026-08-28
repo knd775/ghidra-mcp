@@ -5,6 +5,10 @@ on:
     branches: [ main, dev, develop ]
   pull_request:
     branches: [ main, dev, develop ]
+  # GITHUB_TOKEN pushes do not start pull_request/push workflows. After the
+  # sync job commits onto a PR branch, it dispatches this workflow on that
+  # ref so the rewritten commit is the one that can merge.
+  workflow_dispatch:
 
 # OSSF Scorecard Token-Permissions: default to read-only so any job
 # without an explicit permissions block can only read repo contents.
@@ -14,6 +18,54 @@ permissions:
   contents: read
 
 jobs:
+  # Same-repo PRs: rewrite derived docs onto the PR branch so the merge
+  # commit is already correct. Never writes to main after merge.
+  sync-generated-docs:
+    name: Sync generated docs onto the PR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      pushed: ${{ steps.commit.outputs.pushed }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+      with:
+        ref: ${{ github.head_ref }}
+        persist-credentials: true
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      with:
+        enable-cache: true
+
+    - name: Rewrite derived docs
+      run: uv run python -m tools.sync_generated_docs --write
+
+    - name: Commit onto the PR branch if the catalog changed derived docs
+      id: commit
+      run: |
+        echo "pushed=false" >> "$GITHUB_OUTPUT"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -- README.md CLAUDE.md AGENTS.md \
+          src/main/resources/extension.properties \
+          src/main/resources/META-INF/MANIFEST.MF
+        if git diff --cached --quiet; then
+          echo "Generated docs already match the catalog."
+          exit 0
+        fi
+        git commit -m "chore: sync generated docs from endpoint catalog"
+        git push origin "HEAD:${{ github.head_ref }}"
+        echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+    - name: Run Tests on the rewritten commit
+      if: steps.commit.outputs.pushed == 'true'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh workflow run tests.yml --ref "${{ github.head_ref }}"
+
   java-build:
     name: Java Build (Maven)
     runs-on: ubuntu-latest
@@ -153,6 +205,14 @@ jobs:
   python-tests:
     name: Python Tests (pytest)
     runs-on: ubuntu-latest
+    needs: [sync-generated-docs]
+    if: |
+      always()
+      && needs.sync-generated-docs.result != 'cancelled'
+      && (
+        needs.sync-generated-docs.result == 'skipped'
+        || (needs.sync-generated-docs.result == 'success' && needs.sync-generated-docs.outputs.pushed != 'true')
+      )
     strategy:
       matrix:
         python-version: [ '3.10', '3.11', '3.12', '3.13' ]
@@ -196,6 +256,14 @@ jobs:
     # so both sides of every `os.name == "nt"` branch run on each PR.
     name: Python Tests (pytest, Windows)
     runs-on: windows-latest
+    needs: [sync-generated-docs]
+    if: |
+      always()
+      && needs.sync-generated-docs.result != 'cancelled'
+      && (
+        needs.sync-generated-docs.result == 'skipped'
+        || (needs.sync-generated-docs.result == 'success' && needs.sync-generated-docs.outputs.pushed != 'true')
+      )
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
@@ -282,12 +350,16 @@ jobs:
   build-status:
     name: Build Status
     runs-on: ubuntu-latest
-    needs: [ java-build, python-tests, python-tests-windows, pester-tests ]
+    needs: [sync-generated-docs, java-build, python-tests, python-tests-windows, pester-tests]
     if: always()
 
     steps:
     - name: Report Status
       run: |
+        if [ "${{ needs.sync-generated-docs.outputs.pushed }}" = "true" ]; then
+          echo "Generated docs were committed onto the PR branch. The follow-up Tests run on that commit is the merge gate."
+          exit 0
+        fi
         if [ "${{ needs.java-build.result }}" = "success" ] && [ "${{ needs.python-tests.result }}" = "success" ] && [ "${{ needs.python-tests-windows.result }}" = "success" ] && [ "${{ needs.pester-tests.result }}" = "success" ]; then
           echo "✅ All tests passed"
           exit 0

@@ -54,10 +54,22 @@ public final class SecurityConfig {
      * {@code Content-Length} otherwise lets {@code readAllBytes()} grow
      * unbounded). Generous enough for the largest legitimate batch operations
      * (thousands of rename/comment entries) while stopping a multi-GB
-     * allocation DoS. Bodies carry JSON metadata only — file imports pass a
-     * path, not file bytes — so 64 MiB is comfortably above real usage.
+     * allocation DoS. Most bodies carry JSON metadata only (file imports pass a
+     * path, not file bytes), so 64 MiB is comfortably above real usage.
+     * {@code /upload_file} is the exception: its decoded payload is capped
+     * separately by {@link #DEFAULT_MAX_UPLOAD_BYTES} /
+     * {@code GHIDRA_MCP_MAX_UPLOAD_BYTES}.
      */
     public static final long MAX_REQUEST_BODY_BYTES = 64L * 1024 * 1024;
+
+    /**
+     * Default decoded-size ceiling for {@code /upload_file}. Separate from
+     * {@link #MAX_REQUEST_BODY_BYTES}: that cap is for JSON metadata, and its
+     * javadoc is explicit that file imports pass a path, not file bytes.
+     * 16 MiB decoded is ample for firmware; override with
+     * {@code GHIDRA_MCP_MAX_UPLOAD_BYTES}.
+     */
+    public static final long DEFAULT_MAX_UPLOAD_BYTES = 16L * 1024 * 1024;
 
     /**
      * True when a {@code Content-Length} header value parses to a size over
@@ -66,9 +78,16 @@ public final class SecurityConfig {
      * fast-reject for honest clients that declare an oversized body.
      */
     public static boolean exceedsMaxBody(String contentLengthHeader) {
+        return exceedsMaxBody(contentLengthHeader, MAX_REQUEST_BODY_BYTES);
+    }
+
+    /**
+     * Same as {@link #exceedsMaxBody(String)} against an arbitrary byte limit.
+     */
+    public static boolean exceedsMaxBody(String contentLengthHeader, long limit) {
         if (contentLengthHeader == null) return false;
         try {
-            return Long.parseLong(contentLengthHeader.trim()) > MAX_REQUEST_BODY_BYTES;
+            return Long.parseLong(contentLengthHeader.trim()) > limit;
         } catch (NumberFormatException e) {
             return false;
         }
@@ -79,6 +98,7 @@ public final class SecurityConfig {
     private final String fileRoot;       // null if disabled
     private final Path fileRootCanonical;
     private final String projectFolderScope; // null = no enforcement (default)
+    private final long maxUploadBytes;
 
     private SecurityConfig() {
         String rawToken = System.getenv("GHIDRA_MCP_AUTH_TOKEN");
@@ -123,6 +143,21 @@ public final class SecurityConfig {
             this.projectFolderScope = trimmed.isEmpty() ? null : trimmed;
         } else {
             this.projectFolderScope = null;
+        }
+
+        this.maxUploadBytes = parsePositiveLong(
+            System.getenv("GHIDRA_MCP_MAX_UPLOAD_BYTES"), DEFAULT_MAX_UPLOAD_BYTES);
+    }
+
+    private static long parsePositiveLong(String raw, long fallback) {
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            long v = Long.parseLong(raw.trim());
+            return v > 0 ? v : fallback;
+        } catch (NumberFormatException e) {
+            return fallback;
         }
     }
 
@@ -218,6 +253,11 @@ public final class SecurityConfig {
 
     public String getFileRoot() {
         return fileRoot;
+    }
+
+    /** Decoded-size ceiling for {@code /upload_file}, in bytes. */
+    public long getMaxUploadBytes() {
+        return maxUploadBytes;
     }
 
     /**

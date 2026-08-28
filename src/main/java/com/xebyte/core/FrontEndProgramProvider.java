@@ -676,4 +676,14 @@ public class FrontEndProgramProvider implements ProgramProvider {
     public PluginTool getTool() {
         return tool;
     }
+
+    @Override
+    public Project getProject() {
+        return tool != null ? tool.getProject() : null;
+    }
+
+    @Override
+    public Program openProjectFile(String path) throws Exception {
+        return openFromProject(path);
+    }
 }

@@ -102,7 +102,12 @@ class TestVersionConsistency(unittest.TestCase):
                     f"VersionInfo VERSION={match.group(1)} != pom.xml {pom_version}")
 
     def test_user_visible_tool_counts_match_endpoint_catalog(self):
-        """Marketing/extension metadata should not drift from endpoints.json."""
+        """Marketing/extension metadata should not drift from endpoints.json.
+
+        Same-repo PRs get these rewritten onto the PR branch by the
+        sync-generated-docs job in tests.yml before merge. The check stays
+        a merge gate so main never lands stale.
+        """
         expected = json.loads(ENDPOINTS_JSON.read_text(encoding="utf-8"))["total_endpoints"]
         checks = {
             "README.md": PROJECT_ROOT / "README.md",
@@ -120,12 +125,18 @@ class TestVersionConsistency(unittest.TestCase):
                     mismatches.append(f"{name}: {found} != {expected}")
         self.assertEqual(mismatches, [])
 
+    def test_readme_has_generated_api_reference_markers(self):
+        from tools.gen_readme_api_reference import BEGIN_MARKER, END_MARKER
+
+        text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(BEGIN_MARKER, text)
+        self.assertIn(END_MARKER, text)
+
     def test_readme_api_reference_matches_endpoint_catalog(self):
         """README's API Reference section is generated from endpoints.json.
 
-        Any @McpTool addition that passes EndpointsJsonParityTest must also
-        refresh the README listing:
-            python -m tools.gen_readme_api_reference --write
+        Same-repo PRs get this block rewritten onto the PR branch by CI.
+        The check is a merge gate so a stale listing cannot reach main.
         """
         from tools.gen_readme_api_reference import readme_section, render_api_reference
 
@@ -133,8 +144,9 @@ class TestVersionConsistency(unittest.TestCase):
         self.assertEqual(
             readme_section(readme_text),
             render_api_reference(),
-            "README API Reference is stale — run "
-            "'python -m tools.gen_readme_api_reference --write'",
+            "README API Reference is stale. Same-repo CI rewrites it onto the "
+            "PR branch (tests.yml job sync-generated-docs). Fork PRs must "
+            "include the rewrite: python -m tools.sync_generated_docs --write",
         )
 
 

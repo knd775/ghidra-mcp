@@ -127,6 +127,11 @@ class TestEndpointsJson(unittest.TestCase):
         self.assertEqual(len(paths), len(set(paths)), "Duplicate paths in endpoints.json")
 
     @unittest.skipUnless(ENDPOINTS_JSON.exists(), "endpoints.json not found")
+    def test_total_endpoints_matches_array_length(self):
+        data = json.loads(ENDPOINTS_JSON.read_text(encoding="utf-8"))
+        self.assertEqual(data["total_endpoints"], len(data["endpoints"]))
+
+    @unittest.skipUnless(ENDPOINTS_JSON.exists(), "endpoints.json not found")
     def test_endpoints_have_required_fields(self):
         data = json.loads(ENDPOINTS_JSON.read_text(encoding="utf-8"))
         for ep in data.get("endpoints", []):

@@ -5,7 +5,12 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
 import java.io.File;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.util.Base64;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,16 +38,22 @@ public class HeadlessManagementService {
 
     @McpTool(path = "/load_program", method = "POST",
             description = "Load a binary file into the headless server for analysis. "
-                + "For raw firmware (no recognizable header), pass `language` (e.g. 'ARM:LE:32:Cortex') "
-                + "and optionally `compiler_spec` (e.g. 'default'); the file is then imported as raw binary "
-                + "with the requested processor. When `language` is omitted, the loader auto-detects the format.",
+                + "format and language are independent (matching the GUI import dialog). "
+                + "Omit both to auto-detect. Pass language alone to pin the processor while "
+                + "keeping the file's container format (ELF/PE/Mach-O). Pass format=binary "
+                + "to force a raw load of a headerless image. force_reimport replaces an "
+                + "existing same-named project file instead of silently reopening it.",
             category = "headless")
     public Response loadProgram(
             @Param(value = "file", source = ParamSource.BODY, description = "Absolute path to the binary file") String filePath,
             @Param(value = "language", source = ParamSource.BODY, defaultValue = "",
-                description = "Optional Ghidra language ID for raw binaries (e.g. 'ARM:LE:32:Cortex', 'x86:LE:64:default'). Leave empty to auto-detect.") String languageId,
+                description = "Optional Ghidra language ID (e.g. 'ARM:LE:32:Cortex'). Pins the processor without forcing a raw load unless format=binary.") String languageId,
             @Param(value = "compiler_spec", source = ParamSource.BODY, defaultValue = "",
-                description = "Optional compiler-spec ID (e.g. 'default', 'gcc', 'windows'). Only consulted when `language` is set; falls back to the language default when empty.") String compilerSpecId) {
+                description = "Optional compiler-spec ID (e.g. 'default', 'gcc', 'windows'). Only consulted when `language` is set; falls back to the language default when empty.") String compilerSpecId,
+            @Param(value = "format", source = ParamSource.BODY, defaultValue = "",
+                description = "Optional loader: omit for auto-detect / language-pinned container load; 'binary' for raw (headerless) firmware.") String format,
+            @Param(value = "force_reimport", source = ParamSource.BODY, defaultValue = "false",
+                description = "Replace an existing same-named program in the project instead of reopening it.") boolean forceReimport) {
         if (filePath == null || filePath.isEmpty()) {
             return Response.err("file path required");
         }
@@ -71,19 +82,29 @@ public class HeadlessManagementService {
         // the non-empty check but fails lookup with a confusing message).
         String normalizedLanguageId = (languageId == null) ? "" : languageId.trim();
         String normalizedCompilerSpecId = (compilerSpecId == null) ? "" : compilerSpecId.trim();
-        boolean hasLanguage = !normalizedLanguageId.isEmpty();
-        Program program = hasLanguage
-            ? programProvider.loadProgramFromFileWithLanguage(file, normalizedLanguageId, normalizedCompilerSpecId)
-            : programProvider.loadProgramFromFile(file);
-        if (program != null) {
+        String normalizedFormat = (format == null) ? "" : format.trim();
+        ProgramImporter.Result loaded = programProvider.loadFromFilesystem(
+            file, normalizedLanguageId, normalizedCompilerSpecId, normalizedFormat, forceReimport);
+        if (loaded.success()) {
+            Program program = loaded.program;
             String langOut = program.getLanguageID() != null
                 ? program.getLanguageID().getIdAsString() : "";
+            String formatOut = program.getExecutableFormat() != null
+                ? program.getExecutableFormat() : "";
+            String imageBase = program.getImageBase() != null
+                ? "0x" + program.getImageBase() : "";
             return Response.ok(JsonHelper.mapOf(
                 "success", true,
                 "program", program.getName(),
-                "language", langOut));
+                "language", langOut,
+                "executable_format", formatOut,
+                "image_base", imageBase,
+                "function_count", program.getFunctionManager().getFunctionCount()));
         }
-        if (hasLanguage) {
+        if (loaded.error != null && !loaded.error.isBlank()) {
+            return Response.err(loaded.error);
+        }
+        if (!normalizedLanguageId.isEmpty()) {
             return Response.err("Failed to load program with language '" + normalizedLanguageId
                 + "' from: " + filePath);
         }
@@ -118,24 +139,50 @@ public class HeadlessManagementService {
     // Project management
     // ========================================================================
 
-    @McpTool(path = "/create_project", method = "POST", description = "Create a new Ghidra project", category = "headless")
+    @McpTool(path = "/create_project", method = "POST",
+            description = "Create a new Ghidra project. Pass repo (and connect first) to create a "
+                + "server-bound shared project instead of copying a .gpr from another account.",
+            category = "headless")
     public Response createProject(
             @Param(value = "parentDir", source = ParamSource.BODY) String parentDir,
-            @Param(value = "name", source = ParamSource.BODY) String name) {
+            @Param(value = "name", source = ParamSource.BODY) String name,
+            @Param(value = "repo", source = ParamSource.BODY, defaultValue = "",
+                description = "Optional repository name on the connected Ghidra Server. "
+                    + "When set, the project is created shared (bound to that repo) rather than local-only.")
+                String repo) {
         if (parentDir == null || parentDir.isEmpty()) return Response.err("parentDir required");
         if (name == null || name.isEmpty()) return Response.err("name required");
         File parent = resolveWithinRootOrLog(parentDir, "/create_project");
         if (parent == null) return Response.err(FILE_ROOT_DENY);
         parentDir = parent.getPath();
         try {
-            boolean ok = programProvider.createProject(parentDir, name);
-            if (ok) {
-                return Response.ok(JsonHelper.mapOf(
-                    "success", true,
-                    "name", name,
-                    "path", parentDir + "/" + name));
+            ghidra.framework.client.RepositoryAdapter repository = null;
+            if (repo != null && !repo.isBlank()) {
+                if (!serverManager.isConnected()) {
+                    return Response.err("Not connected to server. Call /server/connect before "
+                        + "creating a shared project.");
+                }
+                try {
+                    repository = serverManager.openRepository(repo.trim());
+                } catch (Exception e) {
+                    return Response.err("Cannot open repository '" + repo + "': " + e.getMessage());
+                }
             }
-            return Response.err("Failed to create project");
+            HeadlessProgramProvider.CreateProjectResult created =
+                programProvider.createProject(parentDir, name, repository);
+            if (!created.success) {
+                return Response.err(created.error != null ? created.error : "Failed to create project");
+            }
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("success", true);
+            body.put("name", created.name);
+            body.put("path", created.path);
+            body.put("project_server_bound", created.serverBound);
+            if (created.repoName != null) {
+                body.put("server_repo", created.repoName);
+            }
+            body.putAll(GhidraIdentity.describe());
+            return Response.ok(body);
         } catch (Exception e) {
             return Response.err(e.getMessage());
         }
@@ -147,11 +194,31 @@ public class HeadlessManagementService {
         if (projectPath == null || projectPath.isEmpty()) {
             return Response.err("Project path required");
         }
-        boolean success = programProvider.openProject(projectPath);
-        if (success) {
-            return Response.ok(JsonHelper.mapOf("success", true, "project", programProvider.getProjectName()));
+        HeadlessProgramProvider.OpenProjectResult opened = programProvider.openProjectDetailed(projectPath);
+        if (opened.success) {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("success", true);
+            body.put("project", opened.projectName);
+            if (opened.identity != null) {
+                body.putAll(opened.identity);
+            }
+            if (opened.checkoutIdentityWarnings != null && !opened.checkoutIdentityWarnings.isEmpty()) {
+                body.put("checkout_identity_warnings", opened.checkoutIdentityWarnings);
+            }
+            HeadlessProgramProvider.ServerBindingInfo binding = programProvider.getProjectServerInfo();
+            if (binding != null) {
+                body.put("project_server_bound", binding.serverBound);
+                if (binding.serverBound) {
+                    body.put("server_repo", binding.repoName);
+                }
+            }
+            return Response.ok(body);
         }
-        return Response.err("Failed to open project: " + projectPath);
+        String status = (opened.lockFiles != null && !opened.lockFiles.isEmpty())
+            ? "stale_lock" : null;
+        return Response.err(
+            opened.error != null ? opened.error : "Failed to open project: " + projectPath,
+            status);
     }
 
     @McpTool(path = "/close_project", method = "POST", description = "Close the currently open project", category = "headless")
@@ -160,8 +227,17 @@ public class HeadlessManagementService {
             return Response.err("No project currently open");
         }
         String projectName = programProvider.getProjectName();
-        programProvider.closeProject();
-        return Response.ok(JsonHelper.mapOf("success", true, "closed", projectName));
+        HeadlessProgramProvider.CloseProjectResult closed = programProvider.closeProjectDetailed();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("success", closed.success);
+        body.put("closed", projectName);
+        body.put("openable", closed.openable);
+        if (closed.remainingLocks != null && !closed.remainingLocks.isEmpty()) {
+            body.put("remaining_lock_files", closed.remainingLocks);
+            body.put("warning", "Close left lock files behind. The next open_project will fail until they are deleted: "
+                + String.join(", ", closed.remainingLocks));
+        }
+        return Response.ok(body);
     }
 
     @McpTool(path = "/load_program_from_project", method = "POST", description = "Load a program from the open project. Returns structured diagnostics on failure (available paths, server-binding state) so the operator can tell server-side-checkout-but-not-shared from path-typo from server-unreachable. See discussion #119.", category = "headless")
@@ -218,12 +294,14 @@ public class HeadlessManagementService {
     public Response checkinProgram(
             @Param(value = "path", source = ParamSource.BODY, description = "Project path of the file (e.g. '/scratch/writetest'); empty uses the current program") String path,
             @Param(value = "comment", source = ParamSource.BODY, description = "Checkin comment") String comment,
-            @Param(value = "keep_checked_out", source = ParamSource.BODY, defaultValue = "false", description = "Keep the file checked out after the new version lands") boolean keepCheckedOut) {
+            @Param(value = "keep_checked_out", source = ParamSource.BODY, defaultValue = "false", description = "Keep the file checked out after the new version lands") boolean keepCheckedOut,
+            @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "false",
+                description = "Preview the check-in without saving or creating a new version") boolean dryRun) {
         if (!programProvider.hasProject()) {
             return Response.err("No project open. Call /open_project first.");
         }
-        Map<String, Object> res = programProvider.checkinProgram(path, comment, keepCheckedOut);
-        return Response.ok(res);
+        Map<String, Object> res = programProvider.checkinProgram(path, comment, keepCheckedOut, dryRun);
+        return fromVc(res);
     }
 
     @McpTool(path = "/get_project_info", description = "Get info about the currently open project, including server-binding state. A shared (server-bound) project is required for /server/version_control/checkout to deliver content the headless can open; if `project_server_bound` is false, the open project is local-only.", category = "headless")
@@ -250,6 +328,12 @@ public class HeadlessManagementService {
                 info.put("server", binding.serverInfo);
                 info.put("server_repo", binding.repoName);
             }
+        }
+        info.putAll(GhidraIdentity.describe());
+        List<Map<String, Object>> checkoutWarnings =
+            ProjectVersionControl.checkoutIdentityWarnings(programProvider.getProject());
+        if (!checkoutWarnings.isEmpty()) {
+            info.put("checkout_identity_warnings", checkoutWarnings);
         }
         return Response.ok(info);
     }
@@ -441,5 +525,149 @@ public class HeadlessManagementService {
     @McpTool(path = "/server/status", description = "Check headless server connection status", category = "headless")
     public Response serverStatus() {
         return Response.text(serverManager.getStatus());
+    }
+
+    @McpTool(path = "/server/version_control/add", method = "POST",
+            description = "Add a DomainFile in the open shared project to version control. "
+                + "Requires an open server-bound project. Returns the new version number and "
+                + "checkout state. Errors (does not no-op) if the file is already versioned, "
+                + "the path is missing, no project is open, or the project is local-only.",
+            category = "server")
+    public Response addToVersionControl(
+            @Param(value = "path", source = ParamSource.BODY,
+                description = "Project DomainFile path, e.g. /nullcog.elf") String path,
+            @Param(value = "comment", source = ParamSource.BODY, defaultValue = "",
+                description = "Initial version comment") String comment,
+            @Param(value = "keep_checked_out", source = ParamSource.BODY, defaultValue = "false",
+                aliases = {"keepCheckedOut"},
+                description = "Keep the file checked out after adding it") boolean keepCheckedOut,
+            @Param(value = "repo", source = ParamSource.BODY, defaultValue = "",
+                description = "Ignored; the open project's repository is used. Accepted for compatibility.") String repo,
+            @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "false",
+                description = "Preview the add without changing version-control state") boolean dryRun) {
+        Map<String, Object> res = programProvider.addToVersionControl(path, comment, keepCheckedOut, dryRun);
+        return fromVc(res);
+    }
+
+    @McpTool(path = "/refresh_project", method = "POST",
+            description = "Close open programs and resync the open project's DomainFiles with the "
+                + "bound Ghidra Server repository. Use after the repository changes structurally "
+                + "(file deleted and re-added) or after copying a .gpr whose DomainFiles are stale.",
+            category = "headless")
+    public Response refreshProject() {
+        return fromVc(programProvider.refreshProject());
+    }
+
+    private static Response fromVc(Map<String, Object> res) {
+        if (res == null) {
+            return Response.err("No result");
+        }
+        if (Boolean.FALSE.equals(res.get("success"))) {
+            String error = String.valueOf(res.get("error"));
+            Object status = res.get("status");
+            if (status instanceof String s && !s.isBlank()) {
+                return Response.err(error, s);
+            }
+            return Response.err(error);
+        }
+        return Response.ok(res);
+    }
+
+    @McpTool(path = "/upload_file", method = "POST",
+            description = "Write a local file into GHIDRA_MCP_FILE_ROOT/uploads/ so a subsequent "
+                + "import_file can load it with no host-filesystem access. Mutually exclusive with "
+                + "GHIDRA_MCP_ALLOW_SCRIPTS (upload plus script execution is arbitrary code execution). "
+                + "filename is a name, not a path: separators and '..' are rejected. Requires FILE_ROOT.",
+            category = "headless")
+    public Response uploadFile(
+            @Param(value = "filename", source = ParamSource.BODY,
+                description = "Destination filename (no path separators or '..')") String filename,
+            @Param(value = "content_base64", source = ParamSource.BODY,
+                description = "File bytes, base64-encoded") String contentBase64,
+            @Param(value = "overwrite", source = ParamSource.BODY, defaultValue = "false",
+                description = "Replace an existing file. Always refused if that file is open as a program.") boolean overwrite) {
+        SecurityConfig security = SecurityConfig.getInstance();
+        if (security.areScriptsAllowed()) {
+            return Response.err("upload_file is disabled while GHIDRA_MCP_ALLOW_SCRIPTS is enabled: "
+                + "upload plus script execution is arbitrary code execution on the host");
+        }
+        if (!security.hasFileRoot()) {
+            return Response.err("upload_file requires GHIDRA_MCP_FILE_ROOT so uploads stay confined "
+                + "to <root>/uploads/");
+        }
+        String nameError = HeadlessPaths.validateFilename(filename);
+        if (nameError != null) {
+            return Response.err("invalid filename: " + nameError);
+        }
+        if (contentBase64 == null || contentBase64.isEmpty()) {
+            return Response.err("content_base64 is required");
+        }
+
+        byte[] bytes;
+        try {
+            String stripped = contentBase64.replaceAll("\\s+", "");
+            bytes = Base64.getDecoder().decode(stripped);
+        } catch (IllegalArgumentException e) {
+            return Response.err("content_base64 is not valid base64");
+        }
+        if (bytes.length > security.getMaxUploadBytes()) {
+            return Response.err("Upload exceeds maximum of " + security.getMaxUploadBytes()
+                + " bytes (GHIDRA_MCP_MAX_UPLOAD_BYTES)");
+        }
+
+        Path dest = security.resolveWithinFileRoot(
+            Path.of(security.getFileRoot(), "uploads", filename).toString());
+        if (dest == null) {
+            return Response.err("Access denied: path is outside the configured file root");
+        }
+
+        if (isOpenProgramFile(dest)) {
+            return Response.err("Cannot overwrite a file currently open as a program: " + dest);
+        }
+        if (Files.exists(dest) && !overwrite) {
+            return Response.err("File already exists: " + dest + " (pass overwrite=true to replace)");
+        }
+
+        try {
+            Files.createDirectories(dest.getParent());
+            if (overwrite) {
+                Files.write(dest, bytes, StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            } else {
+                Files.write(dest, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            }
+            String sha256 = HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(bytes));
+            return Response.ok(JsonHelper.mapOf(
+                "path", dest.toString(),
+                "bytes_written", bytes.length,
+                "sha256", sha256));
+        } catch (Exception e) {
+            return Response.err("Upload failed: "
+                + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
+    }
+
+    private boolean isOpenProgramFile(Path dest) {
+        Path canonical;
+        try {
+            canonical = dest.toAbsolutePath().normalize();
+        } catch (Exception e) {
+            return false;
+        }
+        for (Program program : programProvider.getAllOpenPrograms()) {
+            String exec = program.getExecutablePath();
+            if (exec == null || exec.isBlank()) {
+                continue;
+            }
+            try {
+                if (Path.of(exec).toAbsolutePath().normalize().equals(canonical)) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // skip unparseable executable paths
+            }
+        }
+        return false;
     }
 }

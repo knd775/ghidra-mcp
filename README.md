@@ -22,13 +22,13 @@
 >
 > If Ghidra MCP saves you time, consider [sponsoring the project](https://github.com/sponsors/bethington). One-time and recurring support both help fund compatibility updates, production hardening, docs, and new tooling.
 
-A production-ready Model Context Protocol (MCP) server that bridges Ghidra's powerful reverse engineering capabilities with modern AI tools and automation frameworks. **253 MCP tools**, battle-tested AI workflows, and the most comprehensive Ghidra-MCP integration available — now including P-code emulation, live debugger integration, and PCode-graph data flow analysis.
+A production-ready Model Context Protocol (MCP) server that bridges Ghidra's powerful reverse engineering capabilities with modern AI tools and automation frameworks. **255 MCP tools**, battle-tested AI workflows, and the most comprehensive Ghidra-MCP integration available — now including P-code emulation, live debugger integration, and PCode-graph data flow analysis.
 
 ## Why Ghidra MCP?
 
 Most Ghidra MCP implementations give you a handful of read-only tools and call it a day. This project is different — it was built by a reverse engineer who uses it daily on real binaries, not as a demo.
 
-- **253 MCP tools** — 3x more than any competing implementation. Not just read operations — full write access for renaming, typing, commenting, structure creation, script execution, P-code emulation, and live debugging.
+- **255 MCP tools** — 3x more than any competing implementation. Not just read operations — full write access for renaming, typing, commenting, structure creation, script execution, P-code emulation, and live debugging.
 - **Battle-tested AI workflows** — Proven documentation workflows (V5) refined across hundreds of functions. Includes step-by-step prompts, Hungarian notation reference, batch processing guides, and orphaned code discovery.
 - **Production-grade reliability** — Atomic transactions, batch operations (93% API call reduction), configurable timeouts, and graceful error handling. No silent failures.
 - **Cross-binary documentation transfer** — SHA-256 function hash matching propagates documentation across binary versions automatically. Document once, apply everywhere.
@@ -58,7 +58,7 @@ v5.0 moves conventions from "things to remember" into the tool layer, where they
 
 ### Core MCP Integration
 - **Full MCP Compatibility** — Complete implementation of Model Context Protocol
-- **253 MCP tools** — Comprehensive API surface covering every aspect of binary analysis
+- **255 MCP tools** — Comprehensive API surface covering every aspect of binary analysis
 - **Production-Ready Reliability** — Atomic transactions, batch operations, configurable timeouts
 - **Real-time Analysis** — Live integration with Ghidra's analysis engine
 
@@ -448,13 +448,14 @@ If Ghidra MCP saves you engineering or reverse-engineering time, consider [spons
 
 GhidraMCP is designed for **localhost-only development**. The default configuration — HTTP server bound to `127.0.0.1`, no authentication — is safe on a trusted single-user workstation and matches pre-v5.4.1 behavior.
 
-**If you expose the server beyond loopback, configure these three environment variables first.** The server refuses to start on a non-loopback bind without a token.
+**If you expose the server beyond loopback, configure `GHIDRA_MCP_AUTH_TOKEN` first.** The server refuses to start on a non-loopback bind without a token.
 
 | Env var | Effect |
 |---|---|
 | `GHIDRA_MCP_AUTH_TOKEN` | When set, every HTTP request must carry `Authorization: Bearer <token>`. Timing-safe comparison. `/mcp/health`, `/health`, `/check_connection` are exempt. |
-| `GHIDRA_MCP_ALLOW_SCRIPTS` | Set to `1`, `true`, or `yes` to enable `/run_script_inline` and `/run_ghidra_script`. **Off by default as of v5.4.1** — these endpoints execute arbitrary Java against the Ghidra process. In headless mode this also triggers OSGi `BundleHost` initialization at server startup (Felix framework, ~hundreds of ms); leave it off if you don't need script execution. |
-| `GHIDRA_MCP_FILE_ROOT` | When set to a directory path, filesystem-path endpoints (`/load_program`, `/import_file`, `/open_project`, `/delete_file`, etc.) canonicalize the input and require it to fall under this root. Prevents path-traversal. |
+| `GHIDRA_MCP_FILE_ROOT` | When set to a directory path, filesystem-path endpoints (`/load_program`, `/import_file`, `/open_project`, `/delete_file`, `/upload_file`, etc.) canonicalize the input and require it to fall under this root. Prevents path-traversal. `/upload_file` writes only to `<root>/uploads/`. |
+| `GHIDRA_MCP_MAX_UPLOAD_BYTES` | Decoded-size ceiling for `/upload_file` (default 16 MiB). Separate from the 64 MiB JSON request-body cap. |
+| `GHIDRA_MCP_ALLOW_SCRIPTS` | Set to `1`, `true`, or `yes` to enable `/run_script_inline` and `/run_ghidra_script`. **Off by default as of v5.4.1** — these endpoints execute arbitrary Java against the Ghidra process. In headless mode this also triggers OSGi `BundleHost` initialization at server startup (Felix framework, ~hundreds of ms); leave it off if you don't need script execution. **Mutually exclusive with `/upload_file`**: that endpoint refuses to serve while scripts are enabled. |
 
 Name-quality enforcement is separate from security. By default,
 `rename_function` and global write endpoints reject names that fail
@@ -466,7 +467,11 @@ Options checkbox covers `rename_symbol` (all symbol kinds),
 Hungarian prefix auto-fixes in `create_struct`, `add_struct_field`, and
 `modify_struct_field`. The setting is read when the MCP server starts or
 restarts. Function/global convention warnings are still returned when
-enforcement is disabled.
+enforcement is disabled. Function-name case is configurable
+(`function_naming.case_style` in `conventions.json`, or
+`GHIDRA_MCP_FUNCTION_CASE=pascal|snake|infer`) so C firmware with snake_case
+symbols is not warned into PascalCase. See
+[docs/prompts/CUSTOMIZING_CONVENTIONS.md](docs/prompts/CUSTOMIZING_CONVENTIONS.md).
 
 ### Example: exposing to a private LAN with auth
 
@@ -491,6 +496,15 @@ targets for a 12.1 client upgrade.
 3. `<ghidra-install-dir>/.ghidra-cred`
 
 Username resolves similarly: `GHIDRA_SERVER_USER` env var → `user.name` system property.
+
+`GHIDRA_SERVER_USER` is the RMI login. `GHIDRA_USER` (`-Duser.name`) is the
+identity Ghidra records on checkouts and compares at check-in. They must match.
+A copied `.gpr` keeps checkout ownership from the original account;
+`open_project` rewrites `project.prp` but does not transfer those checkouts.
+
+`GHIDRA_SERVER_HOST` must appear on the Ghidra Server TLS certificate SAN. A
+Compose service name that is not in the SAN fails with `(certificate_unknown)`
+and looks like a connection error, not a TLS one.
 
 If no password is found, Ghidra shows its normal GUI prompt. Set these in `.env` (see `.env.template` for the full block) to enable silent auth.
 
@@ -629,7 +643,7 @@ python -m tools.setup install-ghidra-deps --ghidra-path "C:\ghidra_12.1.2_PUBLIC
 
 <!-- BEGIN GENERATED API REFERENCE (tools/gen_readme_api_reference.py) -->
 
-253 MCP tools backed by HTTP endpoints, grouped by catalog category. Generated from [tests/endpoints.json](tests/endpoints.json) by `python -m tools.gen_readme_api_reference --write`; the live schema at `/mcp/schema` is authoritative at runtime. Usage patterns: [docs/prompts/TOOL_USAGE_GUIDE.md](docs/prompts/TOOL_USAGE_GUIDE.md).
+255 MCP tools backed by HTTP endpoints, grouped by catalog category. Generated from [tests/endpoints.json](tests/endpoints.json). Same-repo CI rewrites this block onto the PR before merge; the live schema at `/mcp/schema` is authoritative at runtime. Usage patterns: [docs/prompts/TOOL_USAGE_GUIDE.md](docs/prompts/TOOL_USAGE_GUIDE.md).
 
 ### Program & Session Management
 
@@ -684,8 +698,10 @@ Available on the standalone headless server (`GhidraMCPHeadlessServer`).
 - `load_program` - Load a binary file into the headless server for analysis
 - `load_program_from_project` - Load program from Ghidra project (headless)
 - `open_project` - Open an existing Ghidra project (.gpr file or directory)
+- `refresh_project` - Close open programs and resync the open project's DomainFiles with the bound Ghidra Server repository
 - `restore_project` - Restore a Ghidra .gar archive into a fresh on-disk project at `parent_dir/project_name`
 - `server_status` - Check headless server connection status
+- `upload_file` - Write a local file into GHIDRA_MCP_FILE_ROOT/uploads/ so a subsequent import_file can load it with no host-filesystem access
 
 ### Listing & Enumeration
 
@@ -904,20 +920,20 @@ Available on the standalone headless server (`GhidraMCPHeadlessServer`).
 
 - `server_admin_set_permissions` - Set user permissions on a repository
 - `server_admin_terminate_all_checkouts` - Terminate all checkouts in a folder recursively
-- `server_admin_terminate_checkout` - Terminate all checkouts on a single file
+- `server_admin_terminate_checkout` - Terminate checkouts on a single file
 - `server_admin_users` - List all users on the server
 - `server_authenticate` - Register server credentials for programmatic authentication
-- `server_checkouts` - List all checked-out files in a folder, including server-side checkouts
+- `server_checkouts` - List checked-out files
 - `server_connect` - Connect to a Ghidra server
 - `server_disconnect` - Disconnect from the Ghidra server
 - `server_repositories` - List repositories on the connected server
 - `server_repository_create` - Create a new repository on the server
 - `server_repository_file` - Get file info from a server repository
 - `server_repository_files` - List files in a server repository folder
-- `server_version_control_add` - Add a file to version control
-- `server_version_control_checkin` - Check in a version-controlled file
-- `server_version_control_checkout` - Check out a version-controlled file
-- `server_version_control_undo_checkout` - Undo a file checkout
+- `server_version_control_add` - Add a DomainFile in the open shared project to version control via DomainFile.addToVersionControl
+- `server_version_control_checkin` - Check in a version-controlled file through the open project's DomainFile (same path as checkin_program on the headless server)
+- `server_version_control_checkout` - Check out a version-controlled DomainFile in the open project
+- `server_version_control_undo_checkout` - Undo a file checkout via DomainFile.undoCheckout on the open project
 - `server_version_history` - Get version history for a file
 
 ### Debugger (Ghidra TraceRmi — GUI only)
@@ -1222,6 +1238,11 @@ Environment variables for Docker:
 - `GHIDRA_MCP_PORT` - Server port (default: 8089)
 - `GHIDRA_MCP_BIND_ADDRESS` - Bind address (default: 0.0.0.0 in Docker)
 - `JAVA_OPTS` - JVM options (default: -Xmx4g -XX:+UseG1GC)
+- `GHIDRA_USER` - Java `user.name` (checkout identity). Must match `GHIDRA_SERVER_USER`.
+- `GHIDRA_SERVER_HOST` - Must be a name on the Ghidra Server TLS certificate SAN. A Compose service name that is not in the SAN fails with `(certificate_unknown)` and looks like a connection error.
+- `GHIDRA_SERVER_USER` / `GHIDRA_SERVER_PASSWORD` - RMI login, not checkout identity
+
+`export_program` writes to `/data/exports` by default. `restore_project` uses `/data/ghidra_projects`. Both directories are created in the image and again at container start (a mounted empty `/data` volume hides the image mkdir).
 
 ## 🤝 Contributing
 

@@ -8,9 +8,10 @@ import junit.framework.TestCase;
 
 /**
  * Validation + guard coverage for ProgramScriptService (~2.3K LOC, previously only the
- * run-script propagation offline test). Exercises required-param guards, GUI-mode guards
- * (no PluginTool under the stub provider), and the script-execution security gate — all
- * before any program access, so they run offline.
+ * run-script propagation offline test). Exercises required-param guards, the
+ * no-project fail-closed path for project ops (which used to be GUI-only),
+ * and the script-execution security gate — all before any program access, so
+ * they run offline.
  */
 public class ProgramScriptServiceValidationTest extends TestCase {
 
@@ -41,16 +42,47 @@ public class ProgramScriptServiceValidationTest extends TestCase {
     }
 
     public void testImportFileRequiresFilePath() {
-        Response r = scripts.importFile("", "/", "", "", true);
+        Response r = scripts.importFile("", "/", "", "", "", true);
         assertTrue(r instanceof Response.Err);
         assertTrue(((Response.Err) r).message().contains("file_path is required"));
     }
 
-    public void testListProjectFilesRequiresGuiMode() {
-        // Stub provider exposes no PluginTool, so the GUI-only guard must fire.
+    public void testListProjectFilesRequiresOpenProject() {
         Response r = scripts.listProjectFiles("/");
         assertTrue(r instanceof Response.Err);
-        assertTrue(((Response.Err) r).message().contains("requires GUI mode"));
+        assertTrue(((Response.Err) r).message().contains("No project is currently open"));
+        assertFalse("must not be a GUI-only guard",
+            ((Response.Err) r).message().contains("GUI mode"));
+    }
+
+    public void testCreateFolderRequiresOpenProject() {
+        Response r = scripts.createFolder("/firmware", "");
+        assertTrue(r instanceof Response.Err);
+        assertTrue(((Response.Err) r).message().contains("No project is currently open"));
+    }
+
+    public void testDeleteFileRequiresOpenProject() {
+        Response r = scripts.deleteFile("/firmware/sample");
+        assertTrue(r instanceof Response.Err);
+        assertTrue(((Response.Err) r).message().contains("No project is currently open"));
+    }
+
+    public void testOpenProgramRequiresOpenProject() {
+        Response r = scripts.openProgramFromProject("/sample", false);
+        assertTrue(r instanceof Response.Err);
+        assertTrue(((Response.Err) r).message().contains("No project is currently open"));
+        assertFalse("must not be a GUI-only guard",
+            ((Response.Err) r).message().contains("GUI mode"));
+    }
+
+    public void testImportFileRequiresOpenProject() throws Exception {
+        java.io.File tmp = java.io.File.createTempFile("import", ".bin");
+        tmp.deleteOnExit();
+        Response r = scripts.importFile(tmp.getAbsolutePath(), "/", "", "", "", true);
+        assertTrue(r instanceof Response.Err);
+        assertTrue(((Response.Err) r).message().contains("No project is currently open"));
+        assertFalse("must not be a GUI-only guard",
+            ((Response.Err) r).message().contains("GUI mode"));
     }
 
     public void testRunScriptInlineGatedByDefault() {

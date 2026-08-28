@@ -184,6 +184,10 @@ Priority: Medium - helpful for malware analysis
    }
    ```
 
+   The README tool listing and user-visible "N MCP tools" counts are rewritten
+   onto same-repo PR branches by CI before merge. Fork PRs must include
+   `python -m tools.sync_generated_docs --write`.
+
 4. Add example in `examples/`:
    ```python
    # examples/use-new-tool.py

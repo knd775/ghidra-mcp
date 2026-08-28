@@ -848,7 +848,7 @@ public class FunctionService {
 
         String text = resultMsg.length() > 0 ? resultMsg.toString() : "Error: Unknown failure";
         if (success.get()) {
-            List<String> nameWarnings = new ArrayList<>(NamingConventions.validateFunctionName(newName, false));
+            List<String> nameWarnings = new ArrayList<>(NamingConventions.validateFunctionName(newName, false, program));
             nameWarnings.addAll(enforcementWarnings);
             Map<String, Object> data = JsonHelper.mapOf("status", "success", "message", text);
             if (!nameWarnings.isEmpty()) {
@@ -2741,7 +2741,7 @@ public class FunctionService {
             Map<String, Object> data = resultData.get();
             // Validate function name if one was provided
             if (name != null && !name.isEmpty()) {
-                List<String> nameWarnings = NamingConventions.validateFunctionName(name, false);
+                List<String> nameWarnings = NamingConventions.validateFunctionName(name, false, program);
                 if (!nameWarnings.isEmpty()) {
                     data.put("warnings", nameWarnings);
                 }

@@ -96,6 +96,38 @@ public final class ConventionConfig {
     public GlobalNamingRules globalNaming() { return globalNaming; }
     public PlateCommentRules plateComments() { return plateComments; }
 
+    /**
+     * Function identifier case. Default {@code PASCAL} preserves the historical
+     * gate. {@code SNAKE} is for C firmware whose own symbols are snake_case.
+     * {@code INFER} counts existing function names in the open program.
+     */
+    public enum CaseStyle {
+        PASCAL,
+        SNAKE,
+        INFER;
+
+        public static CaseStyle parse(String value) {
+            if (value == null || value.isBlank()) {
+                return PASCAL;
+            }
+            switch (value.trim().toLowerCase()) {
+                case "snake":
+                case "snake_case":
+                case "underscore":
+                    return SNAKE;
+                case "infer":
+                case "auto":
+                    return INFER;
+                case "pascal":
+                case "pascalcase":
+                case "pascal_case":
+                    return PASCAL;
+                default:
+                    return PASCAL;
+            }
+        }
+    }
+
     /** Per-section rules: function name validation. */
     public static final class FunctionNamingRules {
         private final int minLength;
@@ -104,6 +136,7 @@ public final class ConventionConfig {
         private final Map<String, Integer> verbTierOverrides;
         private final Set<String> weakNounsAdd;
         private final Set<String> weakNounsRemove;
+        private final CaseStyle caseStyle;
 
         public FunctionNamingRules(int minLength,
                                    Set<String> verbsAdd,
@@ -111,6 +144,17 @@ public final class ConventionConfig {
                                    Map<String, Integer> verbTierOverrides,
                                    Set<String> weakNounsAdd,
                                    Set<String> weakNounsRemove) {
+            this(minLength, verbsAdd, verbsRemove, verbTierOverrides,
+                weakNounsAdd, weakNounsRemove, CaseStyle.PASCAL);
+        }
+
+        public FunctionNamingRules(int minLength,
+                                   Set<String> verbsAdd,
+                                   Set<String> verbsRemove,
+                                   Map<String, Integer> verbTierOverrides,
+                                   Set<String> weakNounsAdd,
+                                   Set<String> weakNounsRemove,
+                                   CaseStyle caseStyle) {
             this.minLength = minLength > 0 ? minLength : 8;
             this.verbsAdd = immutableSet(verbsAdd);
             this.verbsRemove = immutableSet(verbsRemove);
@@ -119,6 +163,7 @@ public final class ConventionConfig {
                     : Map.copyOf(verbTierOverrides);
             this.weakNounsAdd = immutableSet(weakNounsAdd);
             this.weakNounsRemove = immutableSet(weakNounsRemove);
+            this.caseStyle = caseStyle != null ? caseStyle : CaseStyle.PASCAL;
         }
 
         public static FunctionNamingRules defaults() {
@@ -131,6 +176,7 @@ public final class ConventionConfig {
         public Map<String, Integer> verbTierOverrides() { return verbTierOverrides; }
         public Set<String> weakNounsAdd() { return weakNounsAdd; }
         public Set<String> weakNounsRemove() { return weakNounsRemove; }
+        public CaseStyle caseStyle() { return caseStyle; }
     }
 
     /** Per-section rules: Hungarian notation behavior. */
