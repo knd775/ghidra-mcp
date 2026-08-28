@@ -102,6 +102,78 @@ public class HardeningWiringTest extends TestCase {
                         && read("GhidraMCPPlugin.java").contains("exceedsMaxBody"));
         assertTrue("UDS must reject oversized Content-Length (413)",
                 read("core", "UdsHttpServer.java").contains("MAX_REQUEST_BODY_BYTES"));
+        assertTrue("headless safeContext must fast-reject oversized Content-Length",
+                read("headless", "GhidraMCPHeadlessServer.java").contains("exceedsMaxBody("));
+        assertTrue("JsonHelper must distinguish oversized from malformed",
+                read("core", "JsonHelper.java").contains("parseBodyDetailed"));
+    }
+
+    /** Passing language must not force BinaryLoader; that path lives in ProgramImporter. */
+    public void testLanguageDoesNotForceRawBinaryLoader() throws IOException {
+        String importer = read("core", "ProgramImporter.java");
+        assertTrue("language-pinned imports must use importByLookingForLcs",
+                importer.contains("importByLookingForLcs"));
+        assertTrue("format=binary remains the raw opt-in",
+                importer.contains("importAsBinary"));
+        String load = read("headless", "HeadlessProgramProvider.java");
+        assertFalse("HeadlessProgramProvider must not call importAsBinary directly",
+                load.contains("AutoImporter.importAsBinary"));
+        assertTrue("language mismatch on an existing import must name force_reimport",
+                load.contains("force_reimport=true"));
+    }
+
+    /** The old stub returned success without adding the file. */
+    public void testVersionControlAddIsImplemented() throws IOException {
+        assertFalse("GhidraServerManager must not report repository_verified",
+                read("headless", "GhidraServerManager.java").contains("repository_verified"));
+        assertTrue("ProjectVersionControl must call DomainFile.addToVersionControl",
+                read("core", "ProjectVersionControl.java")
+                        .contains(".addToVersionControl("));
+        assertTrue("ProjectVersionControl must call DomainFile.undoCheckout",
+                read("core", "ProjectVersionControl.java")
+                        .contains(".undoCheckout("));
+        assertFalse("GhidraServerManager must not take RMI checkouts",
+                read("headless", "GhidraServerManager.java").contains("repo.checkout("));
+        assertFalse("headless terminate_checkout must not default checkout_id to 0",
+                read("headless", "GhidraMCPHeadlessServer.java")
+                        .contains("checkout_id\", \"0\""));
+    }
+
+    public void testDockerfileCreatesExportAndProjectDirs() throws IOException {
+        String docker = java.nio.file.Files.readString(
+            java.nio.file.Paths.get("docker", "Dockerfile"));
+        assertTrue(docker.contains("/data/exports"));
+        assertTrue(docker.contains("/data/ghidra_projects"));
+    }
+
+    /** Project ops that used to require PluginTool must go through ProgramProvider. */
+    public void testProjectOpsAreNotGuiOnly() throws IOException {
+        String src = read("core", "ProgramScriptService.java");
+        assertFalse("list/create/delete/open/import must not be GUI-only",
+                src.contains("requires GUI mode (PluginTool not available)"));
+    }
+
+    /** Upload plus script execution is arbitrary code execution; they must be exclusive. */
+    public void testUploadFileRefusesWhenScriptsAllowed() throws IOException {
+        String src = read("headless", "HeadlessManagementService.java");
+        int sig = src.indexOf("public Response uploadFile(");
+        assertTrue("Could not locate uploadFile", sig >= 0);
+        String body = src.substring(sig);
+        int gate = body.indexOf("areScriptsAllowed()");
+        int write = body.indexOf("Files.write");
+        assertTrue("upload_file must check areScriptsAllowed()", gate >= 0);
+        assertTrue("scripts gate must precede the write", write > gate);
+        assertTrue("upload_file must confine to uploads/",
+                body.contains("\"uploads\""));
+    }
+
+    /** eclipse-temurin:21-jdk already owns uid 1000; reclaim it before groupadd. */
+    public void testDockerfileReclaimsUid1000() throws IOException {
+        String src = Files.readString(Paths.get("docker", "Dockerfile"));
+        assertTrue("Dockerfile must free uid 1000 before groupadd",
+                src.contains("getent passwd 1000"));
+        assertTrue("Dockerfile must still create ghidra as uid 1000",
+                src.contains("useradd --uid 1000 --gid 1000"));
     }
 
     /**

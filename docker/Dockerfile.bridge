@@ -1,0 +1,51 @@
+# GhidraMCP Python bridge — translates MCP to the headless server's REST API.
+#
+# Build from the repo root (same context as docker/Dockerfile):
+#   docker build -f docker/Dockerfile.bridge -t ghidra-mcp-bridge .
+#
+# docker/Dockerfile builds the Java headless server, not this.
+# pyproject.toml sits at the repo root; the package lives under python/.
+# Backend is hatchling. CI and this image use Python 3.12 (Ubuntu 24.04).
+#
+# The bridge's TCP URL validator only accepts loopback. Compose therefore
+# runs this container in the headless server's network namespace and sets
+# GHIDRA_MCP_URL=http://127.0.0.1:8089. Do not point it at a Docker DNS
+# name like http://ghidra-mcp:8089.
+
+FROM python:3.12-slim AS builder
+
+RUN pip install --no-cache-dir hatchling build
+
+WORKDIR /src
+# Only what the sdist/wheel targets actually reference.
+COPY pyproject.toml README.md LICENSE NOTICE CHANGELOG.md ./
+COPY python/ ./python/
+
+RUN python -m build --wheel --outdir /dist
+
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+COPY --from=builder /dist/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
+
+# Match the headless server's uid so a shared network namespace and any
+# future shared mounts line up. python:3.12-slim is Debian and usually has
+# no uid 1000; the reclaim is the same shape as docker/Dockerfile.
+RUN (getent passwd 1000 && userdel -r "$(getent passwd 1000 | cut -d: -f1)" || true) \
+    && (getent group 1000 && groupdel "$(getent group 1000 | cut -d: -f1)" || true) \
+    && groupadd --gid 1000 bridge \
+    && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/bridge bridge
+ENV HOME=/home/bridge
+USER bridge
+
+EXPOSE 8081
+
+# No extra args baked into ENTRYPOINT. Compose `command:` replaces CMD and
+# is appended to ENTRYPOINT. A bare `docker run` of this image starts the
+# HTTP transport the stack wants, not stdio.
+ENTRYPOINT ["bridge-mcp-ghidra"]
+CMD ["--transport", "streamable-http", "--mcp-host", "0.0.0.0", "--mcp-port", "8081"]

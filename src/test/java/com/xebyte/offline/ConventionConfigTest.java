@@ -55,6 +55,7 @@ public class ConventionConfigTest extends TestCase {
         ConventionConfig cfg = ConventionConfig.defaults();
         assertEquals(ConventionConfig.Mode.ENFORCE, cfg.getMode());
         assertEquals(8, cfg.functionNaming().minLength());
+        assertEquals(ConventionConfig.CaseStyle.PASCAL, cfg.functionNaming().caseStyle());
         assertTrue(cfg.hungarian().autoFixStructFields());
         assertTrue(cfg.globalNaming().validate());
         assertTrue(cfg.globalNaming().requireGPrefix());
@@ -137,6 +138,13 @@ public class ConventionConfigTest extends TestCase {
         assertEquals(Integer.valueOf(3), fn.verbTierOverrides().get("Render"));
         assertTrue(fn.weakNounsAdd().contains("Foo"));
         assertTrue(fn.weakNounsRemove().contains("Data"));
+    }
+
+    public void testParseFunctionNamingCaseStyleSnake() {
+        String json = "{\"function_naming\": {\"case_style\": \"snake\"}}";
+        ConventionConfigLoader.LoadResult result = ConventionConfigLoader.parse(json, null);
+        assertEquals(ConventionConfig.CaseStyle.SNAKE,
+                result.config().functionNaming().caseStyle());
     }
 
     public void testParseOutOfRangeTierOverrideEmitsWarningAndDropsEntry() {

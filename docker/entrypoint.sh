@@ -43,6 +43,24 @@ if [ -n "${GHIDRA_SERVER_USER}" ]; then
 fi
 echo ""
 
+# Default dirs used by export_program / restore_project. A mounted empty
+# /data volume hides the image's mkdir, so recreate them at start.
+mkdir -p /data/exports /data/ghidra_projects /projects 2>/dev/null || true
+
+# GHIDRA_USER sets Java user.name (checkout identity). GHIDRA_SERVER_USER is
+# the RMI login. They must match. A copied .gpr keeps the original account's
+# checkouts even after open_project resets project.prp ownership.
+if [ -n "${GHIDRA_SERVER_USER}" ] && [ -z "${GHIDRA_USER}" ]; then
+    echo -e "${YELLOW}Warning: GHIDRA_SERVER_USER is set but GHIDRA_USER is not.${NC}"
+    echo "  Checkouts are recorded as Java user.name. Set GHIDRA_USER=${GHIDRA_SERVER_USER}"
+    echo ""
+fi
+if [ -n "${GHIDRA_SERVER_USER}" ] && [ -n "${GHIDRA_USER}" ] && [ "${GHIDRA_USER}" != "${GHIDRA_SERVER_USER}" ]; then
+    echo -e "${YELLOW}Warning: GHIDRA_USER (${GHIDRA_USER}) differs from GHIDRA_SERVER_USER (${GHIDRA_SERVER_USER}).${NC}"
+    echo "  Ghidra records checkouts under user.name. Check-in will fail with an identity mismatch."
+    echo ""
+fi
+
 # Check Ghidra installation
 if [ ! -d "${GHIDRA_HOME}" ]; then
     echo -e "${RED}Error: Ghidra not found at ${GHIDRA_HOME}${NC}"

@@ -1,0 +1,121 @@
+name: Publish images to GHCR
+
+on:
+  push:
+    branches: [ main, dev, develop ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main, dev, develop ]
+    paths:
+      - docker/Dockerfile.bridge
+      - python/**
+      - pyproject.toml
+      - uv.lock
+      - README.md
+      - LICENSE
+      - NOTICE
+      - CHANGELOG.md
+      - .github/workflows/ghcr.yml
+  workflow_dispatch:
+
+# OSSF Scorecard Token-Permissions: default to read-only. Jobs that push
+# elevate packages/attestations at the job level.
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  bridge:
+    name: Bridge image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set image name
+      run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/ghidra-mcp-bridge" >> "$GITHUB_ENV"
+
+    - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+      if: github.event_name != 'pull_request'
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - id: meta
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+      with:
+        images: ${{ env.IMAGE }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha
+          type=semver,pattern={{version}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+      with:
+        context: .
+        file: docker/Dockerfile.bridge
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=bridge
+        cache-to: type=gha,mode=max,scope=bridge
+
+  headless:
+    name: Headless image
+    # The Java image downloads Ghidra. Build it when we are going to push,
+    # not on every documentation PR.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set image name
+      run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/ghidra-mcp-headless" >> "$GITHUB_ENV"
+
+    - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - id: meta
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+      with:
+        images: ${{ env.IMAGE }}
+        tags: |
+          type=ref,event=branch
+          type=sha
+          type=semver,pattern={{version}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+      with:
+        context: .
+        file: docker/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=headless
+        cache-to: type=gha,mode=max,scope=headless

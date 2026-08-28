@@ -1,15 +1,13 @@
 """Render the README's API Reference section from tests/endpoints.json.
 
 The endpoint catalog is the single source of truth for the MCP tool inventory.
-This module renders the tool listing between the BEGIN/END markers in
-README.md so the section can be regenerated instead of hand-edited:
+The BEGIN/END block in README.md is rewritten onto same-repo PR branches by
+the sync-generated-docs job in tests.yml (via
+`python -m tools.sync_generated_docs --write`). Main never gets a follow-up
+fixup commit for this.
 
     python -m tools.gen_readme_api_reference           # check (exit 1 on drift)
     python -m tools.gen_readme_api_reference --write   # rewrite README section
-
-tests/unit/test_project_consistency.py calls render_api_reference() and fails
-when the README drifts from the catalog, so `@McpTool` additions that pass
-EndpointsJsonParityTest also force a README refresh.
 """
 
 from __future__ import annotations
@@ -111,9 +109,9 @@ def render_api_reference(endpoints_json: Path = ENDPOINTS_JSON) -> str:
         BEGIN_MARKER,
         "",
         f"{total} MCP tools backed by HTTP endpoints, grouped by catalog category. "
-        "Generated from [tests/endpoints.json](tests/endpoints.json) by "
-        "`python -m tools.gen_readme_api_reference --write`; the live schema at "
-        "`/mcp/schema` is authoritative at runtime. Usage patterns: "
+        "Generated from [tests/endpoints.json](tests/endpoints.json). "
+        "Same-repo CI rewrites this block onto the PR before merge; "
+        "the live schema at `/mcp/schema` is authoritative at runtime. Usage patterns: "
         "[docs/prompts/TOOL_USAGE_GUIDE.md](docs/prompts/TOOL_USAGE_GUIDE.md).",
     ]
 
@@ -179,8 +177,9 @@ def main(argv: list[str] | None = None) -> int:
         print("README API Reference regenerated.")
         return 0
     print(
-        "README API Reference is stale. Run:\n"
-        "  python -m tools.gen_readme_api_reference --write"
+        "README API Reference is stale. Same-repo CI rewrites it onto the PR\n"
+        "branch (tests.yml job sync-generated-docs). Fork PRs must include:\n"
+        "  python -m tools.sync_generated_docs --write"
     )
     return 1
 

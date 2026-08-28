@@ -515,6 +515,7 @@ async def import_file(
     project_folder: str = "/",
     language: str | None = None,
     compiler_spec: str | None = None,
+    format: str | None = None,
     auto_analyze: bool = True,
     ctx: Context | None = None,
 ) -> str:
@@ -524,15 +525,16 @@ async def import_file(
     Imports the file, opens it in the CodeBrowser, and optionally starts auto-analysis.
     When analysis is enabled, sends a log notification when analysis completes.
 
-    For raw firmware binaries, specify language (e.g. "ARM:LE:32:Cortex") and
-    optionally compiler_spec (e.g. "default"). Without language, Ghidra auto-detects
-    the format (works for ELF, PE, Mach-O, etc.).
+    format and language are independent (matching the GUI import dialog).
+    Omit both to auto-detect. Pass language alone to pin the processor while
+    keeping ELF/PE/Mach-O layout. Pass format="binary" for headerless firmware.
 
     Args:
         file_path: Absolute path to the binary file on disk
         project_folder: Destination folder in the Ghidra project (default: "/")
-        language: Language ID for raw binaries (e.g. "ARM:LE:32:Cortex", "x86:LE:64:default")
+        language: Language ID (e.g. "ARM:LE:32:Cortex", "x86:LE:64:default")
         compiler_spec: Compiler spec ID (e.g. "default", "gcc"). Uses language default if omitted.
+        format: Omit for auto-detect / language-pinned container load; "binary" for raw.
         auto_analyze: Start auto-analysis after import (default: true)
     """
     payload: dict = {
@@ -544,6 +546,8 @@ async def import_file(
         payload["language"] = language
     if compiler_spec:
         payload["compiler_spec"] = compiler_spec
+    if format:
+        payload["format"] = format
 
     result = await state.run_blocking_ghidra_call(dispatch.dispatch_post, "/import_file", payload)
 

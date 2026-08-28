@@ -1,52 +1,63 @@
 # GhidraMCP Headless Server - Docker Deployment
 
-Run GhidraMCP as a headless REST API server in Docker containers.
+The compose file on this branch is the stack this fork actually runs:
+Ghidra Server (RMI) + headless MCP + Python bridge + a Cloudflare Tunnel.
+There is no Traefik in this file.
 
-> **⚠️ Security: set an auth token before exposing the port.**
-> The container binds `0.0.0.0` inside its namespace, and `docker-compose.yml`
-> publishes `8089:8089` to the host. The MCP API is **unauthenticated unless
-> `GHIDRA_MCP_AUTH_TOKEN` is set**, and it exposes powerful endpoints (file
-> import, project mutation, and — if `GHIDRA_MCP_ALLOW_SCRIPTS=1` — arbitrary
-> code). The headless server **refuses to start on a non-loopback bind without
-> this token**, so for any host/remote exposure you must set it:
+> **Security.** The headless server binds `0.0.0.0` inside the container.
+> Host publish of 8089/8081 is loopback only. Remote MCP is the tunnel
+> (`http://ghidra-mcp:8081` on the compose network). Set
+> `GHIDRA_MCP_AUTH_TOKEN` (the process will not start on a non-loopback
+> bind without it) and put the tunnel hostname in
+> `GHIDRA_MCP_ALLOWED_HOSTS`. The tunnel is not authentication; put an
+> Access policy on the origin and leave Access Managed OAuth off.
 >
 > ```bash
-> export GHIDRA_MCP_AUTH_TOKEN=$(openssl rand -hex 32)
-> # then pass it into the container (compose: environment:) and send it as
-> #   Authorization: Bearer <token>   on every request
+> openssl rand -hex 32   # GHIDRA_MCP_AUTH_TOKEN
 > ```
 >
-> Leave it unset only when the published port is reachable solely from
-> localhost/trusted hosts. The image runs as a non-root `ghidra` user.
+> The image runs as uid 1000 (`ghidra`). The bridge shares that namespace
+> as uid 1000 (`bridge`).
 
 ## Quick Start
 
-### Single Instance
-
 ```bash
-# Build and start
-cd docker
-docker-compose up -d
-
-# Check status
-curl http://localhost:8089/check_connection
+cp docker/.env.template docker/.env   # fill it
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+curl -H "Authorization: Bearer $GHIDRA_MCP_AUTH_TOKEN" \
+  http://127.0.0.1:8089/check_connection
 ```
 
-### Multiple Instances with Load Balancer
+Local MCP is `http://127.0.0.1:8081/mcp`. Ghidra Server RMI is on
+`BIND_ADDR:13100-13102` (not loopback, not 0.0.0.0).
 
-```bash
-# Start 3 instances with nginx load balancer
-docker-compose -f docker-compose.multi.yml up -d --scale ghidra-mcp=3
-```
+`docker-compose.multi.yml` is a leftover nginx scale-out sketch. It is
+not this stack.
 
 ## Building
 
 ### Build Docker Image
 
 ```bash
-# From project root
-docker build -t ghidra-mcp-headless:latest -f docker/Dockerfile .
+# From project root — Java headless server
+docker build -t ghcr.io/knd775/ghidra-mcp-headless:dev -f docker/Dockerfile .
+
+# Python MCP bridge (python:3.12-slim)
+docker build -t ghcr.io/knd775/ghidra-mcp-bridge:dev -f docker/Dockerfile.bridge .
 ```
+
+Or `docker compose -f docker/docker-compose.yml build`.
+
+Images are also published to GHCR on push to `main`/`dev`/`develop`:
+
+```text
+ghcr.io/<owner>/ghidra-mcp-headless
+ghcr.io/<owner>/ghidra-mcp-bridge
+```
+
+The bridge must share the headless network namespace.
+`GHIDRA_MCP_URL=http://127.0.0.1:8089`. Do not use a Docker DNS name.
+
 
 ### Build with Maven
 
@@ -64,17 +75,25 @@ mvn clean package -P docker -DskipTests
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GHIDRA_MCP_PORT` | `8089` | HTTP server port |
-| `JAVA_OPTS` | `-Xmx4g -XX:+UseG1GC` | JVM options |
+| `GHIDRA_MCP_PORT` | `8089` | Headless HTTP port inside the container |
+| `JAVA_OPTS` | `-Xmx8g -XX:+UseG1GC` | JVM options |
+| `GHIDRA_MCP_AUTH_TOKEN` | required | Bearer token; required for the 0.0.0.0 bind |
+| `GHIDRA_MCP_FILE_ROOT` | `/data` | Samples bind (`SAMPLES_DIR`) |
+| `GHIDRA_SERVER_HOST` | `BIND_ADDR` | RMI address the headless client dials |
+| `BIND_ADDR` | required | Host IP for RMI publish and `-ip` |
+| `GHIDRA_MCP_ALLOWED_HOSTS` | required | Tunnel hostname for the bridge Host check |
+| `TUNNEL_TOKEN` | required | Cloudflare dashboard tunnel token |
 | `PROGRAM_FILE` | - | Path to binary file to load on startup |
 | `PROJECT_PATH` | - | Path to Ghidra project directory |
 
 ### Volumes
 
-| Volume | Container Path | Description |
+| Volume / bind | Container Path | Description |
 |--------|---------------|-------------|
-| `ghidra-data` | `/data` | Persistent data storage |
-| `ghidra-projects` | `/projects` | Ghidra project files |
+| `SAMPLES_DIR` (host path) | `/data` | Binaries / `GHIDRA_MCP_FILE_ROOT` |
+| `ghidra-repos` | `/repos` | Ghidra Server project history; back this up |
+| `ghidra-mcp-home` | `/home/ghidra` | `$HOME/.ghidra` settings |
+| `ghidra-mcp-projects` | `/projects` | Local (non-repo) project data |
 
 ## API Endpoints
 

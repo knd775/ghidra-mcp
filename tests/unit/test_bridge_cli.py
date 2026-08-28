@@ -139,6 +139,36 @@ class TestCliRebindProtection(_CliHarness):
         sec = mcp.settings.transport_security
         self.assertIn("re-lab.internal:*", sec.allowed_hosts)
         self.assertIn("bench01:*", sec.allowed_hosts)
+        # Portless Host (proxy on 80/443) must match too — storing only
+        # host:* rejects Host: example.com because the matcher requires a colon.
+        self.assertIn("re-lab.internal", sec.allowed_hosts)
+        self.assertIn("bench01", sec.allowed_hosts)
+
+    def test_allowed_hosts_example_com_accepts_portless_and_port(self):
+        """SPEC-PHASE2 P13: Host: example.com and Host: example.com:8081
+        both match GHIDRA_MCP_ALLOWED_HOSTS=example.com."""
+        self.run_main(
+            "--mcp-host", "0.0.0.0",
+            env={"GHIDRA_MCP_ALLOWED_HOSTS": "example.com"},
+        )
+        sec = mcp.settings.transport_security
+        self.assertIn("example.com", sec.allowed_hosts)
+        self.assertIn("example.com:*", sec.allowed_hosts)
+
+    def test_allowed_hosts_with_explicit_port_are_stored_as_is(self):
+        self.run_main(
+            "--mcp-host", "0.0.0.0",
+            env={"GHIDRA_MCP_ALLOWED_HOSTS": "example.com:8081"},
+        )
+        sec = mcp.settings.transport_security
+        self.assertIn("example.com:8081", sec.allowed_hosts)
+        self.assertNotIn("example.com:8081:*", sec.allowed_hosts)
+
+    def test_specific_remote_host_also_allows_portless(self):
+        self.run_main("--mcp-host", "192.168.1.50")
+        sec = mcp.settings.transport_security
+        self.assertIn("192.168.1.50", sec.allowed_hosts)
+        self.assertIn("192.168.1.50:*", sec.allowed_hosts)
 
     def test_wildcard_bind_explicit_optout_disables_protection(self):
         self.run_main(
@@ -252,6 +282,23 @@ class TestHttpAppPreflight(unittest.TestCase):
         ]
         self.assertEqual(len(cors), 1)
         self.assertIn("mcp-session-id", cors[0].kwargs["expose_headers"])
+
+
+class TestAppendAllowedHost(unittest.TestCase):
+    def test_portless_host_stores_both_forms(self):
+        allowed: list[str] = []
+        cli._append_allowed_host(allowed, "example.com")
+        self.assertEqual(allowed, ["example.com", "example.com:*"])
+
+    def test_host_with_port_is_as_is(self):
+        allowed: list[str] = []
+        cli._append_allowed_host(allowed, "example.com:8081")
+        self.assertEqual(allowed, ["example.com:8081"])
+
+    def test_blank_is_ignored(self):
+        allowed: list[str] = []
+        cli._append_allowed_host(allowed, "  ")
+        self.assertEqual(allowed, [])
 
 
 class TestWildcardAllowedHosts(unittest.TestCase):

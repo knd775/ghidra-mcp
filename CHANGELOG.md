@@ -6,6 +6,102 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### Headless parity (P1–P5)
+
+Passing `language` to `load_program` used to force `AutoImporter.importAsBinary`,
+which discarded ELF/PE/Mach-O layout. Language and format are now independent,
+matching the GUI import dialog:
+
+- omit both → auto-detect (`importByUsingBestGuess`)
+- `language` alone → pin the processor, keep the container (`importByLookingForLcs`)
+- `format=binary` → raw, as before (the opt-in for headerless firmware)
+
+An incompatible language returns an error naming the detected format; there is
+no silent fall-back to raw. Reopening a same-named project file whose language
+differs from the request is refused unless `force_reimport=true`. `import_file`
+shares this loader.
+
+`server_version_control_add` no longer reports `repository_verified` without
+adding the file. It calls `DomainFile.addToVersionControl` on the open
+server-bound project and errors distinctly when no project is open, the project
+is local-only, the path is missing, or the file is already versioned. Tracks #119.
+
+`list_project_files`, `create_folder`, `delete_file`, `open_program`, and
+`import_file` go through `ProgramProvider.getProject()` instead of requiring a
+`PluginTool`, so they work on the headless server.
+
+The MCP bridge Host allow-list (`GHIDRA_MCP_ALLOWED_HOSTS`) now stores both the
+portless hostname and `host:*`. A proxy on 443 sending `Host: example.com` was
+a 421 against the configured value itself.
+
+The Docker image reclaims uid/gid 1000 before creating the `ghidra` user.
+`eclipse-temurin:21-jdk` (Ubuntu 24.04) already ships an `ubuntu` user at 1000,
+so `groupadd --gid 1000` failed the image build.
+
+JSON body parsing distinguishes oversized from malformed (`parseBodyDetailed`),
+and the headless HTTP wrapper fast-rejects an oversized `Content-Length` (413)
+the same way the GUI plugin already did.
+
+### `upload_file` (P6 — convenience; review separately from P1–P5)
+
+New headless endpoint: write a local file into `GHIDRA_MCP_FILE_ROOT/uploads/`
+and return `{path, bytes_written, sha256}`. Combined with headless `import_file`,
+a client can go from bytes to an analyzed program without host filesystem access.
+
+This is the only endpoint that writes attacker-controlled bytes to a path the
+server later feeds to a Ghidra loader. Constraints are structural, not
+documentary: refused while `GHIDRA_MCP_ALLOW_SCRIPTS` is on; confined via
+`resolveWithinFileRoot` to `<root>/uploads/`; filename is a name (separators and
+`..` rejected, not sanitised); overwrite requires `overwrite=true` and is always
+refused for a file open as a program; decoded size is capped by
+`GHIDRA_MCP_MAX_UPLOAD_BYTES` (default 16 MiB), separate from the 64 MiB JSON
+metadata ceiling.
+
+### Headless parity (P7–P13)
+
+Version control is now one path: `DomainFile` on the open project, the same
+code the GUI plugin already had, shared as `ProjectVersionControl`. The RMI
+`RepositoryAdapter` layer no longer takes checkouts (that is what orphaned
+local copies while `checkin_program` said the file was not versioned).
+`server_version_control_checkout` / `checkin` / `undo_checkout` / `add` and
+`server_checkouts` go through that helper. Unversioned or hijacked files are
+refused instead of reporting `checked_out`. `dry_run` on those operations and
+on admin terminate returns `would_*` and does not change state.
+`checkout_id` is no longer defaulted to 0.
+
+`open_project` and `server_connect` report when `user.name` (`GHIDRA_USER`)
+differs from `GHIDRA_SERVER_USER`, and when existing checkouts are owned by
+someone else. `create_project` accepts `repo` to create a server-bound
+project instead of copying another account's `.gpr`. `refresh_project` closes
+open programs and reconnects the bound repository after a structural server
+change (catalog 255). `close_project` deletes leftover lock files when it can,
+and `open_project` names remaining locks (`status: stale_lock`) instead of a
+bare "Failed to open project".
+
+The image creates `/data/exports` and `/data/ghidra_projects` (and the
+entrypoint recreates them on a mounted empty `/data` volume). Function-name
+warnings honor `function_naming.case_style` (`pascal` / `snake` / `infer`)
+and `GHIDRA_MCP_FUNCTION_CASE`. Error JSON may include `status` of
+`gui_required` or `not_implemented`; a no-op never returns a success status.
+
+### Generated docs (CI)
+
+Same-repo pull requests get README's API Reference block and the user-visible
+"N MCP tools" counts rewritten onto the PR branch by the `sync-generated-docs`
+job in `tests.yml`. Pytest still gates those files, so a stale listing cannot
+merge. Main is never left wrong until a follow-up workflow runs. CI on this
+fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
+
+### Docker
+
+`docker/Dockerfile.bridge` builds the Python MCP bridge on `python:3.12-slim`.
+`.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless` and
+`ghidra-mcp-bridge` to GHCR on push to `main`/`dev`/`develop` and on version
+tags. Compose is Ghidra Server + headless + bridge (shared netns, loopback
+`GHIDRA_MCP_URL`) + a Cloudflare Tunnel. Env for that file is
+`docker/.env.template`. 8089/8081 are published on loopback only. There is
+no Traefik.
+
 ### Tool consolidation (breaking) — 272 → 251 tools
 
 Redundant tools were folded into "one-or-many" survivors. **No capability was

@@ -78,11 +78,11 @@ public final class ManualToolDescriptors {
         add(m, "/open_project", "POST", "headless", "Open an existing Ghidra project (.gpr file or directory). GUI mode adds optional `headless` (default true) to suppress auto-launching CodeBrowser, and optional `program` to auto-launch CodeBrowser for a specific file when headless=false. Headless server ignores the extra params.", "path", "headless", "program");
         add(m, "/project/info", "GET", "project", "Get detailed project info including running tools and open programs");
         add(m, "/server/admin/set_permissions", "POST", "server", "Set user permissions on a repository", "repo", "user", "accessLevel");
-        add(m, "/server/admin/terminate_all_checkouts", "POST", "server", "Terminate all checkouts in a folder recursively", "repo", "path");
-        add(m, "/server/admin/terminate_checkout", "POST", "server", "Terminate all checkouts on a single file", "repo", "path", "checkoutId", "checkout_id");
+        add(m, "/server/admin/terminate_all_checkouts", "POST", "server", "Terminate all checkouts in a folder recursively. dry_run previews without terminating.", "repo", "path", "dry_run");
+        add(m, "/server/admin/terminate_checkout", "POST", "server", "Terminate checkouts on a single file. checkout_id is required for the RMI admin path and is not defaulted to 0. dry_run previews without terminating.", "repo", "path", "checkoutId", "checkout_id", "dry_run");
         add(m, "/server/admin/users", "GET", "server", "List all users on the server");
         add(m, "/server/authenticate", "POST", "server", "Register server credentials for programmatic authentication", "username", "password");
-        add(m, "/server/checkouts", "GET", "server", "List all checked-out files in a folder, including server-side checkouts", "path");
+        add(m, "/server/checkouts", "GET", "server", "List checked-out files. With an open project, walks DomainFiles (and server-side checkouts on those files). Pass repo when no project is open.", "path", "repo");
         add(m, "/server/connect", "POST", "server", "Connect to a Ghidra server", "host", "port");
         add(m, "/server/disconnect", "POST", "server", "Disconnect from the Ghidra server");
         add(m, "/server/repositories", "GET", "server", "List repositories on the connected server");
@@ -90,10 +90,12 @@ public final class ManualToolDescriptors {
         add(m, "/server/repository/file", "GET", "server", "Get file info from a server repository", "repo", "path");
         add(m, "/server/repository/files", "GET", "server", "List files in a server repository folder", "repo", "path");
         add(m, "/server/status", "GET", "headless", "Check headless server connection status");
-        add(m, "/server/version_control/add", "POST", "server", "Add a file to version control", "repo", "path", "comment", "keepCheckedOut");
-        add(m, "/server/version_control/checkin", "POST", "server", "Check in a version-controlled file", "repo", "path", "comment", "keepCheckedOut");
-        add(m, "/server/version_control/checkout", "POST", "server", "Check out a version-controlled file", "repo", "path");
-        add(m, "/server/version_control/undo_checkout", "POST", "server", "Undo a file checkout", "repo", "path");
+        add(m, "/server/version_control/add", "POST", "server",
+            "Add a DomainFile in the open shared project to version control via DomainFile.addToVersionControl. dry_run previews without adding.",
+            "repo", "path", "comment", "keepCheckedOut", "keep_checked_out", "dry_run");
+        add(m, "/server/version_control/checkin", "POST", "server", "Check in a version-controlled file through the open project's DomainFile (same path as checkin_program on the headless server).", "repo", "path", "comment", "keepCheckedOut", "dry_run");
+        add(m, "/server/version_control/checkout", "POST", "server", "Check out a version-controlled DomainFile in the open project. Refuses if the file is unversioned or hijacked so a server-side checkout cannot orphan the local copy.", "repo", "path", "exclusive", "dry_run");
+        add(m, "/server/version_control/undo_checkout", "POST", "server", "Undo a file checkout via DomainFile.undoCheckout on the open project.", "repo", "path", "keep", "dry_run");
         add(m, "/server/version_history", "GET", "server", "Get version history for a file", "repo", "path");
         add(m, "/tool/goto_address", "POST", "utility", "Navigate CodeBrowser listing and decompiler to a specific address", "address");
         add(m, "/tool/launch_codebrowser", "POST", "utility", "Open a file in CodeBrowser, launching a new one if needed", "path");

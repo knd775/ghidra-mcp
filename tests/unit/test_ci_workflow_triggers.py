@@ -138,3 +138,55 @@ def test_build_status_script_checks_every_job_it_depends_on():
         f"needs.<job>.result for them, so their failures do not affect the "
         f"reported build status."
     )
+
+
+def test_python_unit_job_is_ubuntu_312_only():
+    """This fork CI-tests the bridge on Ubuntu 3.12, matching the Docker base.
+
+    eclipse-temurin:21-jdk is Ubuntu 24.04 (Python 3.12). A version matrix or a
+    Windows pytest job is a different deployment method and is not gated here.
+    """
+    python_tests = _load("tests.yml")["jobs"]["python-tests"]
+    assert python_tests["runs-on"] == "ubuntu-latest"
+    assert "matrix" not in python_tests.get("strategy", {})
+    script = "\n".join(
+        str(step.get("run", "")) for step in python_tests.get("steps", [])
+    )
+    assert "3.12" in script
+    assert "python-tests-windows" not in _load("tests.yml")["jobs"]
+    assert "pester-tests" not in _load("tests.yml")["jobs"]
+
+
+def test_ghcr_workflow_publishes_headless_and_bridge():
+    """GHCR publish must cover both images this stack actually runs."""
+    path = WORKFLOWS / "ghcr.yml"
+    assert path.is_file(), "ghcr.yml is missing"
+    doc = _load("ghcr.yml")
+    jobs = doc["jobs"]
+    assert "bridge" in jobs
+    assert "headless" in jobs
+    text = path.read_text(encoding="utf-8")
+    assert "ghidra-mcp-bridge" in text
+    assert "ghidra-mcp-headless" in text
+    assert "docker/Dockerfile.bridge" in text
+    assert "packages: write" in text
+    headless = jobs["headless"]
+    assert "pull_request" in str(headless.get("if", "")), (
+        "the headless image downloads Ghidra; it must not build on every PR"
+    )
+
+
+def test_bridge_dockerfile_is_python_312_and_loopback_oriented():
+    text = (REPO_ROOT / "docker" / "Dockerfile.bridge").read_text(encoding="utf-8")
+    assert "FROM python:3.12-slim" in text
+    assert "bridge-mcp-ghidra" in text
+    assert "8081" in text
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "Dockerfile.bridge" in compose
+    assert "network_mode: \"service:ghidra-mcp\"" in compose
+    assert "GHIDRA_MCP_URL: http://127.0.0.1:8089" in compose
+    assert "ghidra-server:" in compose
+    assert "cloudflared:" in compose
+    assert "traefik" not in compose.lower()
+    assert "13100:13100" in compose
+    assert "GHIDRA_MCP_FILE_ROOT: /data" in compose

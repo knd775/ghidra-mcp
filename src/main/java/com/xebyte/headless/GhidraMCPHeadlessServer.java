@@ -406,8 +406,16 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             safeContext(ep.path(), exchange -> {
                 try {
                     Map<String, String> query = parseQueryParams(exchange);
-                    Map<String, Object> body = "POST".equalsIgnoreCase(exchange.getRequestMethod())
-                        ? JsonHelper.parseBody(exchange.getRequestBody()) : Map.of();
+                    Map<String, Object> body = Map.of();
+                    if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                        JsonHelper.ParsedBody parsed = JsonHelper.parseBodyDetailed(exchange.getRequestBody());
+                        String parseErr = parsed.errorOrNull();
+                        if (parseErr != null) {
+                            sendResponse(exchange, JsonHelper.errorJson(parseErr));
+                            return;
+                        }
+                        body = parsed.map();
+                    }
                     sendResponse(exchange, ep.handler().handle(query, body).toJson());
                 } catch (Exception e) {
                     // Uncaught handler failure: log full detail, return generic
@@ -436,8 +444,7 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
             "/server/admin/terminate_checkout", "/server/admin/users",
             "/server/checkouts", "/server/connect", "/server/disconnect",
             "/server/repositories", "/server/repository/create", "/server/repository/file",
-            "/server/repository/files", "/server/version_control/add",
-            "/server/version_control/checkin", "/server/version_control/checkout",
+            "/server/repository/files", "/server/version_control/checkin", "/server/version_control/checkout",
             "/server/version_control/undo_checkout", "/server/version_history");
         // Store scanner size for dynamic endpoint count reporting. Now includes
         // both the dispatch-table (@McpTool-scanned) endpoints and the manually-
@@ -481,14 +488,10 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         });
 
         // --- Project Organization ---
-        // Note: /create_folder, /delete_file, /move_file and /move_folder are
-        // NOT registered here because they are already registered via @McpTool
-        // annotations on ProgramScriptService.{createFolder,deleteFile,
-        // moveFile,moveFolder} which the AnnotationScanner picks up.
-        // Re-registering them manually causes "cannot add context to list" on
-        // headless startup (see #180). Those shared implementations reach
-        // ProjectData through ProgramProvider.getProject(), which
-        // HeadlessProgramProvider overrides -- that override is what keeps them
+        // Note: /create_folder, /delete_file, /move_file, /move_folder,
+        // /list_project_files, /open_program and /import_file are registered
+        // via @McpTool on ProgramScriptService. They reach ProjectData through
+        // ProgramProvider.getProject() — that override is what keeps them
         // working without a PluginTool.
 
         // --- Server Endpoints ---
@@ -531,53 +534,91 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
 
         safeContext("/server/version_control/checkout", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            sendResponse(exchange, serverManager.checkoutFile(params.get("repo"), params.get("path")));
+            boolean dryRun = parseBooleanOrDefault(params.get("dry_run"), false);
+            boolean exclusive = parseBooleanOrDefault(params.getOrDefault("exclusive", "true"), true);
+            sendResponse(exchange, JsonHelper.toJson(
+                programProvider.checkoutFile(params.get("path"), exclusive, dryRun)));
         });
 
         safeContext("/server/version_control/checkin", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            boolean keepCheckedOut = parseBooleanOrDefault(params.get("keepCheckedOut"), false);
-            sendResponse(exchange, serverManager.checkinFile(
-                params.get("repo"), params.get("path"), params.get("comment"), keepCheckedOut));
+            boolean keepCheckedOut = parseBooleanOrDefault(
+                params.getOrDefault("keepCheckedOut", params.get("keep_checked_out")), false);
+            boolean dryRun = parseBooleanOrDefault(params.get("dry_run"), false);
+            sendResponse(exchange, JsonHelper.toJson(
+                programProvider.checkinProgram(params.get("path"), params.get("comment"),
+                    keepCheckedOut, dryRun)));
         });
 
         safeContext("/server/version_control/undo_checkout", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            sendResponse(exchange, serverManager.undoCheckout(params.get("repo"), params.get("path")));
-        });
-
-        safeContext("/server/version_control/add", exchange -> {
-            Map<String, String> params = parsePostParams(exchange);
-            sendResponse(exchange, serverManager.addToVersionControl(
-                params.get("repo"), params.get("path"), params.get("comment")));
+            boolean keep = parseBooleanOrDefault(params.get("keep"), false);
+            boolean dryRun = parseBooleanOrDefault(params.get("dry_run"), false);
+            sendResponse(exchange, JsonHelper.toJson(
+                programProvider.undoCheckout(params.get("path"), keep, dryRun)));
         });
 
         safeContext("/server/version_history", exchange -> {
             Map<String, String> params = parseQueryParams(exchange);
-            sendResponse(exchange, serverManager.getVersionHistory(params.get("repo"), params.get("path")));
+            if (programProvider.hasProject()) {
+                sendResponse(exchange, JsonHelper.toJson(
+                    programProvider.versionHistory(params.get("path"))));
+            } else {
+                sendResponse(exchange, serverManager.getVersionHistory(params.get("repo"), params.get("path")));
+            }
         });
 
         safeContext("/server/checkouts", exchange -> {
             Map<String, String> params = parseQueryParams(exchange);
-            sendResponse(exchange, serverManager.getCheckouts(params.get("repo"), params.get("path")));
+            String path = params.get("path");
+            if (path == null) path = "/";
+            if (programProvider.hasProject()) {
+                sendResponse(exchange, JsonHelper.toJson(programProvider.listCheckouts(path)));
+            } else {
+                String repo = params.get("repo");
+                if (repo == null || repo.isBlank()) {
+                    sendResponse(exchange, "{\"error\": \"Repository name required. Pass repo, or open a shared project.\", \"status\": \"missing_repo\"}");
+                } else {
+                    sendResponse(exchange, serverManager.getCheckouts(repo, path));
+                }
+            }
         });
 
         // --- Admin ---
 
         safeContext("/server/admin/terminate_checkout", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            String checkoutIdParam = params.getOrDefault("checkoutId", params.getOrDefault("checkout_id", "0"));
+            boolean dryRun = parseBooleanOrDefault(params.get("dry_run"), false);
+            String checkoutIdParam = params.get("checkoutId");
+            if (checkoutIdParam == null) checkoutIdParam = params.get("checkout_id");
+            String repo = params.get("repo");
+            if ((repo == null || repo.isBlank()) && programProvider.hasProject()) {
+                repo = com.xebyte.core.ProjectVersionControl.repoNameOf(programProvider.getProject());
+            }
+            if (programProvider.hasProject() && (checkoutIdParam == null || checkoutIdParam.isBlank())) {
+                sendResponse(exchange, JsonHelper.toJson(
+                    com.xebyte.core.ProjectVersionControl.terminateFile(
+                        programProvider.getProject(), params.get("path"), null, dryRun)));
+                return;
+            }
+            if (checkoutIdParam == null || checkoutIdParam.isBlank()) {
+                sendResponse(exchange, "{\"error\": \"checkout_id is required (do not default to 0)\", \"status\": \"missing_checkout_id\"}");
+                return;
+            }
             long checkoutId = Long.parseLong(checkoutIdParam);
-            sendResponse(exchange, serverManager.terminateCheckout(
-                params.get("repo"), params.get("path"), checkoutId));
+            sendResponse(exchange, serverManager.terminateCheckout(repo, params.get("path"), checkoutId, dryRun));
         });
 
         safeContext("/server/admin/terminate_all_checkouts", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String folderPath = params.get("path");
             if (folderPath == null) folderPath = "/";
-            sendResponse(exchange, serverManager.terminateAllCheckouts(
-                params.get("repo"), folderPath));
+            boolean dryRun = parseBooleanOrDefault(params.get("dry_run"), false);
+            String repo = params.get("repo");
+            if ((repo == null || repo.isBlank()) && programProvider.hasProject()) {
+                repo = com.xebyte.core.ProjectVersionControl.repoNameOf(programProvider.getProject());
+            }
+            sendResponse(exchange, serverManager.terminateAllCheckouts(repo, folderPath, dryRun));
         });
 
         safeContext("/server/admin/users", exchange -> {
@@ -698,20 +739,31 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
                     }
                     return;
                 }
-                if (sec.isAuthEnabled()) {
-                    String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
-                    if (!sec.matchesBearerAuth(authHeader)) {
-                        byte[] body = "{\"error\": \"Unauthorized\"}".getBytes(StandardCharsets.UTF_8);
+                    if (sec.isAuthEnabled()) {
+                        String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
+                        if (!sec.matchesBearerAuth(authHeader)) {
+                            byte[] body = "{\"error\": \"Unauthorized\"}".getBytes(StandardCharsets.UTF_8);
+                            exchange.getResponseHeaders().set("Content-Type", "application/json");
+                            exchange.getResponseHeaders().set("WWW-Authenticate", "Bearer");
+                            exchange.sendResponseHeaders(401, body.length);
+                            try (OutputStream os = exchange.getResponseBody()) {
+                                os.write(body);
+                            }
+                            return;
+                        }
+                    }
+                    if (com.xebyte.core.SecurityConfig.exceedsMaxBody(
+                            exchange.getRequestHeaders().getFirst("Content-Length"))) {
+                        byte[] body = "{\"error\": \"Request body too large\"}"
+                                .getBytes(StandardCharsets.UTF_8);
                         exchange.getResponseHeaders().set("Content-Type", "application/json");
-                        exchange.getResponseHeaders().set("WWW-Authenticate", "Bearer");
-                        exchange.sendResponseHeaders(401, body.length);
+                        exchange.sendResponseHeaders(413, body.length);
                         try (OutputStream os = exchange.getResponseBody()) {
                             os.write(body);
                         }
                         return;
                     }
                 }
-            }
             handler.handle(exchange);
         });
     }

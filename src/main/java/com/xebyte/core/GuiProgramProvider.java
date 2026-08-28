@@ -16,6 +16,7 @@
 package com.xebyte.core;
 
 import ghidra.app.services.ProgramManager;
+import ghidra.framework.model.Project;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 
@@ -107,5 +108,10 @@ public class GuiProgramProvider implements ProgramProvider {
      */
     public PluginTool getTool() {
         return tool;
+    }
+
+    @Override
+    public Project getProject() {
+        return tool != null ? tool.getProject() : null;
     }
 }

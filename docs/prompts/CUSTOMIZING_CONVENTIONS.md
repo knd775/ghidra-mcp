@@ -94,6 +94,7 @@ parameter overrides both.
 | `verb_tier_overrides` (map) | Reassign a verb's tier (1 = highly specific, 2 = medium, 3 = vague). Tier-3 verbs require ≥2 specifier tokens; demoting `Process` to Tier 1 lets `ProcessPacket` pass. |
 | `weak_nouns_add` (list) | Extra tokens to treat as "weak" (contribute no specificity). `GetWidget` would then count as a weak-noun-only rejection. |
 | `weak_nouns_remove` (list) | Remove tokens from the built-in weak-noun denylist. E.g. if your domain genuinely uses `Data` as a meaningful term. |
+| `case_style` | `pascal` (default), `snake`, or `infer`. Snake skips the PascalCase / underscore warnings so C firmware names like `flag_ingest_fragment` stay snake_case instead of being rewritten as `FlagIngestFragment`. `infer` counts existing function names in the open program. `GHIDRA_MCP_FUNCTION_CASE` overrides the file. |
 
 #### `hungarian`
 
@@ -150,6 +151,26 @@ Ghidra (or hit the Tool Option toggle to force a refresh), and:
   is no longer required.
 - `set_global(addr, name=..., plate_comment="...")` validates against
   the `Purpose`/`Notes` sections instead of the default trio.
+
+## Worked example: C firmware (snake_case functions)
+
+ELF symbols in the binary are already `isr_hardfault`, `flag_ingest_fragment`.
+The default gate would warn on every rename. Set:
+
+```json
+{
+  "function_naming": {
+    "case_style": "snake",
+    "verbs_add": ["Isr", "Reset", "Ingest"]
+  },
+  "hungarian": {
+    "auto_fix_struct_fields": false
+  }
+}
+```
+
+Or `export GHIDRA_MCP_FUNCTION_CASE=snake` for a container that should not
+depend on a conventions.json inside a copied project.
 
 ## Per-call `strict_mode` override
 

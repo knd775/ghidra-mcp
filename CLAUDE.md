@@ -2,7 +2,7 @@
 
 ## Overview
 
-MCP server bridging Ghidra reverse engineering with AI tools. 253 MCP tools for binary analysis.
+MCP server bridging Ghidra reverse engineering with AI tools. 255 MCP tools for binary analysis.
 
 - **Package**: `com.xebyte` | **Version**: 7.0.0 | **Java**: 21 LTS | **Ghidra**: 12.1.2
 
@@ -275,6 +275,11 @@ If `EndpointsJsonParityTest` fails after `@McpTool` edits, regenerate `tests/end
 ```text
 mvn test -Dtest=RegenerateEndpointsJson -Dregenerate=true
 ```
+
+Do that in the PR. Same-repo CI rewrites the README API Reference and
+"N MCP tools" counts onto the PR branch (tests.yml job `sync-generated-docs`)
+so the merge commit is already correct. Main is never patched after merge.
+Fork PRs must include `python -m tools.sync_generated_docs --write`.
 
 ## Key Gotchas
 
