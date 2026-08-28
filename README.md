@@ -16,7 +16,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/bethington/ghidra-mcp?style=for-the-badge&logo=git&logoColor=white)](https://github.com/bethington/ghidra-mcp/commits/main)
 [![Discussions](https://img.shields.io/badge/discussions-join-7B68EE?style=for-the-badge&logo=github&logoColor=white)](https://github.com/bethington/ghidra-mcp/discussions)
 [![Issues](https://img.shields.io/github/issues/bethington/ghidra-mcp?style=for-the-badge&logo=github&logoColor=white&color=orange)](https://github.com/bethington/ghidra-mcp/issues)
-[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/bethington/ghidra-mcp?style=for-the-badge&logo=securityscorecard&logoColor=white&label=OpenSSF%20Scorecard)](https://scorecard.dev/viewer/?uri=github.com/bethington/ghidra-mcp)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/knd775/ghidra-mcp?style=for-the-badge&logo=securityscorecard&logoColor=white&label=OpenSSF%20Scorecard)](https://scorecard.dev/viewer/?uri=github.com/knd775/ghidra-mcp)
 
 > If you find this useful, please ⭐ star the repo — it helps others discover it!
 >
