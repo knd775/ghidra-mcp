@@ -38,6 +38,33 @@ volume there (`GHIDRA_MCP_BSIM_ROOT`); it is not under `GHIDRA_MCP_FILE_ROOT`.
 The tools do not invent a corpus — compile the library at several GCC /
 opt-levels and ingest with symbols. Operator guide: `docs/prompts/BSIM.md`.
 
+**BSim calls run as background jobs (`bsim_job_status`, tool #261).** Every
+BSim tool spawns at least one fresh JVM, so ingest/query run minutes while the
+HTTP hops in front of the server (MCP gateway, Cloudflare tunnel) abandon the
+response around 60–100s and fabricate a bare `-32603 Internal Error` with
+nothing in any log — measured live 2026-08-29: every real `bsim_ingest` failed
+that way while `dry_run=true` "passed", because dry-run short-circuits before
+the CLI runs. Each tool now validates synchronously (an invalid `source` or
+missing credential is still an immediate, specific error), submits the
+CLI-heavy body to a single-threaded job worker, and waits inline up to
+`wait_seconds` (default 45, max 55): fast calls return their normal response,
+slow ones return `{status: "started", job_id}` for `bsim_job_status`, whose
+`result` is exactly what the tool would have returned inline. `BSimCli` logs
+every CLI start/exit/timeout, and the bridge warns when any tool call outlives
+the gateway budget, so an upstream-abandoned response is no longer invisible.
+
+**`ghidra://` ingest can actually authenticate now.** The spawned `bsim` JVM
+is stock Ghidra — it never loads this extension, so `GhidraMCPAuthInitializer`
+never registers there and forwarding `GHIDRA_SERVER_PASSWORD` in the child
+environment did nothing. Ghidra's `HeadlessClientAuthenticator` falls back to
+prompting on stdin when there is no console, and `BSimCli` left the child's
+stdin pipe open and unwritten — the prompt blocked until the 30-minute ingest
+timeout killed the JVM, holding the CLI lock the whole time. `generatesigs`
+against a server URL now passes `--user` and feeds the resolved password on
+stdin (never in argv); the child's stdin is always closed, so a missing
+credential fails the prompt immediately with a readable auth error instead of
+producing a half-hour zombie.
+
 ### Headless parity (P1–P5)
 
 Passing `language` to `load_program` used to force `AutoImporter.importAsBinary`,

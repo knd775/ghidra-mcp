@@ -31,12 +31,41 @@ Suggested `listexes` names: `<lib>-<version>-<compiler>-<optlevel>`, e.g.
 
 Priority for this environment: littlefs, Frotz, pico-sdk, newlib, FreeRTOS.
 
+## Long calls return a job, not an answer
+
+Every BSim call spawns at least one fresh JVM, so even `bsim_list_corpus`
+runs tens of seconds and ingest/query run minutes — longer than the
+response budget of the HTTP hops in front of the server (an MCP gateway
+or Cloudflare tunnel abandons the response around 60–100 s and fabricates
+a bare `-32603 Internal Error` while the operation keeps running
+invisibly). Each tool therefore takes `wait_seconds` (default 45, max
+55): if the CLI finishes inside the wait you get the normal result; if
+not you get
+
+```
+{"status": "started", "job_id": "bsim-3-1a2b", ...}
+```
+
+and the operation continues server-side. Poll:
+
+```
+bsim_job_status(job_id)          -> state: queued | running | done
+bsim_job_status()                -> every retained job
+```
+
+When `state` is `done`, the `result` field holds exactly what the tool
+would have returned inline (plus `ok: false` when that result is an
+error). Expect the ticket path for every real ingest, query, and apply;
+a `dry_run=true` response proves nothing about any of this — it returns
+before the CLI runs.
+
 ## Tools
 
 ### `bsim_create_db`
 
 ```
-bsim_create_db(db_url, config_template="medium_32", name=None, description=None, callgraph=True)
+bsim_create_db(db_url, config_template="medium_32", name=None, description=None,
+               callgraph=True, wait_seconds=45)
 ```
 
 `file:/srv/ghidra/bsim/littlefs` is an H2 file. No extra service, one
@@ -49,23 +78,31 @@ not create the database.
 ### `bsim_ingest`
 
 ```
-bsim_ingest(db_url, source, xml_dir=None, commit=True, overwrite=False)
+bsim_ingest(db_url, source, xml_dir=None, commit=True, overwrite=False, wait_seconds=45)
 ```
 
 `source` is a `ghidra://` server path, a local `ghidra:/` project, a
 repository path starting with `/` (needs `GHIDRA_SERVER_HOST`), or the
 name of an open program. `program=` is not required — `source` is the
 target. A `ghidra://` URL needs `GHIDRA_SERVER_PASSWORD` (the spawned
-`bsim` JVM cannot prompt); missing it is a named error, not a blank
-failure. A program with no functions is refused. A 64-bit program into a
-corpus that is already 32-bit is refused (the CLI would otherwise accept
-it and degrade silently). A stripped program is ingested with a warning.
+`bsim` JVM cannot prompt); missing it is a named, immediate error, not a
+blank failure. When the credential is present the server passes
+`--user` and feeds the password to the child on stdin — the spawned JVM
+is stock Ghidra, which never reads this extension's environment
+variables, and its `HeadlessClientAuthenticator` falls back to a stdin
+prompt when there is no console. An invalid `source` is refused
+synchronously with the remedy. A program with no functions is refused. A
+64-bit program into a corpus that is already 32-bit is refused (the CLI
+would otherwise accept it and degrade silently). A stripped program is
+ingested with a warning. Ingest takes minutes: expect the job ticket, and
+verify by polling `bsim_job_status` and re-running `bsim_list_corpus` —
+never by `dry_run`.
 
 ### `bsim_query`
 
 ```
 bsim_query(db_url, program, function=None, similarity_threshold=0.7,
-           confidence_threshold=0.0, max_matches=10)
+           confidence_threshold=0.0, max_matches=10, wait_seconds=45)
 ```
 
 Every match has `similarity` and `confidence` as separate numbers, plus
@@ -81,7 +118,7 @@ the tools should not be used to rename anything.
 
 ```
 bsim_apply_matches(db_url, program, min_confidence=<required>,
-                   min_similarity=0.8, skip_named=True, dry_run=True)
+                   min_similarity=0.8, skip_named=True, dry_run=True, wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
@@ -95,11 +132,24 @@ Applied names are the BSim hit names as-is (C linkage, not PascalCase).
 ### `bsim_list_corpus`
 
 ```
-bsim_list_corpus(db_url, arch=None, name=None, limit=100)
+bsim_list_corpus(db_url, arch=None, name=None, limit=100, wait_seconds=45)
 ```
 
 What is actually in the database. A corpus you cannot inspect is one you
 stop trusting.
+
+### `bsim_job_status`
+
+```
+bsim_job_status(job_id="")
+```
+
+Status and result of a background BSim operation; blank `job_id` lists
+every retained job (the last 64). The embedded `result` for a `done` job
+is identical to what the originating tool would have returned inline.
+Every CLI start/exit and job transition is also logged server-side, so a
+call abandoned by an upstream gateway still leaves evidence in the
+`ghidra-mcp` container log.
 
 ## Deployment
 

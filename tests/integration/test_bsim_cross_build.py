@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -51,10 +52,34 @@ def fixture_dir():
     return Path(FIXTURE)
 
 
+def _await_job(http_client, data, deadline_s=1800):
+    """Resolve a BSim job ticket to its result.
+
+    BSim tools answer inline when the CLI finishes inside wait_seconds and
+    return {"status": "started", "job_id"} otherwise; the embedded result from
+    bsim_job_status is identical to the inline payload.
+    """
+    if data.get("status") != "started" or "job_id" not in data:
+        return data
+    job_id = data["job_id"]
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        response = http_client.get("/bsim_job_status", params={"job_id": job_id})
+        assert response.status_code == 200, response.text
+        status = response.json()
+        assert "error" not in status, status
+        if status.get("state") == "done":
+            result = status.get("result")
+            assert isinstance(result, dict), status
+            return result
+        time.sleep(5)
+    raise AssertionError(f"BSim job {job_id} did not finish within {deadline_s}s")
+
+
 def _post(http_client, path, body):
     response = http_client.post(path, json_data=body, timeout=1800)
     assert response.status_code == 200, response.text
-    data = response.json()
+    data = _await_job(http_client, response.json())
     assert "error" not in data, data
     return data
 

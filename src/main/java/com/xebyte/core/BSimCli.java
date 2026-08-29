@@ -7,12 +7,14 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 /**
  * Spawns Ghidra's {@code support/bsim} (and {@code analyzeHeadless} for query)
@@ -26,6 +28,8 @@ import java.util.concurrent.TimeUnit;
  */
 public class BSimCli {
 
+    private static final Logger LOG = Logger.getLogger(BSimCli.class.getName());
+
     /** Process-wide lock for H2 single-writer safety. */
     public static final Object LOCK = new Object();
 
@@ -36,6 +40,16 @@ public class BSimCli {
     @FunctionalInterface
     public interface Runner {
         Result run(List<String> command, Duration timeout) throws IOException, InterruptedException;
+
+        /**
+         * Variant with data for the child's stdin (a Ghidra Server password —
+         * see {@link BSimCli#runProcess}). Test fakes that don't care about
+         * stdin inherit this delegation; the real runner overrides it.
+         */
+        default Result run(List<String> command, Duration timeout, String stdinData)
+                throws IOException, InterruptedException {
+            return run(command, timeout);
+        }
     }
 
     public static final class Result {
@@ -58,7 +72,19 @@ public class BSimCli {
     private final File ghidraHome;
 
     public BSimCli() {
-        this(BSimCli::runProcess, discoverGhidraHome());
+        this(new Runner() {
+            @Override
+            public Result run(List<String> command, Duration timeout)
+                    throws IOException, InterruptedException {
+                return runProcess(command, timeout, null);
+            }
+
+            @Override
+            public Result run(List<String> command, Duration timeout, String stdinData)
+                    throws IOException, InterruptedException {
+                return runProcess(command, timeout, stdinData);
+            }
+        }, discoverGhidraHome());
     }
 
     public BSimCli(Runner runner, File ghidraHome) {
@@ -79,14 +105,27 @@ public class BSimCli {
     }
 
     public Result bsim(Duration timeout, String... args) throws IOException, InterruptedException {
+        return bsim(timeout, List.of(args), null);
+    }
+
+    /**
+     * Run {@code support/bsim} with optional stdin data. Pass the resolved
+     * Ghidra Server password (newline-terminated) as {@code stdinData} when the
+     * command targets a {@code ghidra://} server URL: the spawned JVM does not
+     * load this extension, so {@code GhidraMCPAuthInitializer} never registers
+     * there and Ghidra's {@code HeadlessClientAuthenticator} falls back to
+     * prompting on stdin.
+     */
+    public Result bsim(Duration timeout, List<String> args, String stdinData)
+            throws IOException, InterruptedException {
         File bin = bsimBinary();
         if (bin == null || !bin.isFile()) {
             throw new IOException(missingToolMessage("bsim"));
         }
         List<String> cmd = new ArrayList<>();
         cmd.add(bin.getAbsolutePath());
-        for (String a : args) cmd.add(a);
-        return runner.run(cmd, timeout);
+        cmd.addAll(args);
+        return runner.run(cmd, timeout, stdinData);
     }
 
     public Result analyzeHeadless(Duration timeout, List<String> args)
@@ -98,7 +137,7 @@ public class BSimCli {
         List<String> cmd = new ArrayList<>();
         cmd.add(bin.getAbsolutePath());
         cmd.addAll(args);
-        return runner.run(cmd, timeout);
+        return runner.run(cmd, timeout, null);
     }
 
     private File supportTool(String name) {
@@ -158,12 +197,35 @@ public class BSimCli {
         return os.toLowerCase(Locale.ROOT).contains("win");
     }
 
-    static Result runProcess(List<String> command, Duration timeout)
+    /**
+     * Spawn the CLI process. Credentials never appear in {@code command} (they
+     * travel via environment and stdin), so logging the argv is safe.
+     *
+     * <p>The child's stdin is written (when {@code stdinData} is set) and then
+     * <b>always closed</b>. Ghidra's {@code HeadlessClientAuthenticator} reads
+     * a password from stdin when there is no console; an open, never-written
+     * pipe made that prompt block until the whole-process timeout killed the
+     * JVM — a 30-minute zombie per {@code ghidra://} ingest attempt, holding
+     * {@link #LOCK} the entire time. EOF instead fails the prompt immediately
+     * with a real authentication error the caller can read.
+     */
+    static Result runProcess(List<String> command, Duration timeout, String stdinData)
             throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         forwardServerCredentials(pb.environment());
+        long startMs = System.currentTimeMillis();
+        LOG.info(() -> "BSim CLI start (timeout " + timeout.toSeconds() + "s): "
+                + String.join(" ", command));
         Process proc = pb.start();
+        try (OutputStream stdin = proc.getOutputStream()) {
+            if (stdinData != null && !stdinData.isEmpty()) {
+                stdin.write(stdinData.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException ignored) {
+            // The child may have exited before reading stdin; its exit code
+            // and output still tell the real story below.
+        }
         StringBuilder out = new StringBuilder();
         Thread reader = new Thread(() -> {
             try (BufferedReader in = new BufferedReader(
@@ -184,6 +246,8 @@ public class BSimCli {
         if (!finished) {
             proc.destroyForcibly();
             reader.join(2000);
+            LOG.warning("BSim CLI timed out after " + timeout.toSeconds() + "s, killed: "
+                    + String.join(" ", command));
             throw new IOException("Timed out after " + timeout.toSeconds()
                     + "s running: " + String.join(" ", command));
         }
@@ -193,7 +257,45 @@ public class BSimCli {
         synchronized (out) {
             text = out.toString();
         }
+        long tookMs = System.currentTimeMillis() - startMs;
+        LOG.info(() -> "BSim CLI exit " + code + " in " + tookMs + "ms ("
+                + text.length() + " output chars): " + command.get(0)
+                + (command.size() > 1 ? " " + command.get(1) : ""));
         return new Result(code, text, command);
+    }
+
+    /**
+     * Resolved Ghidra Server username for a spawned CLI, or {@code null}.
+     * Same resolution order the server itself uses: registered authenticator,
+     * then {@code GHIDRA_SERVER_USER}.
+     */
+    static String resolvedServerUser() {
+        GhidraMCPAuthenticator auth = GhidraMCPAuthInitializer.getAuthenticator();
+        if (auth != null && auth.getUsername() != null && !auth.getUsername().isBlank()) {
+            return auth.getUsername();
+        }
+        String user = System.getenv("GHIDRA_SERVER_USER");
+        return (user == null || user.isBlank()) ? null : user;
+    }
+
+    /**
+     * Resolved Ghidra Server password for a spawned CLI's stdin, or
+     * {@code null}. Authenticator first, then the same env vars
+     * {@link #forwardServerCredentials} forwards.
+     */
+    static String resolvedServerPassword() {
+        GhidraMCPAuthenticator auth = GhidraMCPAuthInitializer.getAuthenticator();
+        if (auth != null) {
+            String fromAuth = auth.passwordForChildEnv();
+            if (fromAuth != null && !fromAuth.isBlank()) {
+                return fromAuth;
+            }
+        }
+        String password = System.getenv("GHIDRA_SERVER_PASSWORD");
+        if (password == null || password.isBlank()) {
+            password = System.getenv("GHIDRA_PASS");
+        }
+        return (password == null || password.isBlank()) ? null : password;
     }
 
     /**
@@ -201,6 +303,11 @@ public class BSimCli {
      * spawned {@code bsim}/{@code analyzeHeadless} JVM can load
      * {@code GhidraMCPAuthInitializer} and authenticate a {@code ghidra://} URL.
      * No-op when nothing is configured; never logs the password.
+     *
+     * <p>Note this only helps when the child's Ghidra install actually contains
+     * this extension. A stock install (the Docker image's {@code /opt/ghidra})
+     * never reads these variables — there the password must be fed on stdin;
+     * see {@link #bsim(Duration, List, String)}.
      */
     static void forwardServerCredentials(java.util.Map<String, String> env) {
         if (env == null) return;

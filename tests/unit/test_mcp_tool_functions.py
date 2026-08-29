@@ -675,6 +675,78 @@ class TestToolExceptionPayload(unittest.TestCase):
         self.assertIn("NameError", result["error"])
 
 
+class TestSlowToolWarning(unittest.TestCase):
+    """Calls that outlive the gateway budget must leave bridge-side evidence.
+
+    Upstream MCP gateways/tunnels abandon responses around 60-100s and
+    fabricate a bare -32603 with data: null; neither container logs anything
+    unless the bridge notes the slow call itself. That silence is how
+    bsim_ingest cost two debugging rounds.
+    """
+
+    @patch("bridge_mcp_ghidra.dispatch.dispatch_get")
+    def test_slow_call_logs_gateway_budget_warning(self, mock_get):
+        from bridge_mcp_ghidra import mcp, register_tools_from_schema
+        import bridge_mcp_ghidra.registry as registry
+
+        mock_get.return_value = '{"ok": true}'
+        schema = [
+            {
+                "name": "slow_warning_test_tool",
+                "description": "Test slow-call warning",
+                "endpoint": "/slow_warning_test",
+                "http_method": "GET",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"address": {"type": "string"}},
+                    "required": ["address"],
+                },
+            }
+        ]
+        original = registry.SLOW_TOOL_WARN_SECONDS
+        try:
+            register_tools_from_schema(schema)
+            tool = mcp._tool_manager._tools["slow_warning_test_tool"]
+            registry.SLOW_TOOL_WARN_SECONDS = 0
+            with self.assertLogs("bridge_mcp_ghidra", level="WARNING") as logs:
+                result = asyncio.run(tool.fn(address="0x401000"))
+            self.assertEqual(result, '{"ok": true}')
+            joined = "\n".join(logs.output)
+            self.assertIn("slow_warning_test_tool", joined)
+            self.assertIn("-32603", joined)
+        finally:
+            registry.SLOW_TOOL_WARN_SECONDS = original
+            register_tools_from_schema([])
+
+    @patch("bridge_mcp_ghidra.dispatch.dispatch_get")
+    def test_fast_call_does_not_warn(self, mock_get):
+        from bridge_mcp_ghidra import mcp, register_tools_from_schema
+        import bridge_mcp_ghidra.registry as registry
+
+        mock_get.return_value = '{"ok": true}'
+        schema = [
+            {
+                "name": "fast_no_warning_test_tool",
+                "description": "Test fast-call silence",
+                "endpoint": "/fast_no_warning_test",
+                "http_method": "GET",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"address": {"type": "string"}},
+                    "required": ["address"],
+                },
+            }
+        ]
+        try:
+            register_tools_from_schema(schema)
+            tool = mcp._tool_manager._tools["fast_no_warning_test_tool"]
+            with self.assertNoLogs("bridge_mcp_ghidra", level="WARNING"):
+                result = asyncio.run(tool.fn(address="0x401000"))
+            self.assertEqual(result, '{"ok": true}')
+        finally:
+            register_tools_from_schema([])
+
+
 class TestSchemaDefaultCoercion(unittest.TestCase):
     def test_boolean_string_defaults_become_bool(self):
         from bridge_mcp_ghidra.schema import _parse_schema
