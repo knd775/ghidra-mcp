@@ -7,10 +7,10 @@ import com.xebyte.core.ThreadingStrategy;
 import junit.framework.TestCase;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
-import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -43,7 +43,7 @@ public class BSimServiceValidationTest extends TestCase {
     @Override
     protected void tearDown() throws Exception {
         if (tmp != null) {
-            BSimService.deleteRecursively(tmp);
+            deleteRecursively(tmp);
         }
     }
 
@@ -115,6 +115,15 @@ public class BSimServiceValidationTest extends TestCase {
             if (cmd.contains(verb)) return cmd;
         }
         return null;
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        if (root == null || !Files.exists(root)) return;
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+            });
+        }
     }
 
     private static String canned(List<String> cmd) {
