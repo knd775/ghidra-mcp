@@ -1,10 +1,16 @@
 """The FastMCP server singleton and its initialization-options patch."""
 
+import json
+import traceback
+
 from mcp.server.fastmcp import FastMCP, Context  # noqa: F401  (Context re-exported)
+from mcp.server.fastmcp.tools.tool_manager import ToolManager
 from mcp.server.lowlevel.server import NotificationOptions
+from mcp.types import TextContent
 
 # `state` imports only from `config`, so this cannot cycle back through here.
 from . import state as _state
+from .config import logger
 
 # The MCP server singleton. All static and dynamically registered tools attach
 # to this object.
@@ -50,3 +56,47 @@ async def _list_tools_capturing_session():
 
 mcp.list_tools = _list_tools_capturing_session
 mcp._mcp_server.list_tools()(_list_tools_capturing_session)
+
+
+def format_tool_exception(exc: BaseException, tool: str) -> dict:
+    """Structured error payload for a failed tool call.
+
+    FastMCP/MCP convert uncaught exceptions into JSON-RPC ``-32603 Internal
+    Error`` with ``data: null``. Putting type, message, and traceback here
+    (and returning them as tool content) is what makes a bridge-side failure
+    diagnosable — BSim ingest's first-use crash was otherwise a blank 32603.
+    """
+    cause = exc.__cause__
+    payload: dict = {
+        "error": f"{type(exc).__name__}: {exc}",
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "tool": tool,
+        "traceback": traceback.format_exc(),
+    }
+    if cause is not None:
+        payload["cause_type"] = type(cause).__name__
+        payload["cause"] = str(cause)
+    return payload
+
+
+def format_tool_exception_json(exc: BaseException, tool: str) -> str:
+    return json.dumps(format_tool_exception(exc, tool))
+
+
+_orig_tool_manager_call = ToolManager.call_tool
+
+
+async def _call_tool_never_raises(self, name, arguments, context=None, convert_result=False):
+    """Catch FastMCP/Pydantic failures that happen before the tool body runs."""
+    try:
+        return await _orig_tool_manager_call(
+            self, name, arguments, context=context, convert_result=convert_result
+        )
+    except Exception as e:
+        logger.exception("Tool %s failed", name)
+        text = format_tool_exception_json(e, name)
+        return [TextContent(type="text", text=text)]
+
+
+ToolManager.call_tool = _call_tool_never_raises

@@ -9,8 +9,8 @@ from . import dispatch
 from . import state
 from . import transport
 from .config import STATIC_TOOL_NAMES, _ALL_STATIC_TOOL_NAMES, logger
-from .schema import _TYPE_MAP, _normalize_tool_def_names, _parse_schema
-from .server import Context, mcp
+from .schema import _TYPE_MAP, _coerce_default, _normalize_tool_def_names, _parse_schema
+from .server import Context, mcp, format_tool_exception_json
 from .validation import sanitize_address, validate_tool_name
 
 # Fail fast at import time if any static tool name is not CAPI-safe. Validates
@@ -18,6 +18,92 @@ from .validation import sanitize_address, validate_tool_name
 # ones active on this platform.
 for _static_tool_name in _ALL_STATIC_TOOL_NAMES:
     validate_tool_name(_static_tool_name)
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _tool_exception_payload(exc: BaseException, tool: str) -> str:
+    logger.exception("Tool handler %s failed", tool)
+    return format_tool_exception_json(exc, tool)
+
+
+def _dispatch_tool_call(
+    endpoint: str,
+    http_method: str,
+    properties: dict,
+    program_selectors: list[str],
+    use_synthetic_dry_run: bool,
+    kwargs: dict,
+) -> str:
+    """Sanitize, filter, and dispatch one tool call to Ghidra HTTP."""
+    for pname, pdef in properties.items():
+        if pdef.get("param_type") == "address" and pname in kwargs and kwargs[pname] is not None:
+            kwargs[pname] = sanitize_address(str(kwargs[pname]))
+    # Synthetic bridge dry-run goes as a query param. Schema-declared
+    # dry_run must stay in kwargs so its declared source (query/body) wins.
+    dry_run = kwargs.pop("dry_run", None) if use_synthetic_dry_run else None
+    # Filter out None AND empty strings. Codex's MCP client passes schema
+    # default values (including "") to every call, which the Ghidra
+    # handler treats as "present but empty" and fails on params that
+    # require a real value (e.g. /get_function_callers rejects empty
+    # name/address). minimax avoids this by only sending params the LLM
+    # explicitly provided, but the bridge is schema-driven and doesn't
+    # know which were defaults.
+    #
+    # Exception: a parameter may declare `allow_empty` when "" is itself
+    # the intent. This used to be a blanket rule on the claim that empty
+    # was meaningless for every endpoint, which made clearing a comment
+    # unreachable through MCP -- set_comment(comment="") was dropped here,
+    # arrived as null, and came back "Comment text is required". Whether
+    # empty is meaningful is a property of the parameter, so the parameter
+    # declares it (@Param(allowEmpty = true)) rather than the bridge
+    # guessing.
+    allow_empty = {name for name, pdef in properties.items() if pdef.get("allow_empty")}
+    filtered = {
+        k: v
+        for k, v in kwargs.items()
+        if v is not None and not (isinstance(v, str) and v == "" and k not in allow_empty)
+    }
+    # Strict mode: refuse if any program selector is missing, so a forgotten
+    # one fails loudly instead of running against the server's current
+    # program. filtered has already dropped None and "", so absence is the
+    # test (an empty selector counts as omitted).
+    if state._require_selectors and program_selectors:
+        missing = [p for p in program_selectors if p not in filtered]
+        if missing:
+            names = ", ".join(f"`{p}=`" for p in missing)
+            return json.dumps(
+                {
+                    "error": (
+                        f"Missing required program selector(s): {names} "
+                        "(GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS is set). "
+                        "Pass each explicitly to target the intended open program(s)."
+                    )
+                }
+            )
+    if http_method == "GET":
+        str_params = {k: str(v) for k, v in filtered.items()}
+        if use_synthetic_dry_run and _is_truthy(dry_run):
+            str_params["dry_run"] = "true"
+        return dispatch.dispatch_get(endpoint, params=str_params if str_params else None)
+    body_data = {}
+    query_params = {}
+    for key, value in filtered.items():
+        if properties.get(key, {}).get("source") == "query":
+            query_params[key] = str(value)
+        else:
+            body_data[key] = value
+    if use_synthetic_dry_run and _is_truthy(dry_run):
+        query_params["dry_run"] = "true"
+    return dispatch.dispatch_post(
+        endpoint,
+        data=body_data,
+        query_params=query_params or None,
+    )
 
 
 def _build_tool_function(endpoint: str, http_method: str, params_schema: dict):
@@ -34,87 +120,27 @@ def _build_tool_function(endpoint: str, http_method: str, params_schema: dict):
     # wrong-binary hazard strict mode closes. (open_program/close_program use
     # path/name, so they have no selector here and are unaffected.)
     program_selectors = [
-        name for name in properties if name == "program" or name.endswith("_program") or name.startswith("program_")
+        name
+        for name in properties
+        if (name == "program" or name.endswith("_program") or name.startswith("program_"))
+        and properties.get(name, {}).get("selector", True)
     ]
     is_post = http_method.upper() == "POST"
     has_schema_dry_run = "dry_run" in properties
     use_synthetic_dry_run = is_post and not has_schema_dry_run
 
-    def is_truthy(value) -> bool:
-        if isinstance(value, str):
-            return value.lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
     def handler(**kwargs):
-        # Sanitize address parameters before dispatch
-        for pname, pdef in properties.items():
-            if pdef.get("param_type") == "address" and pname in kwargs and kwargs[pname] is not None:
-                kwargs[pname] = sanitize_address(str(kwargs[pname]))
-        # Synthetic bridge dry-run goes as a query param. Schema-declared
-        # dry_run must stay in kwargs so its declared source (query/body) wins.
-        dry_run = kwargs.pop("dry_run", None) if use_synthetic_dry_run else None
-        # Filter out None AND empty strings. Codex's MCP client passes schema
-        # default values (including "") to every call, which the Ghidra
-        # handler treats as "present but empty" and fails on params that
-        # require a real value (e.g. /get_function_callers rejects empty
-        # name/address). minimax avoids this by only sending params the LLM
-        # explicitly provided, but the bridge is schema-driven and doesn't
-        # know which were defaults.
-        #
-        # Exception: a parameter may declare `allow_empty` when "" is itself
-        # the intent. This used to be a blanket rule on the claim that empty
-        # was meaningless for every endpoint, which made clearing a comment
-        # unreachable through MCP -- set_comment(comment="") was dropped here,
-        # arrived as null, and came back "Comment text is required". Whether
-        # empty is meaningful is a property of the parameter, so the parameter
-        # declares it (@Param(allowEmpty = true)) rather than the bridge
-        # guessing.
-        allow_empty = {
-            name for name, pdef in properties.items() if pdef.get("allow_empty")
-        }
-        filtered = {
-            k: v
-            for k, v in kwargs.items()
-            if v is not None
-            and not (isinstance(v, str) and v == "" and k not in allow_empty)
-        }
-        # Strict mode: refuse if any program selector is missing, so a forgotten
-        # one fails loudly instead of running against the server's current
-        # program. filtered has already dropped None and "", so absence is the
-        # test (an empty selector counts as omitted).
-        if state._require_selectors and program_selectors:
-            missing = [p for p in program_selectors if p not in filtered]
-            if missing:
-                names = ", ".join(f"`{p}=`" for p in missing)
-                return json.dumps(
-                    {
-                        "error": (
-                            f"Missing required program selector(s): {names} "
-                            "(GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS is set). "
-                            "Pass each explicitly to target the intended open program(s)."
-                        )
-                    }
-                )
-        if http_method == "GET":
-            str_params = {k: str(v) for k, v in filtered.items()}
-            if use_synthetic_dry_run and is_truthy(dry_run):
-                str_params["dry_run"] = "true"
-            return dispatch.dispatch_get(endpoint, params=str_params if str_params else None)
-        else:
-            body_data = {}
-            query_params = {}
-            for key, value in filtered.items():
-                if properties.get(key, {}).get("source") == "query":
-                    query_params[key] = str(value)
-                else:
-                    body_data[key] = value
-            if use_synthetic_dry_run and is_truthy(dry_run):
-                query_params["dry_run"] = "true"
-            return dispatch.dispatch_post(
+        try:
+            return _dispatch_tool_call(
                 endpoint,
-                data=body_data,
-                query_params=query_params or None,
+                http_method,
+                properties,
+                program_selectors,
+                use_synthetic_dry_run,
+                kwargs,
             )
+        except Exception as e:
+            return _tool_exception_payload(e, endpoint)
 
     # Build function signature with proper types and defaults
     # Params with defaults must come after params without defaults
@@ -124,6 +150,8 @@ def _build_tool_function(endpoint: str, http_method: str, params_schema: dict):
         json_type = pdef.get("type", "string")
         py_type = _TYPE_MAP.get(json_type, str)
         default = pdef.get("default", inspect.Parameter.empty)
+        if default is not inspect.Parameter.empty:
+            default = _coerce_default(json_type, default)
         if pname not in required and default is inspect.Parameter.empty:
             default = None
             py_type = py_type | None if py_type != str else str | None
@@ -169,7 +197,10 @@ def _register_tool_def(tool_def: dict) -> bool:
         # FastMCP calls synchronous tools directly on its event loop. Keep the
         # blocking Ghidra HTTP lifecycle in a worker thread so one slow request
         # cannot close or starve the entire MCP session.
-        return await state.run_blocking_ghidra_call(sync_handler, **kwargs)
+        try:
+            return await state.run_blocking_ghidra_call(sync_handler, **kwargs)
+        except Exception as e:
+            return _tool_exception_payload(e, name)
 
     handler.__signature__ = sync_handler.__signature__
     handler.__annotations__ = sync_handler.__annotations__

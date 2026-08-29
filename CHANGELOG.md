@@ -22,6 +22,17 @@ differently-named hits within 0.05 similarity are `ambiguous` and are never
 applied. `min_confidence` has no default. `dry_run` defaults to true and does
 not call `setName`. `skip_named` defaults to true.
 
+`bsim_ingest` no longer requires `program=` under
+`GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS` — its target is `source` (a ghidraURL).
+A `ghidra://` source without `GHIDRA_SERVER_PASSWORD` is refused by name, not
+as a blank `-32603`. Boolean schema defaults (`"true"`/`"false"`) are coerced
+so FastMCP does not fail the call before the handler runs. POST tools that do
+not declare `dry_run` (including `bsim_create_db` and `import_program`)
+short-circuit in `AnnotationScanner` before any side-effecting call; a body or
+query `dry_run=true` returns `would_execute` and creates nothing. Bridge
+handler exceptions return type, message, and traceback instead of a bare
+JSON-RPC Internal Error.
+
 H2 `file:/srv/ghidra/bsim/<db>` for a single writer. Compose mounts a dedicated
 volume there (`GHIDRA_MCP_BSIM_ROOT`); it is not under `GHIDRA_MCP_FILE_ROOT`.
 The tools do not invent a corpus — compile the library at several GCC /

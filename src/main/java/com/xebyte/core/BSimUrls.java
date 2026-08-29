@@ -56,6 +56,26 @@ public final class BSimUrls {
         return s != null && s.toLowerCase(Locale.ROOT).startsWith("ghidra://");
     }
 
+    /**
+     * Server-bound {@code ghidra://} ingest needs a password the spawned
+     * {@code bsim} JVM can actually use (it cannot pop the GUI prompt).
+     * Returns an error naming {@code GHIDRA_SERVER_PASSWORD}, or {@code null}
+     * when the source is not a server URL or a credential is already configured.
+     */
+    public static String missingServerCredential(String source) {
+        if (!isServerGhidraUrl(source)) return null;
+        if (GhidraMCPAuthInitializer.hasPassword()) return null;
+        String password = System.getenv("GHIDRA_SERVER_PASSWORD");
+        if (password == null || password.isBlank()) {
+            password = System.getenv("GHIDRA_PASS");
+        }
+        if (password != null && !password.isBlank()) return null;
+        return "source is a ghidra:// server URL, but GHIDRA_SERVER_PASSWORD is not set. "
+                + "The spawned bsim process cannot prompt for a password; set "
+                + "GHIDRA_SERVER_PASSWORD (and GHIDRA_SERVER_USER) so generatesigs "
+                + "can read the repository.";
+    }
+
     public static String requireConfigTemplate(String template) {
         String t = requireToken("config_template", template);
         if (!CONFIG_TEMPLATES.contains(t)) {

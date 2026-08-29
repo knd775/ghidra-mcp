@@ -51,6 +51,16 @@ public class GhidraMCPAuthenticator implements ClientAuthenticator {
         return username;
     }
 
+    public boolean hasPassword() {
+        return password != null && password.length > 0;
+    }
+
+    /** Password for forwarding into a child process environment. Never log this. */
+    String passwordForChildEnv() {
+        if (password == null || password.length == 0) return null;
+        return new String(password);
+    }
+
     @Override
     public boolean isSSHKeyAvailable() {
         return false;

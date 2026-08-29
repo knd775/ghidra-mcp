@@ -1,7 +1,9 @@
 package com.xebyte.offline;
 
+import com.xebyte.core.AnnotationScanner;
 import com.xebyte.core.BSimCli;
 import com.xebyte.core.BSimService;
+import com.xebyte.core.EndpointDef;
 import com.xebyte.core.Response;
 import com.xebyte.core.ThreadingStrategy;
 import junit.framework.TestCase;
@@ -11,7 +13,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -75,10 +79,117 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(r.toJson().contains("config_template"));
     }
 
-    public void testIngestRequiresSource() {
-        Response r = svc.ingest("file:" + tmp.resolve("db"), "", "", true, false, "");
+    public void testIngestInvalidSourceIsSpecificError() {
+        Response r = svc.ingest("file:" + tmp.resolve("db"), "not-a-url", "", true, false, "");
         assertTrue(r instanceof Response.Err);
-        assertTrue(r.toJson().contains("source"));
+        String json = r.toJson();
+        assertTrue(json, json.contains("source"));
+        assertTrue(json, json.contains("ghidra://") || json.contains("ghidraURL"));
+        assertNull(findCommand("generatesigs"));
+    }
+
+    public void testIngestServerUrlWithoutPasswordNamesCredential() {
+        if (nonBlank(System.getenv("GHIDRA_SERVER_PASSWORD"))
+                || nonBlank(System.getenv("GHIDRA_PASS"))) {
+            return;
+        }
+        Response r = svc.ingest(
+                "file:" + tmp.resolve("db"),
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+                "", true, false, "");
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("GHIDRA_SERVER_PASSWORD"));
+        assertNull(findCommand("generatesigs"));
+    }
+
+    public void testIngestLocalGhidraUrlReachesCli() {
+        Path db = tmp.resolve("localdb");
+        Response r = svc.ingest(
+                "file:" + db, "ghidra:/tmp/bsim-proj/BSimIngest", "", true, false, "");
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        List<String> gen = findCommand("generatesigs");
+        assertNotNull(gen);
+        assertTrue(gen.contains("ghidra:/tmp/bsim-proj/BSimIngest"));
+        assertTrue(gen.contains("--commit"));
+        assertTrue(gen.contains("--bsim"));
+    }
+
+    public void testCreateDbDryRunDoesNotRunCli() throws Exception {
+        Path db = tmp.resolve("dry-create");
+        AnnotationScanner scanner = new AnnotationScanner(
+                ServiceFactory.stubProvider(), new Object[] { svc });
+        EndpointDef endpoint = null;
+        for (EndpointDef ep : scanner.getEndpoints()) {
+            if ("/bsim_create_db".equals(ep.path())) endpoint = ep;
+        }
+        assertNotNull(endpoint);
+        Map<String, String> query = new HashMap<>();
+        query.put("dry_run", "true");
+        Map<String, Object> body = new HashMap<>();
+        body.put("db_url", "file:" + db.resolve("re"));
+        body.put("config_template", "medium_32");
+        Response r = endpoint.handler().handle(query, body);
+        String json = r.toJson();
+        assertTrue(json, json.contains("would_execute") || json.contains("\"dry_run\":true"));
+        assertTrue(json, json.contains("/bsim_create_db"));
+        assertNull("createdatabase must not run on dry_run", findCommand("createdatabase"));
+        assertFalse("dry_run must not create the parent directory either",
+                Files.isDirectory(db));
+    }
+
+    public void testIngestProgramParamIsNotASelector() {
+        String schema = new AnnotationScanner(
+                ServiceFactory.stubProvider(), new Object[] { svc }).generateSchema();
+        assertTrue(schema.contains("\"selector\": false"));
+        assertTrue(schema.contains("/bsim_ingest"));
+    }
+
+    public void testIngestRepoPathWithoutHostIsSpecificError() {
+        if (nonBlank(System.getenv("GHIDRA_SERVER_HOST"))) {
+            if (nonBlank(System.getenv("GHIDRA_SERVER_PASSWORD"))
+                    || nonBlank(System.getenv("GHIDRA_PASS"))) {
+                return;
+            }
+            Response r = svc.ingest("file:" + tmp.resolve("db"),
+                    "/5n4ck3y/nullcog-v2", "", true, false, "");
+            assertTrue(r instanceof Response.Err);
+            assertTrue(r.toJson().contains("GHIDRA_SERVER_PASSWORD"));
+            assertNull(findCommand("generatesigs"));
+            return;
+        }
+        Response r = svc.ingest("file:" + tmp.resolve("db"),
+                "/5n4ck3y/nullcog-v2", "", true, false, "");
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("GHIDRA_SERVER_HOST") || json.contains("ghidra://"));
+        assertNull(findCommand("generatesigs"));
+    }
+
+    public void testApplyMatchesDryRunIsInvokedNotShortCircuited() throws Exception {
+        AnnotationScanner scanner = new AnnotationScanner(
+                ServiceFactory.stubProvider(), new Object[] { svc });
+        EndpointDef endpoint = null;
+        for (EndpointDef ep : scanner.getEndpoints()) {
+            if ("/bsim_apply_matches".equals(ep.path())) endpoint = ep;
+        }
+        assertNotNull(endpoint);
+        Map<String, String> query = new HashMap<>();
+        query.put("dry_run", "true");
+        Map<String, Object> body = new HashMap<>();
+        body.put("db_url", "file:" + tmp.resolve("db"));
+        body.put("min_confidence", 20.0);
+        body.put("dry_run", Boolean.TRUE);
+        Response r = endpoint.handler().handle(query, body);
+        String json = r.toJson();
+        assertFalse("apply_matches must run so the preview can list would_rename",
+                json.contains("would_execute"));
+        assertNull("dry_run apply must not shell out until a program is loaded",
+                findCommand("createdatabase"));
+    }
+
+    private static boolean nonBlank(String s) {
+        return s != null && !s.isBlank();
     }
 
     public void testApplyRequiresMinConfidence() {
