@@ -231,19 +231,21 @@ public class BSimService {
                 if (reject != null) return reject;
             }
 
-            Path xmlPath = (xmlDir == null || xmlDir.isBlank())
-                    ? Files.createTempDirectory("bsim-xml-")
-                    : Path.of(xmlDir);
+            // A caller-supplied xml_dir is theirs to keep; a temp one is ours
+            // to remove — its contents are already in the database after
+            // --commit, and its path is never returned to the caller.
+            boolean tempXml = (xmlDir == null || xmlDir.isBlank());
+            Path xmlPath = tempXml ? Files.createTempDirectory("bsim-xml-") : Path.of(xmlDir);
             Files.createDirectories(xmlPath);
 
             String ghidraUrl;
             Path tempProj = null;
-            File tempGzf = null;
+            Path tempGzfDir = null;
             try {
                 ResolvedSource resolved = resolveSource(source, program, xmlPath);
                 ghidraUrl = resolved.ghidraUrl;
                 tempProj = resolved.tempProject;
-                tempGzf = resolved.tempGzf;
+                tempGzfDir = resolved.tempGzfDir;
                 // Repo paths become ghidra:// after resolve; check the resolved
                 // URL too, not just the original source string.
                 String credErr = BSimUrls.missingServerCredential(ghidraUrl);
@@ -291,7 +293,8 @@ public class BSimService {
                 if (!warnings.isEmpty()) body.put("warnings", warnings);
                 return Response.ok(body);
             } finally {
-                cleanupTemp(tempProj, tempGzf);
+                cleanupTemp(tempProj, tempGzfDir);
+                if (tempXml) deleteRecursively(xmlPath);
             }
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -583,11 +586,16 @@ public class BSimService {
 
     Response runQuery(String dbUrl, Program program, String function,
                       double similarity, double confidence, int maxMatches) throws Exception {
-        File gzf = File.createTempFile("bsim-query-", ".gzf");
-        Path projDir = Files.createTempDirectory("bsim-qproj-");
-        Path scriptDir = Files.createTempDirectory("bsim-qscript-");
-        Path outJson = Files.createTempFile("bsim-qout-", ".json");
+        // saveToPackedFile refuses to overwrite, so the gzf must be a path
+        // nothing has created yet — File.createTempFile pre-creates a zero-byte
+        // file and made every query fail with "<path> already exists". One
+        // owned directory also gives every exit path a single recursive delete.
+        Path workDir = Files.createTempDirectory("bsim-query-");
         try {
+            File gzf = workDir.resolve("program.gzf").toFile();
+            Path projDir = Files.createDirectory(workDir.resolve("proj"));
+            Path scriptDir = workDir.resolve("script");
+            Path outJson = workDir.resolve("query-out.json");
             program.saveToPackedFile(gzf, TaskMonitor.DUMMY);
             extractQueryScript(scriptDir);
             String funcArg = (function == null || function.isBlank()) ? "-" : function.trim();
@@ -636,10 +644,7 @@ public class BSimService {
             body.put("count", rows.size());
             return Response.ok(body);
         } finally {
-            gzf.delete();
-            deleteRecursively(projDir);
-            deleteRecursively(scriptDir);
-            Files.deleteIfExists(outJson);
+            deleteRecursively(workDir);
         }
     }
 
@@ -756,39 +761,48 @@ public class BSimService {
             return new ResolvedSource(shared.toExternalForm(), null, null);
         }
         // Open local programs lock their project; export a GZF into a temp project
-        // that `bsim generatesigs` can read.
-        File gzf = File.createTempFile("bsim-ingest-", ".gzf");
-        program.saveToPackedFile(gzf, TaskMonitor.DUMMY);
-        Path proj = Files.createTempDirectory(workDir, "ingest-proj-");
-        List<String> args = new ArrayList<>();
-        args.add(proj.toAbsolutePath().toString());
-        args.add("BSimIngest");
-        args.add("-import");
-        args.add(gzf.getAbsolutePath());
-        args.add("-overwrite");
-        args.add("-noanalysis");
-        BSimCli.Result r;
-        synchronized (BSimCli.LOCK) {
-            r = cli.analyzeHeadless(BSimCli.INGEST_TIMEOUT, args);
-        }
-        if (!r.ok()) {
-            gzf.delete();
+        // that `bsim generatesigs` can read. saveToPackedFile refuses to
+        // overwrite, so the gzf is a fresh path inside a directory we own —
+        // never pre-created via File.createTempFile.
+        Path gzfDir = Files.createTempDirectory(workDir, "ingest-gzf-");
+        Path proj = null;
+        try {
+            File gzf = gzfDir.resolve("program.gzf").toFile();
+            program.saveToPackedFile(gzf, TaskMonitor.DUMMY);
+            proj = Files.createTempDirectory(workDir, "ingest-proj-");
+            List<String> args = new ArrayList<>();
+            args.add(proj.toAbsolutePath().toString());
+            args.add("BSimIngest");
+            args.add("-import");
+            args.add(gzf.getAbsolutePath());
+            args.add("-overwrite");
+            args.add("-noanalysis");
+            BSimCli.Result r;
+            synchronized (BSimCli.LOCK) {
+                r = cli.analyzeHeadless(BSimCli.INGEST_TIMEOUT, args);
+            }
+            if (!r.ok()) {
+                throw new IOException(
+                        "Failed to stage source into a temp project: " + tail(r.output, 1500));
+            }
+            String ghidraUrl = "ghidra:" + proj.toAbsolutePath() + "/BSimIngest";
+            return new ResolvedSource(ghidraUrl, proj, gzfDir);
+        } catch (Exception e) {
+            deleteRecursively(gzfDir);
             deleteRecursively(proj);
-            throw new IOException("Failed to stage source into a temp project: " + tail(r.output, 1500));
+            throw e;
         }
-        String ghidraUrl = "ghidra:" + proj.toAbsolutePath() + "/BSimIngest";
-        return new ResolvedSource(ghidraUrl, proj, gzf);
     }
 
     private static final class ResolvedSource {
         final String ghidraUrl;
         final Path tempProject;
-        final File tempGzf;
+        final Path tempGzfDir;
 
-        ResolvedSource(String ghidraUrl, Path tempProject, File tempGzf) {
+        ResolvedSource(String ghidraUrl, Path tempProject, Path tempGzfDir) {
             this.ghidraUrl = ghidraUrl;
             this.tempProject = tempProject;
-            this.tempGzf = tempGzf;
+            this.tempGzfDir = tempGzfDir;
         }
     }
 
@@ -829,9 +843,9 @@ public class BSimService {
         }
     }
 
-    private static void cleanupTemp(Path proj, File gzf) {
-        if (gzf != null) gzf.delete();
-        if (proj != null) deleteRecursively(proj);
+    private static void cleanupTemp(Path proj, Path gzfDir) {
+        deleteRecursively(gzfDir);
+        deleteRecursively(proj);
     }
 
     static void deleteRecursively(Path root) {
