@@ -1,0 +1,140 @@
+"""Cross-build BSim quality check.
+
+Reproduces the failure that motivated the BSim tools: a reference library
+build at one GCC / opt-level, queried from a firmware image of the same
+library built differently. Distinctive functions should come back as the
+top hit with high confidence. Short generic helpers should come back with
+low confidence even at high similarity.
+
+There is no littlefs/RP2040 corpus in this repo. Point GHIDRA_BSIM_FIXTURE
+at a directory containing:
+
+    db_url.txt          first line is the BSim URL
+    distinctive.json    {"function": "FUN_...", "expected_name": "lfs_bd_read",
+                         "min_confidence": 20}
+    generic.json        {"function": "FUN_...", "max_confidence": 10}
+
+Ghidra MCP must be running with the firmware program open. If this test
+cannot be made to pass, BSim is not solving the problem here; do not
+bulk-apply names from these tools until it does.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+FIXTURE = os.environ.get("GHIDRA_BSIM_FIXTURE", "")
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("require_server"),
+]
+
+
+@pytest.fixture(scope="module")
+def require_server(server_available):
+    if not server_available:
+        pytest.skip("MCP server is not running")
+
+
+@pytest.fixture(scope="module")
+def fixture_dir():
+    if not FIXTURE or not Path(FIXTURE).is_dir():
+        pytest.skip(
+            "Set GHIDRA_BSIM_FIXTURE to a directory with db_url.txt, "
+            "distinctive.json, generic.json"
+        )
+    return Path(FIXTURE)
+
+
+def _post(http_client, path, body):
+    response = http_client.post(path, json_data=body, timeout=1800)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert "error" not in data, data
+    return data
+
+
+def _db_url(fixture_dir: Path) -> str:
+    return (fixture_dir / "db_url.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+
+
+def test_distinctive_function_is_top_hit_with_confidence(http_client, fixture_dir):
+    spec = json.loads((fixture_dir / "distinctive.json").read_text(encoding="utf-8"))
+    data = _post(
+        http_client,
+        "/bsim_query",
+        {
+            "db_url": _db_url(fixture_dir),
+            "function": spec["function"],
+            "similarity_threshold": spec.get("similarity_threshold", 0.7),
+            "confidence_threshold": 0.0,
+            "max_matches": 10,
+        },
+    )
+    matches = data.get("matches") or []
+    assert matches, data
+    top = matches[0]
+    assert "similarity" in top and "confidence" in top, top
+    assert top["name"] == spec["expected_name"], top
+    assert top["confidence"] >= spec.get("min_confidence", 20), top
+    assert data.get("ambiguous") is False, data
+
+
+def test_generic_helper_low_confidence(http_client, fixture_dir):
+    spec = json.loads((fixture_dir / "generic.json").read_text(encoding="utf-8"))
+    data = _post(
+        http_client,
+        "/bsim_query",
+        {
+            "db_url": _db_url(fixture_dir),
+            "function": spec["function"],
+            "similarity_threshold": spec.get("similarity_threshold", 0.5),
+            "confidence_threshold": 0.0,
+            "max_matches": 10,
+        },
+    )
+    matches = data.get("matches") or []
+    if not matches:
+        return
+    top = matches[0]
+    assert "confidence" in top and "similarity" in top, top
+    assert top["confidence"] <= spec.get("max_confidence", 10), (
+        "generic helper returned high confidence; BSim is not separating "
+        "distinctive functions from accessors/thunks: " + json.dumps(top)
+    )
+
+
+def test_apply_dry_run_does_not_rename(http_client, fixture_dir):
+    before = http_client.get("/list_functions", params={"limit": "5"})
+    assert before.status_code == 200
+    data = _post(
+        http_client,
+        "/bsim_apply_matches",
+        {
+            "db_url": _db_url(fixture_dir),
+            "min_confidence": 1e9,
+            "dry_run": True,
+        },
+    )
+    assert data.get("dry_run") is True, data
+    assert data.get("renamed") == [], data
+    after = http_client.get("/list_functions", params={"limit": "5"})
+    assert after.status_code == 200
+    assert before.text == after.text
+
+
+def test_apply_without_min_confidence_is_an_error(http_client, fixture_dir):
+    response = http_client.post(
+        "/bsim_apply_matches",
+        json_data={"db_url": _db_url(fixture_dir), "dry_run": True},
+        timeout=60,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "error" in data
+    assert "min_confidence" in data["error"]

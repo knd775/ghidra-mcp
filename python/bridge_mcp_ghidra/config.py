@@ -24,6 +24,11 @@ ENDPOINT_TIMEOUTS = {
     "import_file": 300,
     "run_ghidra_script": 1800,
     "run_script_inline": 1800,
+    "bsim_ingest": 1800,
+    "bsim_query": 1800,
+    "bsim_apply_matches": 1800,
+    "bsim_create_db": 120,
+    "bsim_list_corpus": 60,
     # Ghidra's default decompile cap is 60s. The bridge must outlive it so the
     # plugin can return a structured timeout instead of writing into a closed
     # socket after the client has already gone away.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-MCP server bridging Ghidra reverse engineering with AI tools. 255 MCP tools for binary analysis.
+MCP server bridging Ghidra reverse engineering with AI tools. 260 MCP tools for binary analysis.
 
 - **Package**: `com.xebyte` | **Version**: 7.0.0 | **Java**: 21 LTS | **Ghidra**: 12.1.2
 
@@ -68,7 +68,7 @@ AI Tools <-> MCP Bridge (python/bridge_mcp_ghidra/) <-> Ghidra Plugin (GhidraMCP
 
 - **Plugin**: `src/main/java/com/xebyte/GhidraMCPPlugin.java` -- HTTP server, delegates to services
 - **Bridge**: `python/bridge_mcp_ghidra/` (package, split into focused modules: `config`, `state`, `server`, `validation`, `transport`, `discovery`, `schema`, `dispatch`, `registry`, `static_tools`, `debugger`, `cli`) -- dynamic tool registration from `/mcp/schema` + static tools (8 instance/tool-group/import: `list_instances`, `connect_instance`, `list_tool_groups`, `load_tool_group`, `unload_tool_group`, `check_tools`, `search_tools`, `import_file`; + 22 debugger proxy via `GHIDRA_DEBUGGER_URL`). Ships as the `ghidra-mcp-bridge` wheel; `bridge-mcp-ghidra` console script. Cross-module functions are called module-qualified (e.g. `transport.do_request`, `dispatch.dispatch_get`) and mutable runtime state lives in `state.py`, so each function has one canonical mock-patch target.
-- **Service Layer**: `src/main/java/com/xebyte/core/` -- 14 service classes (~20K lines), `@McpTool`/`@Param` annotated. v5.4.0 adds `EmulationService` (P-code emulation), `DebuggerService` (TraceRmi wrapping — GUI-only)
+- **Service Layer**: `src/main/java/com/xebyte/core/` -- 15 service classes (~20K lines), `@McpTool`/`@Param` annotated. v5.4.0 adds `EmulationService` (P-code emulation), `DebuggerService` (TraceRmi wrapping — GUI-only). v7.0.0 adds `BSimService` (CLI wrap of `support/bsim`; BSim is **not** on the server classpath).
 - **Debugger (Python)**: MOVED 2026-08-11 to `d2-game-exe`. It was a standalone
   HTTP server on port 8099 whose `d2/conventions.py` made it game-side. What
   stays here is the **bridge proxy** — 22 tools in
@@ -93,7 +93,7 @@ Services use constructor injection: `ProgramProvider` + `ThreadingStrategy`.
 
 Do not try to keep the full tool list in this file.
 
-- **Authoritative repo snapshot**: `tests/endpoints.json` (272 endpoints, categories, descriptions)
+- **Authoritative repo snapshot**: `tests/endpoints.json` (260 endpoints, categories, descriptions)
 - **Authoritative runtime schema**: `/mcp/schema` from the running server
 - **Usage patterns / operator guide**: `docs/prompts/TOOL_USAGE_GUIDE.md`
 
@@ -219,6 +219,7 @@ Find the file(s) you edited below; run everything in that row. Always include th
 | Change location | Run |
 | --- | --- |
 | `src/main/java/com/xebyte/core/*Service.java` (any service class) | Offline (Java) + Integration (Java) + `tests/integration/test_readonly_endpoints.py` |
+| `src/main/java/com/xebyte/core/BSimService.java` (`BSimCli`, `BSimUrls`, `BSimMatches`, `BSimCliParser`) | Offline (Java) `BSimCliParserTest` + `BSimServiceValidationTest`. Live: `tests/integration/test_bsim_cross_build.py` (skips without `GHIDRA_BSIM_FIXTURE`). Do **not** add BSim modules to the server classpath; query runs `BSim_McpQuery.java` in a helper `analyzeHeadless` JVM. Keep `ghidra_scripts/BSim_McpQuery.java` byte-identical to `src/main/resources/bsim/BSim_McpQuery.java`. |
 | `src/main/java/com/xebyte/core/AnalysisService.java` — `/get_function_pcode` / `/get_language_metadata` (#192) | Offline (Java) + `tests/integration/test_readonly_endpoints.py::TestProgramInfo::test_get_language_metadata*` + `::TestFunctionAnalysis::test_get_function_pcode_*`. Requires live Ghidra with the new JAR deployed. |
 | `src/main/java/com/xebyte/core/ServerManager.java` — UDS + TCP port advertising (#175) | Offline (Java) `ServerManagerPortTest` for `boundTcpPort` field; `tests/integration/test_readonly_endpoints.py::test_mcp_instance_info_on_tcp` for the live endpoint. |
 | `src/main/java/com/xebyte/core/ProgramScriptService.java` — `open_program` | Offline (Java) `ProgramOpenFailureMessageTest` + a live round-trip: checkout → `open_program` → `close_program` → `undo_checkout` must return `checkout_undone` **on the first try, with no Ghidra restart**. `getDomainObject(tool, ...)` registers `tool` as a `DomainObject` consumer and `ProgramManager.openProgram` takes its OWN, so ours **must** be released in a `finally` — otherwise the DomainFile is permanently "in use", `undoCheckout` fails forever, and `close_program` reports `success: true, released_cache: false` because neither the ProgramManager nor the provider cache holds the stray reference. Measured 2026-08-10: a read-only verification sweep stranded **140 exclusive checkouts** on the shared project, clearable only by restarting Ghidra. Capture `getName()`/`getFunctionCount()` BEFORE the release — after it, the ProgramManager's consumer is the only thing keeping the Program alive. The release is unconditional on purpose: on a failure path nothing else holds it. `describeOpenFailure` must keep naming the remedy for a language-version refusal — a bare `Minor language change 4.6 -> 4.7` names the symptom, and this endpoint structurally cannot fix it (`okToUpgrade=false` + an upgrade needs an exclusive checkout), so the message points at `tools/upgrade_project_language.py`. Do NOT decorate unrelated failures; a test pins that pass-through. |

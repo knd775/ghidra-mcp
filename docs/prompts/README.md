@@ -27,6 +27,7 @@ The V5 workflow is the current standard. It addresses every failure mode encount
 |------|---------|
 | [STRING_LABELING_CONVENTION.md](STRING_LABELING_CONVENTION.md) | Hungarian notation for string labels |
 | [TOOL_USAGE_GUIDE.md](TOOL_USAGE_GUIDE.md) | MCP tool reference and usage patterns |
+| [BSIM.md](BSIM.md) | Cross-build matching via Ghidra BSim. The tools do not invent a corpus. |
 
 ## Data Analysis Workflows
 

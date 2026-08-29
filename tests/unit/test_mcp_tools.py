@@ -427,6 +427,9 @@ class TestEndpointTimeouts(unittest.TestCase):
 
         self.assertGreaterEqual(ENDPOINT_TIMEOUTS.get("run_ghidra_script", 0), 600)
         self.assertGreaterEqual(ENDPOINT_TIMEOUTS.get("run_script_inline", 0), 600)
+        self.assertGreaterEqual(ENDPOINT_TIMEOUTS.get("bsim_ingest", 0), 600)
+        self.assertGreaterEqual(ENDPOINT_TIMEOUTS.get("bsim_query", 0), 600)
+        self.assertGreaterEqual(ENDPOINT_TIMEOUTS.get("bsim_apply_matches", 0), 600)
 
     def test_default_exists(self):
         from bridge_mcp_ghidra import ENDPOINT_TIMEOUTS

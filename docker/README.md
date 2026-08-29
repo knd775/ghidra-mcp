@@ -79,6 +79,7 @@ mvn clean package -P docker -DskipTests
 | `JAVA_OPTS` | `-Xmx8g -XX:+UseG1GC` | JVM options |
 | `GHIDRA_MCP_AUTH_TOKEN` | required | Bearer token; required for the 0.0.0.0 bind |
 | `GHIDRA_MCP_FILE_ROOT` | `/data` | Samples bind (`SAMPLES_DIR`) |
+| `GHIDRA_MCP_BSIM_ROOT` | `/srv/ghidra/bsim` | Confines `file:` BSim URLs. Dedicated volume, not under `/data`. |
 | `GHIDRA_SERVER_HOST` | `BIND_ADDR` | RMI address the headless client dials |
 | `BIND_ADDR` | required | Host IP for RMI publish and `-ip` |
 | `GHIDRA_MCP_ALLOWED_HOSTS` | required | Tunnel hostname for the bridge Host check |
@@ -94,6 +95,7 @@ mvn clean package -P docker -DskipTests
 | `ghidra-repos` | `/repos` | Ghidra Server project history; back this up |
 | `ghidra-mcp-home` | `/home/ghidra` | `$HOME/.ghidra` settings |
 | `ghidra-mcp-projects` | `/projects` | Local (non-repo) project data |
+| `ghidra-bsim` | `/srv/ghidra/bsim` | H2 BSim databases (`file:/srv/ghidra/bsim/<db>`). Writable by uid 1000. Back this up; regenerating a corpus means recompiling everything in it. |
 
 ## API Endpoints
 

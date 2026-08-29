@@ -45,7 +45,7 @@ echo ""
 
 # Default dirs used by export_program / restore_project. A mounted empty
 # /data volume hides the image's mkdir, so recreate them at start.
-mkdir -p /data/exports /data/ghidra_projects /projects 2>/dev/null || true
+mkdir -p /data/exports /data/ghidra_projects /projects /srv/ghidra/bsim 2>/dev/null || true
 
 # GHIDRA_USER sets Java user.name (checkout identity). GHIDRA_SERVER_USER is
 # the RMI login. They must match. A copied .gpr keeps the original account's

@@ -60,6 +60,7 @@ services:
 
       GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
       GHIDRA_MCP_FILE_ROOT: /data
+      GHIDRA_MCP_BSIM_ROOT: /srv/ghidra/bsim
 
       # -Duser.name. Must match the Ghidra Server account.
       GHIDRA_USER: ${GHIDRA_SERVER_USER:?set in .env}
@@ -73,6 +74,7 @@ services:
       - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
       - ghidra-mcp-home:/home/ghidra
       - ghidra-mcp-projects:/projects
+      - ghidra-bsim:/srv/ghidra/bsim
     ports:
       # Loopback only. Remote MCP goes through cloudflared, not these.
       - "127.0.0.1:8089:8089"
@@ -135,6 +137,7 @@ volumes:
   ghidra-repos:
   ghidra-mcp-home:
   ghidra-mcp-projects:
+  ghidra-bsim:
 
 networks:
   ghidra:

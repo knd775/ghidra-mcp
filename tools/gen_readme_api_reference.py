@@ -48,6 +48,14 @@ CATEGORY_SECTIONS: dict[str, tuple[str, str]] = {
     "documentation": ("Cross-Binary Documentation & Archive", ""),
     "utility": ("Utility & Documentation Transfer", ""),
     "emulation": ("Emulation", ""),
+    "bsim": (
+        "BSim (cross-build matching)",
+        "Wraps Ghidra's `bsim` CLI. Query returns similarity **and** confidence; "
+        "a ranked list without confidence is how the previous matcher committed "
+        "wrong names. The tools do not invent a corpus — compile the library at "
+        "several GCC / opt-levels and ingest with symbols. See "
+        "[docs/prompts/BSIM.md](docs/prompts/BSIM.md).",
+    ),
     "script": ("Scripting", ""),
     "server": ("Ghidra Server & Version Control", ""),
     "debugger": (
