@@ -2,11 +2,11 @@ package com.xebyte.core;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Set;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -21,8 +21,6 @@ public final class BSimUrls {
     public static final Set<String> CONFIG_TEMPLATES = Set.of(
             "large_32", "medium_32", "medium_64", "medium_cpool", "medium_nosize");
 
-    private static final Pattern FILE_URL = Pattern.compile(
-            "^file:/{1,3}(.+)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern BSIM_URL = Pattern.compile(
             "^(file:|postgresql://|elastic://|https://).+", Pattern.CASE_INSENSITIVE);
     private static final Pattern GHIDRA_URL = Pattern.compile(
@@ -99,14 +97,25 @@ public final class BSimUrls {
     }
 
     public static File fileUrlToPath(String fileUrl) {
-        Matcher m = FILE_URL.matcher(fileUrl);
-        if (!m.matches()) {
+        if (fileUrl == null || !fileUrl.toLowerCase(Locale.ROOT).startsWith("file:")) {
             throw new IllegalArgumentException("Not a file: URL: " + fileUrl);
         }
-        String path = m.group(1);
-        // file:///abs or file:/abs — strip leftover slashes on Windows drive paths later.
-        if (path.startsWith("/") && path.length() > 2 && path.charAt(2) == ':') {
-            // file:///C:/... → /C:/... → C:/...
+        URI uri;
+        try {
+            uri = URI.create(fileUrl);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Not a file: URL: " + fileUrl);
+        }
+        String path = uri.getPath();
+        if (path == null || path.isEmpty()) {
+            path = uri.getSchemeSpecificPart();
+        }
+        if (path == null || path.isEmpty()) {
+            throw new IllegalArgumentException("Not a file: URL: " + fileUrl);
+        }
+        // file:///C:/... → /C:/... → C:/...
+        if (path.length() >= 3 && path.charAt(0) == '/' && Character.isLetter(path.charAt(1))
+                && path.charAt(2) == ':') {
             path = path.substring(1);
         }
         return new File(path);

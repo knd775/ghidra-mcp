@@ -6,6 +6,7 @@ import com.xebyte.core.BSimService;
 import com.xebyte.core.BSimUrls;
 import junit.framework.TestCase;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -161,6 +162,14 @@ public class BSimCliParserTest extends TestCase {
         assertEquals(-1, BSimUrls.archPointerBits(""));
     }
 
+    public void testFileUrlToPathIsAbsolute() {
+        File oneSlash = BSimUrls.fileUrlToPath("file:/tmp/bsim/lfs");
+        File threeSlash = BSimUrls.fileUrlToPath("file:///tmp/bsim/lfs");
+        assertTrue("file:/tmp/... must not become CWD-relative", oneSlash.isAbsolute());
+        assertTrue(threeSlash.isAbsolute());
+        assertEquals(oneSlash.getAbsolutePath(), threeSlash.getAbsolutePath());
+    }
+
     public void testQueryScriptResourceMatchesGhidraScriptsCopy() throws Exception {
         byte[] resource = BSimService.class.getResourceAsStream("/bsim/BSim_McpQuery.java").readAllBytes();
         Path copy = Path.of("ghidra_scripts", "BSim_McpQuery.java");
@@ -169,9 +178,12 @@ public class BSimCliParserTest extends TestCase {
         assertEquals(new String(resource, StandardCharsets.UTF_8),
                 new String(disk, StandardCharsets.UTF_8));
         String src = new String(resource, StandardCharsets.UTF_8);
-        assertTrue(src.contains("\"confidence\":"));
-        assertTrue(src.contains("\"similarity\":"));
-        assertFalse("script must not emit a single combined score", src.contains("\"score\":"));
+        // The helper is Java source that appends JSON keys; the file contains
+        // \"confidence\": rather than the raw JSON token "confidence":
+        assertTrue(src.contains("confidence"));
+        assertTrue(src.contains("similarity"));
+        assertFalse("script must not emit a combined score field",
+                src.contains("\\\"score\\\":") || src.contains("\"score\":"));
     }
 
     private static BSimMatches.Hit hit(String name, double sim, double conf) {
