@@ -6,6 +6,27 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim cross-build matching
+
+Five tools wrap Ghidra's `bsim` CLI so the headless server can match functions
+across compiler versions without putting the BSim module on its own classpath
+(verified missing under 12.1.2: `BSimServerInfo`, `FunctionDatabase`).
+
+`bsim_create_db`, `bsim_ingest`, `bsim_list_corpus` shell out to `support/bsim`.
+Query has no CLI command, so `bsim_query` runs `BSim_McpQuery.java` in a helper
+`analyzeHeadless` JVM and reads JSON back. `bsim_apply_matches` uses those
+scores and renames in the open program.
+
+Every match carries separate numeric `similarity` and `confidence`. The top two
+differently-named hits within 0.05 similarity are `ambiguous` and are never
+applied. `min_confidence` has no default. `dry_run` defaults to true and does
+not call `setName`. `skip_named` defaults to true.
+
+H2 `file:/srv/ghidra/bsim/<db>` for a single writer. Compose mounts a dedicated
+volume there (`GHIDRA_MCP_BSIM_ROOT`); it is not under `GHIDRA_MCP_FILE_ROOT`.
+The tools do not invent a corpus — compile the library at several GCC /
+opt-levels and ingest with symbols. Operator guide: `docs/prompts/BSIM.md`.
+
 ### Headless parity (P1–P5)
 
 Passing `language` to `load_program` used to force `AutoImporter.importAsBinary`,

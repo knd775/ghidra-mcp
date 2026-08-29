@@ -22,13 +22,13 @@
 >
 > If Ghidra MCP saves you time, consider [sponsoring the project](https://github.com/sponsors/bethington). One-time and recurring support both help fund compatibility updates, production hardening, docs, and new tooling.
 
-A production-ready Model Context Protocol (MCP) server that bridges Ghidra's powerful reverse engineering capabilities with modern AI tools and automation frameworks. **255 MCP tools**, battle-tested AI workflows, and the most comprehensive Ghidra-MCP integration available — now including P-code emulation, live debugger integration, and PCode-graph data flow analysis.
+A production-ready Model Context Protocol (MCP) server that bridges Ghidra's powerful reverse engineering capabilities with modern AI tools and automation frameworks. **260 MCP tools**, battle-tested AI workflows, and the most comprehensive Ghidra-MCP integration available — now including P-code emulation, live debugger integration, and PCode-graph data flow analysis.
 
 ## Why Ghidra MCP?
 
 Most Ghidra MCP implementations give you a handful of read-only tools and call it a day. This project is different — it was built by a reverse engineer who uses it daily on real binaries, not as a demo.
 
-- **255 MCP tools** — 3x more than any competing implementation. Not just read operations — full write access for renaming, typing, commenting, structure creation, script execution, P-code emulation, and live debugging.
+- **260 MCP tools** — 3x more than any competing implementation. Not just read operations — full write access for renaming, typing, commenting, structure creation, script execution, P-code emulation, and live debugging.
 - **Battle-tested AI workflows** — Proven documentation workflows (V5) refined across hundreds of functions. Includes step-by-step prompts, Hungarian notation reference, batch processing guides, and orphaned code discovery.
 - **Production-grade reliability** — Atomic transactions, batch operations (93% API call reduction), configurable timeouts, and graceful error handling. No silent failures.
 - **Cross-binary documentation transfer** — SHA-256 function hash matching propagates documentation across binary versions automatically. Document once, apply everywhere.
@@ -58,7 +58,7 @@ v5.0 moves conventions from "things to remember" into the tool layer, where they
 
 ### Core MCP Integration
 - **Full MCP Compatibility** — Complete implementation of Model Context Protocol
-- **255 MCP tools** — Comprehensive API surface covering every aspect of binary analysis
+- **260 MCP tools** — Comprehensive API surface covering every aspect of binary analysis
 - **Production-Ready Reliability** — Atomic transactions, batch operations, configurable timeouts
 - **Real-time Analysis** — Live integration with Ghidra's analysis engine
 
@@ -76,6 +76,7 @@ v5.0 moves conventions from "things to remember" into the tool layer, where they
 - **Import/Export Analysis** — Symbol tables, external locations, ordinal import resolution
 - **Memory & Data Inspection** — Raw memory reads, byte pattern search, array boundary detection
 - **Cross-Binary Documentation** — Function hash matching and documentation propagation across versions
+- **BSim matching** — Cross-build function matching via Ghidra BSim, with separate similarity and confidence (not a ranked list)
 
 ### Dynamic Analysis (v5.4.0)
 - **P-code Emulation** — Run any function in isolation via Ghidra's `EmulatorHelper`; brute-force API hash resolution in milliseconds
@@ -454,6 +455,7 @@ GhidraMCP is designed for **localhost-only development**. The default configurat
 |---|---|
 | `GHIDRA_MCP_AUTH_TOKEN` | When set, every HTTP request must carry `Authorization: Bearer <token>`. Timing-safe comparison. `/mcp/health`, `/health`, `/check_connection` are exempt. |
 | `GHIDRA_MCP_FILE_ROOT` | When set to a directory path, filesystem-path endpoints (`/load_program`, `/import_file`, `/open_project`, `/delete_file`, `/upload_file`, etc.) canonicalize the input and require it to fall under this root. Prevents path-traversal. `/upload_file` writes only to `<root>/uploads/`. |
+| `GHIDRA_MCP_BSIM_ROOT` | When set, `file:` BSim database URLs must resolve under this directory. Not covered by `GHIDRA_MCP_FILE_ROOT`. Default compose mount is `/srv/ghidra/bsim`. |
 | `GHIDRA_MCP_MAX_UPLOAD_BYTES` | Decoded-size ceiling for `/upload_file` (default 16 MiB). Separate from the 64 MiB JSON request-body cap. |
 | `GHIDRA_MCP_ALLOW_SCRIPTS` | Set to `1`, `true`, or `yes` to enable `/run_script_inline` and `/run_ghidra_script`. **Off by default as of v5.4.1** — these endpoints execute arbitrary Java against the Ghidra process. In headless mode this also triggers OSGi `BundleHost` initialization at server startup (Felix framework, ~hundreds of ms); leave it off if you don't need script execution. **Mutually exclusive with `/upload_file`**: that endpoint refuses to serve while scripts are enabled. |
 
@@ -632,7 +634,7 @@ python -m tools.setup install-ghidra-deps --ghidra-path "C:\ghidra_12.1.2_PUBLIC
 
 ## 📊 Production Performance
 
-- **MCP Tools**: 272 tools fully implemented
+- **MCP Tools**: 260 tools fully implemented
 - **Speed**: Sub-second response for most operations
 - **Efficiency**: 93% reduction in API calls via batch operations
 - **Reliability**: Atomic transactions with all-or-nothing semantics
@@ -643,7 +645,7 @@ python -m tools.setup install-ghidra-deps --ghidra-path "C:\ghidra_12.1.2_PUBLIC
 
 <!-- BEGIN GENERATED API REFERENCE (tools/gen_readme_api_reference.py) -->
 
-255 MCP tools backed by HTTP endpoints, grouped by catalog category. Generated from [tests/endpoints.json](tests/endpoints.json). Same-repo CI rewrites this block onto the PR before merge; the live schema at `/mcp/schema` is authoritative at runtime. Usage patterns: [docs/prompts/TOOL_USAGE_GUIDE.md](docs/prompts/TOOL_USAGE_GUIDE.md).
+260 MCP tools backed by HTTP endpoints, grouped by catalog category. Generated from [tests/endpoints.json](tests/endpoints.json). Same-repo CI rewrites this block onto the PR before merge; the live schema at `/mcp/schema` is authoritative at runtime. Usage patterns: [docs/prompts/TOOL_USAGE_GUIDE.md](docs/prompts/TOOL_USAGE_GUIDE.md).
 
 ### Program & Session Management
 
@@ -910,6 +912,16 @@ Available on the standalone headless server (`GhidraMCPHeadlessServer`).
 
 - `emulate_function` - Emulate a single function with controlled register/memory inputs
 - `emulate_hash_batch` - Brute-force API hash resolution
+
+### BSim (cross-build matching)
+
+Wraps Ghidra's `bsim` CLI. Query returns similarity **and** confidence; a ranked list without confidence is how the previous matcher committed wrong names. The tools do not invent a corpus — compile the library at several GCC / opt-levels and ingest with symbols. See [docs/prompts/BSIM.md](docs/prompts/BSIM.md).
+
+- `bsim_apply_matches` - Bulk-rename functions from BSim matches above a caller-chosen confidence floor
+- `bsim_create_db` - Create a BSim database via bsim createdatabase
+- `bsim_ingest` - Generate BSim signatures from a ghidraURL or open program and commit them
+- `bsim_list_corpus` - List executables in a BSim database (bsim listexes / getexecount)
+- `bsim_query` - Query one function or the whole open program against a BSim database
 
 ### Scripting
 

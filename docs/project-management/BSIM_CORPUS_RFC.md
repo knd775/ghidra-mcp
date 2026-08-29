@@ -1,6 +1,11 @@
 # RFC: BSim Large Corpus Similarity Search
 
-**Status**: Draft for community review  
+**Status**: Draft for community review. CLI wrappers shipped in v7.0.0
+(`bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`,
+`bsim_list_corpus`) — operator guide `docs/prompts/BSIM.md`. Job-queue
+indexing, shared corpus backends, and automatic propagation remain later
+work and are what this RFC is still for.
+
 **Audience**: Ghidra MCP users, reverse engineers with binary corpora, team operators, and sponsors  
 **Scope**: BSim-backed corpus indexing, search, inventory, and workflow automation
 

@@ -106,6 +106,7 @@ class TestAnnotatedEndpoints(unittest.TestCase):
             "DocumentationHashService",
             "MalwareSecurityService",
             "ProgramScriptService",
+            "BSimService",
         ]
         for svc in expected_services:
             path = CORE_SRC / f"{svc}.java"
@@ -273,6 +274,7 @@ class TestAnnotationScannerExists(unittest.TestCase):
             "DocumentationHashService",
             "MalwareSecurityService",
             "ProgramScriptService",
+            "BSimService",
         ]
         for name in expected:
             path = CORE_SRC / f"{name}.java"

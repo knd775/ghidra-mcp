@@ -309,6 +309,16 @@ public class AnnotationScanner {
             if (value == null || value.isEmpty()) return defaultVal;
             return parseDoubleSafe(value, defaultVal);
 
+        } else if (type == Double.class) {
+            if (value == null || value.isEmpty()) {
+                if (hasDef) {
+                    try { return Double.valueOf(def); }
+                    catch (NumberFormatException e) { return null; }
+                }
+                return null;
+            }
+            try { return Double.parseDouble(value); } catch (NumberFormatException e) { return null; }
+
         } else if (type == long.class) {
             long defaultVal = hasDef ? parseLongSafe(def, 0L) : 0L;
             if (value == null || value.isEmpty()) return defaultVal;
@@ -379,6 +389,18 @@ public class AnnotationScanner {
             if (raw == null) return defaultVal;
             if (raw instanceof Number n) return n.doubleValue();
             return parseDoubleSafe(String.valueOf(raw), defaultVal);
+
+        } else if (type == Double.class) {
+            if (raw == null) {
+                if (hasDef) {
+                    try { return Double.valueOf(def); }
+                    catch (NumberFormatException e) { return null; }
+                }
+                return null;
+            }
+            if (raw instanceof Number n) return n.doubleValue();
+            try { return Double.parseDouble(String.valueOf(raw)); }
+            catch (NumberFormatException e) { return null; }
 
         } else if (type == Map.class) {
             return convertStringMap(body, binding.param.value());

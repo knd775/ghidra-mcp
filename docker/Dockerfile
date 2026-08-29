@@ -120,7 +120,7 @@ ENV GHIDRA_MCP_PORT=8089
 ENV JAVA_OPTS="-Xmx4g -XX:+UseG1GC"
 
 # Create directories
-RUN mkdir -p /app /data /data/exports /data/ghidra_projects /projects
+RUN mkdir -p /app /data /data/exports /data/ghidra_projects /projects /srv/ghidra/bsim
 
 # Copy the built headless JAR (lib directory may not exist with system-scoped deps)
 # Copy the built JAR (naming may vary based on version)
@@ -144,7 +144,7 @@ RUN (getent passwd 1000 && userdel -r "$(getent passwd 1000 | cut -d: -f1)" || t
     && (getent group 1000 && groupdel "$(getent group 1000 | cut -d: -f1)" || true) \
     && groupadd --gid 1000 ghidra \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/ghidra ghidra \
-    && chown -R ghidra:ghidra /app /data /data/exports /data/ghidra_projects /projects /home/ghidra
+    && chown -R ghidra:ghidra /app /data /data/exports /data/ghidra_projects /projects /home/ghidra /srv/ghidra
 ENV HOME=/home/ghidra
 USER ghidra
 

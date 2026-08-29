@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 255,
+  "total_endpoints": 260,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -17,7 +17,8 @@
     "server": "Server connection and version control",
     "script": "Script execution",
     "utility": "Utility endpoints",
-    "emulation": "P-code emulation (run functions with controlled inputs)"
+    "emulation": "P-code emulation (run functions with controlled inputs)",
+    "bsim": "Cross-build function matching via Ghidra BSim (similarity and confidence)"
   },
   "endpoints": [
     {
@@ -346,6 +347,75 @@
         "program"
       ],
       "description": "Report of source file strings and their FUN_* functions"
+    },
+    {
+      "path": "/bsim_apply_matches",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "db_url",
+        "min_confidence",
+        "min_similarity",
+        "skip_named",
+        "dry_run",
+        "similarity_threshold",
+        "max_matches",
+        "program"
+      ],
+      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default. dry_run defaults to true and does not write. skip_named defaults to true. Ambiguous matches are never applied."
+    },
+    {
+      "path": "/bsim_create_db",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "db_url",
+        "config_template",
+        "name",
+        "description",
+        "callgraph"
+      ],
+      "description": "Create a BSim database via bsim createdatabase. Default template medium_32. Call-graph data is recorded unless callgraph=false. Empty until bsim_ingest."
+    },
+    {
+      "path": "/bsim_ingest",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "db_url",
+        "source",
+        "xml_dir",
+        "commit",
+        "overwrite",
+        "program"
+      ],
+      "description": "Generate BSim signatures from a ghidraURL or open program and commit them. Refuses a source with no functions and a pointer-size mismatch against the existing corpus. Warns when the source has few user-defined names."
+    },
+    {
+      "path": "/bsim_list_corpus",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "db_url",
+        "arch",
+        "name",
+        "limit"
+      ],
+      "description": "List executables in a BSim database (bsim listexes / getexecount)."
+    },
+    {
+      "path": "/bsim_query",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "db_url",
+        "function",
+        "similarity_threshold",
+        "confidence_threshold",
+        "max_matches",
+        "program"
+      ],
+      "description": "Query one function or the whole open program against a BSim database. Each match has separate numeric similarity and confidence fields. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity."
     },
     {
       "path": "/bulk_fuzzy_match",
