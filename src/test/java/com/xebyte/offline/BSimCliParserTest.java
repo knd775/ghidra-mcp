@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Parser / scoring / URL tests for the BSim CLI wrapper. No Ghidra process.
@@ -55,15 +56,16 @@ public class BSimCliParserTest extends TestCase {
         assertEquals("RP2040 refs", meta.get("description"));
     }
 
-    public void testAmbiguousWhenTopTwoDifferWithinMargin() {
+    public void testAmbiguousNeverAppliedAtAnyConfidence() {
         List<BSimMatches.Hit> hits = List.of(
-                hit("lfs_fs_traverse_", 0.91, 12.0),
-                hit("lfs_dir_getread", 0.89, 11.0));
-        assertTrue(BSimMatches.isAmbiguous(hits));
+                hit("lfs_fs_traverse_", 0.99, 80.0),
+                hit("lfs_dir_getread", 0.96, 75.0));
         BSimMatches.FunctionResult fr = BSimMatches.finalizeResult("FUN_1", "0x1", hits, null);
         assertTrue(fr.ambiguous);
         assertEquals(BSimMatches.ApplyAction.SKIP_AMBIGUOUS,
-                BSimMatches.decide(fr, "FUN_1", true, 0.8, 10.0));
+                BSimMatches.decide(fr, "FUN_1", true, 0.8, 0.0));
+        assertEquals(BSimMatches.ApplyAction.SKIP_AMBIGUOUS,
+                BSimMatches.decide(fr, "FUN_1", true, 0.5, 100.0));
     }
 
     public void testNotAmbiguousWhenSameNameFromTwoBuilds() {
@@ -127,6 +129,22 @@ public class BSimCliParserTest extends TestCase {
         assertEquals(Boolean.FALSE, asMap.get("ambiguous"));
     }
 
+    public void testMissingServerCredentialOnlyForServerUrls() {
+        assertNull(BSimUrls.missingServerCredential("ghidra:/tmp/proj/Name"));
+        assertNull(BSimUrls.missingServerCredential("/5n4ck3y/nullcog-v2"));
+        if (System.getenv("GHIDRA_SERVER_PASSWORD") != null
+                && !System.getenv("GHIDRA_SERVER_PASSWORD").isBlank()) {
+            return;
+        }
+        if (System.getenv("GHIDRA_PASS") != null && !System.getenv("GHIDRA_PASS").isBlank()) {
+            return;
+        }
+        String err = BSimUrls.missingServerCredential(
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2");
+        assertNotNull(err);
+        assertTrue(err.contains("GHIDRA_SERVER_PASSWORD"));
+    }
+
     public void testRejectBadDbUrl() {
         try {
             BSimUrls.requireBsimUrl("--help");
@@ -160,6 +178,10 @@ public class BSimCliParserTest extends TestCase {
         assertEquals(32, BSimUrls.archPointerBits("ARM:LE:32:Cortex"));
         assertEquals(64, BSimUrls.archPointerBits("x86:LE:64:default"));
         assertEquals(-1, BSimUrls.archPointerBits(""));
+        assertEquals(Set.of(32), BSimUrls.uniqueArchSizes(
+                List.of("ARM:LE:32:Cortex", "ARM:LE:32:v8")));
+        assertEquals(Set.of(32, 64), BSimUrls.uniqueArchSizes(
+                List.of("ARM:LE:32:Cortex", "x86:LE:64:default")));
     }
 
     public void testFileUrlToPathIsAbsolute() {

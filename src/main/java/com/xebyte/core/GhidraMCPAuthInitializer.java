@@ -148,6 +148,12 @@ public class GhidraMCPAuthInitializer implements ModuleInitializer {
         return registered;
     }
 
+    /** True when a non-empty server password has been loaded into the authenticator. */
+    public static boolean hasPassword() {
+        GhidraMCPAuthenticator auth = authenticator;
+        return auth != null && auth.hasPassword();
+    }
+
     public static GhidraMCPAuthenticator getAuthenticator() {
         return authenticator;
     }

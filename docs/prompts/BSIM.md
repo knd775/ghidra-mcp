@@ -43,7 +43,8 @@ bsim_create_db(db_url, config_template="medium_32", name=None, description=None,
 writer. Use PostgreSQL when two processes need to write. `medium_32` is
 the template for 32-bit ARM firmware. `callgraph=True` is the default
 because call-graph data is the one thing that actually helped in the
-failed littlefs attempt.
+failed littlefs attempt. `dry_run=true` returns `would_execute` and does
+not create the database.
 
 ### `bsim_ingest`
 
@@ -51,11 +52,14 @@ failed littlefs attempt.
 bsim_ingest(db_url, source, xml_dir=None, commit=True, overwrite=False)
 ```
 
-`source` is a `ghidra://` server path, a local `ghidra:/` project, or an
-open program. A program with no functions is refused. A 64-bit program
-into a corpus that is already 32-bit is refused (the CLI would otherwise
-accept it and degrade silently). A stripped program is ingested with a
-warning.
+`source` is a `ghidra://` server path, a local `ghidra:/` project, a
+repository path starting with `/` (needs `GHIDRA_SERVER_HOST`), or the
+name of an open program. `program=` is not required — `source` is the
+target. A `ghidra://` URL needs `GHIDRA_SERVER_PASSWORD` (the spawned
+`bsim` JVM cannot prompt); missing it is a named error, not a blank
+failure. A program with no functions is refused. A 64-bit program into a
+corpus that is already 32-bit is refused (the CLI would otherwise accept
+it and degrade silently). A stripped program is ingested with a warning.
 
 ### `bsim_query`
 

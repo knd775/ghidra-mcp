@@ -17,6 +17,30 @@ _TYPE_MAP = {
 }
 
 
+def _coerce_default(json_type: str, default):
+    """Coerce Java schema defaults (always strings) to the declared JSON type.
+
+    AnnotationScanner quotes every defaultValue, so a boolean param arrives as
+    ``"true"`` / ``"false"``. Leaving those as strings makes FastMCP/Pydantic
+    build ``commit: bool = "true"``, which is a type error waiting to happen.
+    """
+    if json_type == "boolean":
+        if isinstance(default, str):
+            return default.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(default)
+    if json_type == "integer":
+        try:
+            return int(default)
+        except (TypeError, ValueError):
+            return default
+    if json_type == "number":
+        try:
+            return float(default)
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
 def _normalize_tool_def_names(schema: list[dict]) -> list[dict]:
     """Normalize and de-duplicate MCP-visible names while keeping HTTP endpoints intact."""
     normalized_schema: list[dict] = []
@@ -70,7 +94,7 @@ def _parse_schema(raw: dict) -> list[dict]:
             if p.get("description"):
                 pdef["description"] = p["description"]
             if "default" in p and p["default"] is not None:
-                pdef["default"] = p["default"]
+                pdef["default"] = _coerce_default(pdef["type"], p["default"])
             if p.get("source"):
                 pdef["source"] = p["source"]
             if p.get("param_type"):
@@ -80,6 +104,8 @@ def _parse_schema(raw: dict) -> list[dict]:
             # comment). See registry.handler's filtering.
             if p.get("allow_empty"):
                 pdef["allow_empty"] = True
+            if p.get("selector") is False:
+                pdef["selector"] = False
             properties[p["name"]] = pdef
             if p.get("required", False):
                 required.append(p["name"])

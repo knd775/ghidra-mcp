@@ -170,25 +170,29 @@ public class AnnotationScanner {
                     }
                 }
 
-                // Dry-run support: wrap POST endpoints in a transaction that always rolls back.
-                // Must check BOTH the query string and the JSON body -- this project's own
-                // convention (CLAUDE.md "Code Conventions") is that most POST params live in
-                // the body, and a caller following that convention for dry_run too got a SILENT
-                // real write here: the query-only check below was always false, so this whole
-                // rollback branch never ran and every dry_run body param fell through to
-                // method.invoke(...) unguarded. Confirmed live 2026-08-09 on /batch_set_comments
-                // (see reference_dry_run_silently_writes.md).
-                if (isWrite && isDryRunRequested(query, body) && programProvider != null) {
-                    Program program = resolveProgramForDryRun(bindings, query);
-                    if (program != null) {
-                        int tx = program.startTransaction("[DRY RUN] " + tool.path());
-                        try {
-                            Response result = (Response) method.invoke(service, args);
-                            return wrapDryRunResponse(result);
-                        } finally {
-                            program.endTransaction(tx, false); // Always rollback
+                // Dry-run: never fall through to an unguarded invoke. Transaction
+                // rollback only covers Ghidra listing writes; CLI / filesystem /
+                // server-admin side effects (bsim_create_db, import_program,
+                // terminate_checkout) survive it. Methods that declare their own
+                // dry_run param are responsible for previewing and are invoked
+                // (with a listing rollback as a safety net when a Program is
+                // available). Everything else short-circuits here.
+                if (isWrite && isDryRunRequested(query, body)) {
+                    if (hasParam(bindings, "dry_run")) {
+                        Program program = (programProvider != null && hasParam(bindings, "program"))
+                                ? resolveProgramForDryRun(bindings, query) : null;
+                        if (program != null) {
+                            int tx = program.startTransaction("[DRY RUN] " + tool.path());
+                            try {
+                                Response result = (Response) method.invoke(service, args);
+                                return wrapDryRunResponse(result);
+                            } finally {
+                                program.endTransaction(tx, false);
+                            }
                         }
+                        return (Response) method.invoke(service, args);
                     }
+                    return dryRunPreview(tool, bindings, args);
                 }
 
                 return (Response) method.invoke(service, args);
@@ -234,6 +238,37 @@ public class AnnotationScanner {
         }
         // Fall back to current program
         return programProvider.getCurrentProgram();
+    }
+
+    private static boolean hasParam(ParamBinding[] bindings, String name) {
+        if (bindings == null) return false;
+        for (ParamBinding binding : bindings) {
+            if (binding != null && name.equals(binding.param.value())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Preview for POST tools that do not declare {@code dry_run}. Must not
+     * invoke the method: the side effect may be outside any Ghidra transaction.
+     */
+    private static Response dryRunPreview(McpTool tool, ParamBinding[] bindings, Object[] args) {
+        java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("status", "would_execute");
+        body.put("dry_run", true);
+        body.put("path", tool.path());
+        java.util.Map<String, Object> params = new java.util.LinkedHashMap<>();
+        if (bindings != null && args != null) {
+            int n = Math.min(bindings.length, args.length);
+            for (int i = 0; i < n; i++) {
+                if (bindings[i] == null || args[i] == null) continue;
+                String name = bindings[i].param.value();
+                if ("password".equalsIgnoreCase(name) || args[i] instanceof char[]) continue;
+                params.put(name, args[i]);
+            }
+        }
+        body.put("params", params);
+        return Response.ok(body);
     }
 
     /**
@@ -468,7 +503,8 @@ public class AnnotationScanner {
                 NO_DEFAULT.equals(binding.param.defaultValue()) ? null : binding.param.defaultValue(),
                 binding.param.description(),
                 binding.param.paramType(),
-                binding.param.allowEmpty()
+                binding.param.allowEmpty(),
+                binding.param.selector()
             ));
         }
         return new ToolDescriptor(tool.path(), tool.method(), tool.description(),
@@ -522,7 +558,15 @@ public class AnnotationScanner {
     /** Describes a tool parameter for schema generation. */
     public record ParamDescriptor(String name, String type, String source,
             boolean optional, String defaultValue, String description, String paramType,
-            boolean allowEmpty) {
+            boolean allowEmpty, boolean selector) {
+
+        /** Test/catalog constructor: selector defaults to true. */
+        public ParamDescriptor(String name, String type, String source,
+                boolean optional, String defaultValue, String description, String paramType,
+                boolean allowEmpty) {
+            this(name, type, source, optional, defaultValue, description, paramType,
+                    allowEmpty, true);
+        }
 
         /** Serialize to JSON. */
         public String toJson() {
@@ -544,6 +588,11 @@ public class AnnotationScanner {
             // parameter declares that empty carries meaning.
             if (allowEmpty) {
                 sb.append(", \"allow_empty\": true");
+            }
+            // Only emitted when false: the bridge's strict program-selector
+            // mode skips this param. Default (omitted) is true.
+            if (!selector) {
+                sb.append(", \"selector\": false");
             }
             sb.append("}");
             return sb.toString();

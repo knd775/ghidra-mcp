@@ -162,6 +162,7 @@ public class BSimCli {
             throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
+        forwardServerCredentials(pb.environment());
         Process proc = pb.start();
         StringBuilder out = new StringBuilder();
         Thread reader = new Thread(() -> {
@@ -193,5 +194,37 @@ public class BSimCli {
             text = out.toString();
         }
         return new Result(code, text, command);
+    }
+
+    /**
+     * Copy resolved Ghidra Server credentials into the child environment so a
+     * spawned {@code bsim}/{@code analyzeHeadless} JVM can load
+     * {@code GhidraMCPAuthInitializer} and authenticate a {@code ghidra://} URL.
+     * No-op when nothing is configured; never logs the password.
+     */
+    static void forwardServerCredentials(java.util.Map<String, String> env) {
+        if (env == null) return;
+        GhidraMCPAuthenticator auth = GhidraMCPAuthInitializer.getAuthenticator();
+        if (auth != null) {
+            String user = auth.getUsername();
+            if (user != null && !user.isBlank()) {
+                env.putIfAbsent("GHIDRA_SERVER_USER", user);
+            }
+            String fromAuth = auth.passwordForChildEnv();
+            if (fromAuth != null && !fromAuth.isBlank()) {
+                env.putIfAbsent("GHIDRA_SERVER_PASSWORD", fromAuth);
+                return;
+            }
+        }
+        if (env.getOrDefault("GHIDRA_SERVER_PASSWORD", "").isBlank()
+                && env.getOrDefault("GHIDRA_PASS", "").isBlank()) {
+            String password = System.getenv("GHIDRA_SERVER_PASSWORD");
+            if (password == null || password.isBlank()) {
+                password = System.getenv("GHIDRA_PASS");
+            }
+            if (password != null && !password.isBlank()) {
+                env.putIfAbsent("GHIDRA_SERVER_PASSWORD", password);
+            }
+        }
     }
 }

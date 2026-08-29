@@ -178,6 +178,28 @@ class TestPostToolDispatch(unittest.TestCase):
         )
 
     @patch("bridge_mcp_ghidra.dispatch.dispatch_post")
+    def test_bsim_create_db_synthetic_dry_run_goes_as_query_param(self, mock_post):
+        """bsim_create_db does not declare dry_run; the bridge must still send it
+        so AnnotationScanner can short-circuit before createdatabase runs."""
+        from bridge_mcp_ghidra import _build_tool_function
+
+        mock_post.return_value = '{"status":"would_execute","dry_run":true}'
+        schema = {
+            "properties": {
+                "db_url": {"type": "string", "source": "body"},
+                "config_template": {"type": "string", "source": "body", "default": "medium_32"},
+            },
+            "required": ["db_url"],
+        }
+        fn = _build_tool_function("/bsim_create_db", "POST", schema)
+        fn(db_url="file:/srv/ghidra/bsim/re", dry_run=True)
+        mock_post.assert_called_once_with(
+            "/bsim_create_db",
+            data={"db_url": "file:/srv/ghidra/bsim/re"},
+            query_params={"dry_run": "true"},
+        )
+
+    @patch("bridge_mcp_ghidra.dispatch.dispatch_post")
     def test_schema_declared_query_dry_run_does_not_duplicate_signature(self, mock_post):
         from bridge_mcp_ghidra import _build_tool_function
 
@@ -566,6 +588,143 @@ class TestProgramRequired(unittest.TestCase):
         with patch.dict("os.environ", env, clear=True):
             self.bridge.state._init_require_selectors()
         self.assertFalse(self.bridge.state._require_selectors)
+
+    @patch("bridge_mcp_ghidra.dispatch.dispatch_post")
+    def test_bsim_ingest_program_is_not_a_required_selector(self, mock_post):
+        """bsim_ingest's target is `source` (a ghidraURL). Strict mode must not
+        demand program= — that blocked every ingest before the Java server saw it.
+        """
+        from bridge_mcp_ghidra import _build_tool_function
+
+        mock_post.return_value = '{"status":"success"}'
+        self.bridge.state._require_selectors = True
+        schema = {
+            "properties": {
+                "db_url": {"type": "string", "source": "body"},
+                "source": {"type": "string", "source": "body"},
+                "program": {
+                    "type": "string",
+                    "source": "query",
+                    "default": "",
+                    "selector": False,
+                },
+            },
+            "required": ["db_url", "source"],
+        }
+        fn = _build_tool_function("/bsim_ingest", "POST", schema)
+        result = fn(
+            db_url="file:/srv/ghidra/bsim/re",
+            source="ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+        )
+        mock_post.assert_called_once()
+        self.assertNotIn("error", json.loads(result) if result.startswith("{") else {})
+
+    @patch("bridge_mcp_ghidra.dispatch.dispatch_post")
+    def test_import_data_types_program_still_required_in_strict_mode(self, mock_post):
+        """A `source` that is C text is not a program identifier; program= stays required."""
+        from bridge_mcp_ghidra import _build_tool_function
+
+        self.bridge.state._require_selectors = True
+        schema = {
+            "properties": {
+                "source": {"type": "string", "source": "body"},
+                "program": {"type": "string", "source": "query", "default": ""},
+            },
+            "required": ["source"],
+        }
+        fn = _build_tool_function("/import_data_types", "POST", schema)
+        result = fn(source="struct Foo { int a; };")
+        mock_post.assert_not_called()
+        data = json.loads(result)
+        self.assertIn("program=", data["error"])
+
+
+class TestToolExceptionPayload(unittest.TestCase):
+    def test_format_includes_type_message_traceback(self):
+        from bridge_mcp_ghidra.server import format_tool_exception
+
+        try:
+            raise ValueError("nope")
+        except ValueError as exc:
+            payload = format_tool_exception(exc, "/bsim_ingest")
+        self.assertEqual(payload["type"], "ValueError")
+        self.assertIn("nope", payload["message"])
+        self.assertIn("ValueError", payload["traceback"])
+        self.assertEqual(payload["tool"], "/bsim_ingest")
+        self.assertIn("ValueError: nope", payload["error"])
+
+    @patch("bridge_mcp_ghidra.registry._dispatch_tool_call", side_effect=NameError("x"))
+    def test_handler_returns_exception_payload_instead_of_raising(self, _mock_dispatch):
+        from bridge_mcp_ghidra import _build_tool_function
+
+        fn = _build_tool_function(
+            "/bsim_ingest",
+            "POST",
+            {
+                "properties": {
+                    "db_url": {"type": "string"},
+                    "source": {"type": "string"},
+                },
+                "required": ["db_url", "source"],
+            },
+        )
+        result = json.loads(fn(db_url="file:/x", source="ghidra://h/r/p"))
+        self.assertEqual(result["type"], "NameError")
+        self.assertIn("x", result["message"])
+        self.assertIn("traceback", result)
+        self.assertIn("NameError", result["error"])
+
+
+class TestSchemaDefaultCoercion(unittest.TestCase):
+    def test_boolean_string_defaults_become_bool(self):
+        from bridge_mcp_ghidra.schema import _parse_schema
+        import inspect
+        from bridge_mcp_ghidra import _build_tool_function
+
+        parsed = _parse_schema(
+            {
+                "tools": [
+                    {
+                        "path": "/bsim_ingest",
+                        "method": "POST",
+                        "params": [
+                            {"name": "db_url", "type": "string", "source": "body", "required": True},
+                            {"name": "source", "type": "string", "source": "body", "required": True},
+                            {
+                                "name": "commit",
+                                "type": "boolean",
+                                "source": "body",
+                                "required": False,
+                                "default": "true",
+                            },
+                            {
+                                "name": "overwrite",
+                                "type": "boolean",
+                                "source": "body",
+                                "required": False,
+                                "default": "false",
+                            },
+                            {
+                                "name": "program",
+                                "type": "string",
+                                "source": "query",
+                                "required": False,
+                                "default": "",
+                                "selector": False,
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+        schema = parsed[0]["input_schema"]
+        self.assertIs(schema["properties"]["commit"]["default"], True)
+        self.assertIs(schema["properties"]["overwrite"]["default"], False)
+        self.assertIs(schema["properties"]["program"]["selector"], False)
+        fn = _build_tool_function("/bsim_ingest", "POST", schema)
+        sig = inspect.signature(fn)
+        self.assertIs(sig.parameters["commit"].default, True)
+        self.assertIs(sig.parameters["overwrite"].default, False)
 
 
 if __name__ == "__main__":

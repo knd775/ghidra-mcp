@@ -280,14 +280,45 @@ public class AnnotationScannerOfflineTest extends TestCase {
      * rollback-wrapped branch never ran. Confirmed live against /batch_set_comments,
      * where it overwrote a verified-good plate comment before being caught and reverted.
      *
-     * <p>This exercises the real dry-run wrapper end-to-end: a mocked {@link Program}
-     * stands in for the transaction the wrapper starts/rolls back, and the fixture's
-     * write method itself is invoked either way (the wrapper can only undo Ghidra
-     * transaction state, not arbitrary Java side effects) -- what distinguishes a
-     * genuine dry run is that {@code endTransaction} is called with {@code commit=false}.
+     * <p>A later incident (bsim_create_db, import_program, terminate_checkout) showed
+     * the rollback wrapper is not enough: side effects outside a Program transaction
+     * still commit. Tools that do not declare {@code dry_run} must not be invoked at
+     * all. Tools that declare it are responsible for previewing, with a listing
+     * rollback as a safety net when a Program is available.
      */
-    public void testDryRunHonoredFromJsonBody() throws Exception {
+    public void testDryRunWithoutDeclaredParamDoesNotInvoke() throws Exception {
         DryRunWriteFixture fixture = new DryRunWriteFixture();
+        Program program = mock(Program.class);
+        when(program.startTransaction(org.mockito.ArgumentMatchers.anyString())).thenReturn(42);
+
+        ProgramProvider provider = mock(ProgramProvider.class);
+        when(provider.getProgram("Test.dll")).thenReturn(program);
+        when(provider.getCurrentProgram()).thenReturn(program);
+
+        AnnotationScanner fixtureScanner = new AnnotationScanner(provider, new Object[] { fixture });
+        EndpointDef endpoint = null;
+        for (EndpointDef ep : fixtureScanner.getEndpoints()) {
+            if ("/test_dry_run_write".equals(ep.path())) endpoint = ep;
+        }
+        assertNotNull("Fixture endpoint not found", endpoint);
+
+        Map<String, String> query = new HashMap<>();
+        query.put("program", "Test.dll");
+        Map<String, Object> body = new HashMap<>();
+        body.put("dry_run", Boolean.TRUE);
+        Response response = endpoint.handler().handle(query, body);
+
+        assertFalse("Undeclared dry_run must not invoke the method (CLI/file side effects cannot roll back)",
+            fixture.invoked);
+        verify(program, never()).startTransaction(org.mockito.ArgumentMatchers.anyString());
+        String json = response.toJson();
+        assertTrue(json, json.contains("\"dry_run\":true") || json.contains("\"dry_run\": true"));
+        assertTrue(json, json.contains("would_execute"));
+        assertTrue(json, json.contains("/test_dry_run_write"));
+    }
+
+    public void testDeclaredDryRunIsInvokedAndRolledBack() throws Exception {
+        DeclaredDryRunFixture fixture = new DeclaredDryRunFixture();
         Program program = mock(Program.class);
         when(program.startTransaction(org.mockito.ArgumentMatchers.anyString())).thenReturn(42);
 
@@ -297,24 +328,23 @@ public class AnnotationScannerOfflineTest extends TestCase {
         AnnotationScanner fixtureScanner = new AnnotationScanner(provider, new Object[] { fixture });
         EndpointDef endpoint = null;
         for (EndpointDef ep : fixtureScanner.getEndpoints()) {
-            if ("/test_dry_run_write".equals(ep.path())) endpoint = ep;
+            if ("/test_declared_dry_run".equals(ep.path())) endpoint = ep;
         }
-        assertNotNull("Fixture endpoint not found", endpoint);
+        assertNotNull(endpoint);
 
-        // dry_run supplied ONLY in the JSON body -- exactly the shape that was silently
-        // ignored before the fix (query still carries "program" so the wrapper CAN
-        // resolve a Program to roll back on; only dry_run itself is body-only).
         Map<String, String> query = new HashMap<>();
         query.put("program", "Test.dll");
         Map<String, Object> body = new HashMap<>();
         body.put("dry_run", Boolean.TRUE);
         endpoint.handler().handle(query, body);
 
-        assertTrue("Fixture method must still be invoked under dry-run (only the transaction is rolled back)",
-            fixture.invoked);
+        assertTrue("Declared dry_run must invoke so the method can preview", fixture.invoked);
         verify(program).endTransaction(anyInt(), eq(false));
+    }
 
-        // Control: no dry_run anywhere -> real invocation, no dry-run rollback wrapper.
+    public void testControlWithoutDryRunStillInvokes() throws Exception {
+        Map<String, String> query = new HashMap<>();
+        query.put("program", "Test.dll");
         Program program2 = mock(Program.class);
         ProgramProvider provider2 = mock(ProgramProvider.class);
         when(provider2.getProgram("Test.dll")).thenReturn(program2);
@@ -329,7 +359,67 @@ public class AnnotationScannerOfflineTest extends TestCase {
         verify(program2, never()).endTransaction(anyInt(), eq(false));
     }
 
-    /** Tiny fixture service scanned by {@link #testDryRunHonoredFromJsonBody}. */
+    /**
+     * Every POST {@code @McpTool} that does not declare {@code dry_run} must
+     * short-circuit. This is the regression net for bsim_create_db /
+     * import_program / any future write that forgets the flag: one assertion,
+     * every endpoint.
+     */
+    public void testUndeclaredDryRunShortCircuitsEveryPostEndpoint() throws Exception {
+        JsonObject root = new Gson().fromJson(scanner.generateSchema(), JsonObject.class);
+        JsonArray tools = root.getAsJsonArray("tools");
+        Map<String, Boolean> declaresDryRun = new HashMap<>();
+        int undeclaredPosts = 0;
+        for (JsonElement el : tools) {
+            JsonObject t = el.getAsJsonObject();
+            if (!"POST".equalsIgnoreCase(t.get("method").getAsString())) continue;
+            boolean hasDry = false;
+            JsonArray params = t.getAsJsonArray("params");
+            if (params != null) {
+                for (JsonElement p : params) {
+                    if ("dry_run".equals(p.getAsJsonObject().get("name").getAsString())) {
+                        hasDry = true;
+                        break;
+                    }
+                }
+            }
+            declaresDryRun.put(t.get("path").getAsString(), hasDry);
+            if (!hasDry) undeclaredPosts++;
+        }
+        assertTrue("expected POST tools without a dry_run param (bsim_create_db, import_program)",
+            undeclaredPosts > 0);
+
+        Map<String, EndpointDef> byPath = new HashMap<>();
+        for (EndpointDef ep : scanner.getEndpoints()) {
+            byPath.put(ep.path(), ep);
+        }
+
+        List<String> failed = new ArrayList<>();
+        int checked = 0;
+        for (Map.Entry<String, Boolean> e : declaresDryRun.entrySet()) {
+            if (e.getValue()) continue;
+            EndpointDef ep = byPath.get(e.getKey());
+            if (ep == null) continue; // manual descriptors are not dispatched here
+            Map<String, String> query = new HashMap<>();
+            query.put("dry_run", "true");
+            Response response = ep.handler().handle(query, Collections.emptyMap());
+            String json = response.toJson();
+            checked++;
+            if (!json.contains("would_execute") || !json.contains("\"dry_run\":true")) {
+                failed.add(e.getKey() + " -> " + json);
+            }
+        }
+        assertTrue("checked undeclared POST tools, got " + checked, checked > 0);
+        assertTrue("dry_run=true must not invoke undeclared POST tools: " + failed, failed.isEmpty());
+        assertTrue(declaresDryRun.containsKey("/bsim_create_db")
+            && Boolean.FALSE.equals(declaresDryRun.get("/bsim_create_db")));
+        assertTrue(declaresDryRun.containsKey("/import_program")
+            && Boolean.FALSE.equals(declaresDryRun.get("/import_program")));
+        assertTrue(declaresDryRun.containsKey("/bsim_apply_matches")
+            && Boolean.TRUE.equals(declaresDryRun.get("/bsim_apply_matches")));
+    }
+
+    /** Tiny fixture service scanned by {@link #testDryRunWithoutDeclaredParamDoesNotInvoke}. */
     static class DryRunWriteFixture {
         volatile boolean invoked;
 
@@ -339,6 +429,21 @@ public class AnnotationScannerOfflineTest extends TestCase {
                 @Param(value = "program", defaultValue = "") String program) {
             invoked = true;
             return Response.ok("wrote");
+        }
+    }
+
+    /** Fixture whose method declares dry_run and is therefore invoked on preview. */
+    static class DeclaredDryRunFixture {
+        volatile boolean invoked;
+
+        @McpTool(path = "/test_declared_dry_run", method = "POST",
+                 description = "Fixture: declares dry_run so the scanner invokes it")
+        public Response write(
+                @Param(value = "program", defaultValue = "") String program,
+                @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "true")
+                        boolean dryRun) {
+            invoked = true;
+            return Response.ok(java.util.Map.of("dry_run", dryRun, "status", "preview"));
         }
     }
 }

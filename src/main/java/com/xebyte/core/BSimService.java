@@ -147,12 +147,17 @@ public class BSimService {
                     description = "Pass --commit so signatures land in the database") boolean commit,
             @Param(value = "overwrite", source = ParamSource.BODY, defaultValue = "false",
                     description = "Pass --overwrite if signature XML already exists") boolean overwrite,
-            @Param(value = "program", defaultValue = "") String programName) {
+            @Param(value = "program", defaultValue = "", selector = false,
+                    description = "Optional open program used only for prechecks when source is "
+                            + "not a ghidraURL. Not a program selector — source is the ingest target.")
+                    String programName) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
             if (source == null || source.isBlank()) {
                 return Response.err("source is required (ghidraURL, repo path, or open program name)");
             }
+            String credErr = BSimUrls.missingServerCredential(source);
+            if (credErr != null) return Response.err(credErr);
             Program program = resolveProgramIfOpen(source, programName);
             List<String> warnings = new ArrayList<>();
             if (program != null) {
@@ -173,6 +178,10 @@ public class BSimService {
                 ghidraUrl = resolved.ghidraUrl;
                 tempProj = resolved.tempProject;
                 tempGzf = resolved.tempGzf;
+                // Repo paths become ghidra:// after resolve; check the resolved
+                // URL too, not just the original source string.
+                credErr = BSimUrls.missingServerCredential(ghidraUrl);
+                if (credErr != null) return Response.err(credErr);
 
                 List<String> args = new ArrayList<>();
                 args.add("generatesigs");
@@ -549,36 +558,43 @@ public class BSimService {
             Program p = programProvider.getProgram(programName);
             if (p != null) return p;
         }
+        // A ghidraURL / repo path is never "the currently open program".
+        // Falling back to current for any non-URL string ingested the open
+        // program when the caller passed /repo/folder/name.
+        if (BSimUrls.looksLikeGhidraUrl(source) || (source != null && source.startsWith("/"))) {
+            return null;
+        }
         Program byName = programProvider.getProgram(source);
         if (byName != null) return byName;
         Program current = programProvider.getCurrentProgram();
         if (current != null && source.equals(current.getName())) return current;
-        return current != null && !BSimUrls.looksLikeGhidraUrl(source) ? current : null;
+        return null;
     }
 
     private ResolvedSource resolveSource(String source, Program program, Path workDir)
             throws Exception {
-        if (BSimUrls.looksLikeGhidraUrl(source) && BSimUrls.isServerGhidraUrl(source)) {
-            return new ResolvedSource(BSimUrls.requireGhidraUrl(source), null, null);
-        }
-        if (BSimUrls.looksLikeGhidraUrl(source) && program == null) {
+        if (BSimUrls.looksLikeGhidraUrl(source)) {
             return new ResolvedSource(BSimUrls.requireGhidraUrl(source), null, null);
         }
         if (program == null) {
-            if (BSimUrls.looksLikeGhidraUrl(source)) {
-                return new ResolvedSource(BSimUrls.requireGhidraUrl(source), null, null);
-            }
-            String host = System.getenv("GHIDRA_SERVER_HOST");
-            String port = System.getenv("GHIDRA_SERVER_PORT");
-            if (host != null && !host.isBlank()) {
-                String path = source.startsWith("/") ? source : "/" + source;
-                String url = "ghidra://" + host + (port != null && !port.isBlank() ? ":" + port : "")
-                        + path;
-                return new ResolvedSource(url, null, null);
+            if (source != null && source.startsWith("/")) {
+                String host = System.getenv("GHIDRA_SERVER_HOST");
+                String port = System.getenv("GHIDRA_SERVER_PORT");
+                if (host != null && !host.isBlank()) {
+                    String url = "ghidra://" + host
+                            + (port != null && !port.isBlank() ? ":" + port : "")
+                            + source;
+                    return new ResolvedSource(url, null, null);
+                }
+                throw new IllegalArgumentException(
+                        "Cannot resolve repository path '" + source + "' to a ghidraURL: "
+                                + "GHIDRA_SERVER_HOST is not set. Pass a full "
+                                + "ghidra://host/repo/path, or open the program.");
             }
             throw new IllegalArgumentException(
                     "Cannot resolve source '" + source + "' to a ghidraURL. Pass "
-                            + "ghidra://host/repo/path, or open the program so it can be exported.");
+                            + "ghidra://host/repo/path, a repository path starting with /, "
+                            + "or the name of an open program.");
         }
         java.net.URL shared = program.getDomainFile().getSharedProjectURL(null);
         if (shared != null) {

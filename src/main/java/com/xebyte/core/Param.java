@@ -78,6 +78,20 @@ public @interface Param {
     String[] aliases() default {};
 
     /**
+     * When false, this parameter is not a program selector for
+     * {@code GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS}. Default true.
+     *
+     * <p>The bridge treats any param named {@code program} (or {@code *_program} /
+     * {@code program_*}) as a selector that must be passed explicitly in strict
+     * mode. That is right for tools that fall back to the current program, and
+     * wrong for tools whose target is a different param — {@code bsim_ingest}'s
+     * target is {@code source} (a ghidraURL), and requiring {@code program=}
+     * made every ingest fail in the bridge before the Java server saw the
+     * request.
+     */
+    boolean selector() default true;
+
+    /**
      * Whether an empty string is a meaningful value for this parameter.
      *
      * <p>The MCP bridge drops {@code ""} arguments by default, because some

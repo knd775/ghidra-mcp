@@ -123,6 +123,7 @@ def test_apply_dry_run_does_not_rename(http_client, fixture_dir):
     )
     assert data.get("dry_run") is True, data
     assert data.get("renamed") == [], data
+    assert "would_rename" in data, data
     after = http_client.get("/list_functions", params={"limit": "5"})
     assert after.status_code == 200
     assert before.text == after.text
