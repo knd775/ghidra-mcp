@@ -157,4 +157,13 @@ public class GhidraMCPAuthInitializer implements ModuleInitializer {
     public static GhidraMCPAuthenticator getAuthenticator() {
         return authenticator;
     }
+
+    /**
+     * Test hook: install (or clear, with {@code null}) the authenticator
+     * without running the initializer's environment scan. Package-private on
+     * purpose — production code must go through {@link #run()}.
+     */
+    static void installAuthenticatorForTest(GhidraMCPAuthenticator auth) {
+        authenticator = auth;
+    }
 }

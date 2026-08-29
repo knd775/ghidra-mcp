@@ -29,6 +29,15 @@ import java.util.Set;
  * JVM (where the BSim module actually loads) and reads JSON back. Apply uses
  * those scores and renames in the currently-open program.
  *
+ * <p>Every CLI run spawns a fresh JVM, so even "fast" operations take tens of
+ * seconds and ingest/query take minutes — longer than the response budget of
+ * the HTTP hops in front of this server (an MCP gateway or Cloudflare tunnel
+ * gives up around 60-100s and fabricates a blank transport error). Each tool
+ * therefore validates its input synchronously, submits the CLI-heavy body to
+ * {@link BSimJobs}, and waits inline up to {@code wait_seconds}: fast calls
+ * return their normal response, slow ones return a {@code job_id} for
+ * {@code bsim_job_status}.
+ *
  * <p>A corpus you cannot inspect is one you stop trusting, which is why
  * {@code bsim_list_corpus} exists. The tools do not invent a corpus: compile
  * the same library at several optimisation levels and compiler versions and
@@ -36,7 +45,9 @@ import java.util.Set;
  */
 @McpToolGroup(value = "bsim",
         description = "Cross-build function matching via Ghidra BSim (CLI wrapper). "
-                + "Returns similarity and confidence separately; never a bare ranked list.")
+                + "Returns similarity and confidence separately; never a bare ranked list. "
+                + "CLI-heavy calls return a job_id when they outlive wait_seconds; poll "
+                + "bsim_job_status for the result.")
 public class BSimService {
 
     static final String QUERY_SCRIPT_RESOURCE = "/bsim/BSim_McpQuery.java";
@@ -47,9 +58,17 @@ public class BSimService {
                     + "A stripped binary adds signature noise and yields no names to propagate. "
                     + "Ingest a build with symbols.";
 
+    static final String WAIT_SECONDS_DESCRIPTION =
+            "Seconds to wait inline before returning a job ticket (0-"
+                    + BSimJobs.MAX_WAIT_SECONDS + "). BSim CLI runs spawn a separate JVM "
+                    + "and routinely outlive HTTP gateway budgets; when the wait expires "
+                    + "the operation continues server-side and bsim_job_status(job_id) "
+                    + "returns its result.";
+
     private final ProgramProvider programProvider;
     private final ThreadingStrategy threadingStrategy;
     private final BSimCli cli;
+    private final BSimJobs jobs;
 
     public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy) {
         this(programProvider, threadingStrategy, new BSimCli());
@@ -57,9 +76,15 @@ public class BSimService {
 
     public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy,
                        BSimCli cli) {
+        this(programProvider, threadingStrategy, cli, new BSimJobs());
+    }
+
+    public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy,
+                       BSimCli cli, BSimJobs jobs) {
         this.programProvider = programProvider;
         this.threadingStrategy = threadingStrategy;
         this.cli = cli;
+        this.jobs = jobs;
     }
 
     // ========================================================================
@@ -71,7 +96,8 @@ public class BSimService {
                     + "medium_32 (32-bit ARM firmware). Call-graph data is recorded unless "
                     + "callgraph=false. H2 file: URLs need a writable parent directory; "
                     + "PostgreSQL when more than one writer is needed. The database is empty "
-                    + "until bsim_ingest; a query against an empty corpus returns nothing useful.",
+                    + "until bsim_ingest; a query against an empty corpus returns nothing useful. "
+                    + "Returns a job_id instead of a result when the CLI outlives wait_seconds.",
             category = "bsim")
     public Response createDb(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -87,12 +113,13 @@ public class BSimService {
             @Param(value = "callgraph", source = ParamSource.BODY, defaultValue = "true",
                     description = "Record call-graph data (do not pass --nocallgraph). "
                             + "Call-graph topology materially improves match quality.")
-                    boolean callgraph) {
+                    boolean callgraph,
+            @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
+                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
             String template = BSimUrls.requireConfigTemplate(
                     (configTemplate == null || configTemplate.isBlank()) ? "medium_32" : configTemplate);
-            ensureFileParent(url);
             List<String> args = new ArrayList<>();
             args.add("createdatabase");
             args.add(url);
@@ -106,17 +133,25 @@ public class BSimService {
                 args.add(BSimUrls.requireToken("description", description));
             }
             if (!callgraph) args.add("--nocallgraph");
-            BSimCli.Result r = runBsim(BSimCli.DEFAULT_TIMEOUT, args);
-            if (!r.ok()) {
-                return cliError("createdatabase failed", r);
-            }
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("status", "success");
-            body.put("db_url", url);
-            body.put("config_template", template);
-            body.put("callgraph", callgraph);
-            body.put("executables", 0);
-            return Response.ok(body);
+
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("db_url", url);
+            request.put("config_template", template);
+            BSimJobs.Job job = jobs.submit("bsim_create_db", request, () -> {
+                ensureFileParent(url);
+                BSimCli.Result r = runBsim(BSimCli.DEFAULT_TIMEOUT, args);
+                if (!r.ok()) {
+                    return cliError("createdatabase failed", r);
+                }
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("status", "success");
+                body.put("db_url", url);
+                body.put("config_template", template);
+                body.put("callgraph", callgraph);
+                body.put("executables", 0);
+                return Response.ok(body);
+            });
+            return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
         } catch (Exception e) {
@@ -133,7 +168,8 @@ public class BSimService {
                     + "commit them with `bsim generatesigs --bsim --commit`. Refuses a source with "
                     + "no functions, and a pointer-size mismatch against the existing corpus "
                     + "(ingesting 64-bit into a medium_32 database silently degrades results). "
-                    + "Warns when the source has few user-defined names. Ingest with symbols.",
+                    + "Warns when the source has few user-defined names. Ingest with symbols. "
+                    + "Ingest takes minutes: expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response ingest(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -150,7 +186,9 @@ public class BSimService {
             @Param(value = "program", defaultValue = "", selector = false,
                     description = "Optional open program used only for prechecks when source is "
                             + "not a ghidraURL. Not a program selector — source is the ingest target.")
-                    String programName) {
+                    String programName,
+            @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
+                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
             if (source == null || source.isBlank()) {
@@ -159,6 +197,34 @@ public class BSimService {
             String credErr = BSimUrls.missingServerCredential(source);
             if (credErr != null) return Response.err(credErr);
             Program program = resolveProgramIfOpen(source, programName);
+            // Fail unresolvable sources synchronously and specifically —
+            // classify throws IllegalArgumentException with the remedy. The
+            // ghidraURL it may resolve is rechecked for credentials here too
+            // (repo paths become ghidra:// on this hop).
+            String directUrl = classifySource(source, program);
+            if (directUrl != null) {
+                credErr = BSimUrls.missingServerCredential(directUrl);
+                if (credErr != null) return Response.err(credErr);
+            }
+
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("db_url", url);
+            request.put("source", source);
+            request.put("commit", commit);
+            BSimJobs.Job job = jobs.submit("bsim_ingest", request,
+                    () -> runIngest(url, source, program, xmlDir, commit, overwrite));
+            return jobs.awaitOrTicket(job, waitSeconds);
+        } catch (IllegalArgumentException e) {
+            return Response.err(e.getMessage());
+        } catch (Exception e) {
+            return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        }
+    }
+
+    /** The CLI-heavy body of {@code bsim_ingest}; runs on the job worker. */
+    private Response runIngest(String url, String source, Program program,
+                               String xmlDir, boolean commit, boolean overwrite) throws Exception {
+        try {
             List<String> warnings = new ArrayList<>();
             if (program != null) {
                 Response reject = precheckProgram(program, url, warnings);
@@ -180,7 +246,7 @@ public class BSimService {
                 tempGzf = resolved.tempGzf;
                 // Repo paths become ghidra:// after resolve; check the resolved
                 // URL too, not just the original source string.
-                credErr = BSimUrls.missingServerCredential(ghidraUrl);
+                String credErr = BSimUrls.missingServerCredential(ghidraUrl);
                 if (credErr != null) return Response.err(credErr);
 
                 List<String> args = new ArrayList<>();
@@ -191,12 +257,29 @@ public class BSimService {
                 args.add(url);
                 if (commit) args.add("--commit");
                 if (overwrite) args.add("--overwrite");
-                BSimCli.Result r = runBsim(BSimCli.INGEST_TIMEOUT, args);
+                // A ghidra:// server URL is read by a STOCK Ghidra JVM that
+                // never loads this extension's env-reading authenticator, so
+                // pass the username as an argument and feed the password on
+                // stdin, where HeadlessClientAuthenticator's no-console
+                // fallback reads it.
+                String stdinData = null;
+                if (BSimUrls.isServerGhidraUrl(ghidraUrl)) {
+                    String user = BSimCli.resolvedServerUser();
+                    if (user != null) {
+                        args.add("--user");
+                        args.add(user);
+                    }
+                    String password = BSimCli.resolvedServerPassword();
+                    if (password != null) {
+                        stdinData = password + "\n";
+                    }
+                }
+                BSimCli.Result r = runBsim(BSimCli.INGEST_TIMEOUT, args, stdinData);
                 if (!r.ok()) {
                     return cliError("generatesigs failed", r);
                 }
 
-                BSimCli.Result countR = runBsim(BSimCli.DEFAULT_TIMEOUT, "getexecount", url);
+                BSimCli.Result countR = runBsim(BSimCli.DEFAULT_TIMEOUT, List.of("getexecount", url));
                 Integer exeCount = BSimCliParser.parseExeCount(countR.output);
 
                 Map<String, Object> body = new LinkedHashMap<>();
@@ -212,8 +295,6 @@ public class BSimService {
             }
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
-        } catch (Exception e) {
-            return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
     }
 
@@ -227,7 +308,9 @@ public class BSimService {
                     + "source executable name and architecture. The result is flagged ambiguous "
                     + "when the top two differently-named hits sit within 0.05 similarity. "
                     + "Never a bare ranked list. Short generic functions (accessors, thunks) "
-                    + "often have high similarity and low confidence — that split is the point.",
+                    + "often have high similarity and low confidence — that split is the point. "
+                    + "Queries run a helper analyzeHeadless JVM and can take minutes: expect a "
+                    + "job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response query(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -243,13 +326,23 @@ public class BSimService {
                     double confidenceThreshold,
             @Param(value = "max_matches", source = ParamSource.BODY, defaultValue = "10",
                     description = "Maximum matches per function") int maxMatches,
-            @Param(value = "program", defaultValue = "") String programName) {
+            @Param(value = "program", defaultValue = "") String programName,
+            @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
+                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
             ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
             if (pe.hasError()) return pe.error();
             Program program = pe.program();
-            return runQuery(url, program, function, similarityThreshold, confidenceThreshold, maxMatches);
+
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("db_url", url);
+            request.put("program", program.getName());
+            if (function != null && !function.isBlank()) request.put("function", function);
+            BSimJobs.Job job = jobs.submit("bsim_query", request,
+                    () -> runQuery(url, program, function, similarityThreshold,
+                            confidenceThreshold, maxMatches));
+            return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
         } catch (Exception e) {
@@ -267,7 +360,8 @@ public class BSimService {
                     + "dry_run defaults to true and does not write. skip_named defaults to true "
                     + "(never overwrite an analyst name). Ambiguous matches are never applied, "
                     + "whatever the scores. Applied names are the BSim hit names as-is (C linkage, "
-                    + "not PascalCase).",
+                    + "not PascalCase). Runs a full-program BSim query first, which takes minutes: "
+                    + "expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response applyMatches(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -289,7 +383,9 @@ public class BSimService {
                     double querySimilarity,
             @Param(value = "max_matches", source = ParamSource.BODY, defaultValue = "10",
                     description = "Matches fetched per function") int maxMatches,
-            @Param(value = "program", defaultValue = "") String programName) {
+            @Param(value = "program", defaultValue = "") String programName,
+            @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
+                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         if (minConfidence == null) {
             return Response.err(
                     "min_confidence is required. There is no universally safe default; "
@@ -302,82 +398,97 @@ public class BSimService {
             if (pe.hasError()) return pe.error();
             Program program = pe.program();
 
-            Response queried = runQuery(url, program, "", querySimilarity, 0.0, maxMatches);
-            if (queried instanceof Response.Err) return queried;
-            Map<String, Object> payload = JsonHelper.parseJson(queried.toJson());
-            List<BSimMatches.FunctionResult> results =
-                    BSimMatches.parseQueryPayload(payload, program.getExecutableMD5());
-
-            List<Map<String, Object>> renamed = new ArrayList<>();
-            List<Map<String, Object>> wouldRename = new ArrayList<>();
-            List<Map<String, Object>> skipped = new ArrayList<>();
-
-            for (BSimMatches.FunctionResult fr : results) {
-                Function func = resolveApplyTarget(program, fr);
-                String currentName = func != null ? func.getName() : fr.function;
-                BSimMatches.ApplyAction action = BSimMatches.decide(
-                        fr, currentName, skipNamed, minSimilarity, minConfidence);
-                if (action != BSimMatches.ApplyAction.APPLY) {
-                    Map<String, Object> skip = new LinkedHashMap<>();
-                    skip.put("function", fr.function);
-                    if (fr.address != null) skip.put("address", fr.address);
-                    skip.put("reason", BSimMatches.reason(action));
-                    BSimMatches.Hit best = fr.best();
-                    if (best != null) {
-                        skip.put("best_name", best.name);
-                        skip.put("similarity", best.similarity);
-                        skip.put("confidence", best.confidence);
-                    }
-                    skipped.add(skip);
-                    continue;
-                }
-                BSimMatches.Hit best = fr.best();
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("function", fr.function);
-                if (fr.address != null) row.put("address", fr.address);
-                row.put("new_name", best.name);
-                row.put("similarity", best.similarity);
-                row.put("confidence", best.confidence);
-                row.put("executable", best.executable);
-                if (dryRun) {
-                    wouldRename.add(row);
-                    continue;
-                }
-                if (func == null) {
-                    row.put("reason", "function_not_found");
-                    skipped.add(row);
-                    continue;
-                }
-                try {
-                    final Function target = func;
-                    final String newName = best.name;
-                    threadingStrategy.executeWrite(program, "BSim apply " + newName, () -> {
-                        target.setName(newName, SourceType.USER_DEFINED);
-                        return null;
-                    });
-                    renamed.add(row);
-                } catch (Exception e) {
-                    row.put("reason", "rename_failed");
-                    row.put("error", e.getMessage());
-                    skipped.add(row);
-                }
-            }
-
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("status", "success");
-            body.put("dry_run", dryRun);
-            body.put("min_confidence", minConfidence);
-            body.put("min_similarity", minSimilarity);
-            body.put("skip_named", skipNamed);
-            body.put("renamed", renamed);
-            body.put("would_rename", wouldRename);
-            body.put("skipped", skipped);
-            return Response.ok(body);
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("db_url", url);
+            request.put("program", program.getName());
+            request.put("dry_run", dryRun);
+            request.put("min_confidence", minConfidence);
+            BSimJobs.Job job = jobs.submit("bsim_apply_matches", request,
+                    () -> runApplyMatches(url, program, minConfidence, minSimilarity,
+                            skipNamed, dryRun, querySimilarity, maxMatches));
+            return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
         } catch (Exception e) {
             return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    /** The query + decide + rename body of {@code bsim_apply_matches}; runs on the job worker. */
+    private Response runApplyMatches(String url, Program program, Double minConfidence,
+                                     double minSimilarity, boolean skipNamed, boolean dryRun,
+                                     double querySimilarity, int maxMatches) throws Exception {
+        Response queried = runQuery(url, program, "", querySimilarity, 0.0, maxMatches);
+        if (queried instanceof Response.Err) return queried;
+        Map<String, Object> payload = JsonHelper.parseJson(queried.toJson());
+        List<BSimMatches.FunctionResult> results =
+                BSimMatches.parseQueryPayload(payload, program.getExecutableMD5());
+
+        List<Map<String, Object>> renamed = new ArrayList<>();
+        List<Map<String, Object>> wouldRename = new ArrayList<>();
+        List<Map<String, Object>> skipped = new ArrayList<>();
+
+        for (BSimMatches.FunctionResult fr : results) {
+            Function func = resolveApplyTarget(program, fr);
+            String currentName = func != null ? func.getName() : fr.function;
+            BSimMatches.ApplyAction action = BSimMatches.decide(
+                    fr, currentName, skipNamed, minSimilarity, minConfidence);
+            if (action != BSimMatches.ApplyAction.APPLY) {
+                Map<String, Object> skip = new LinkedHashMap<>();
+                skip.put("function", fr.function);
+                if (fr.address != null) skip.put("address", fr.address);
+                skip.put("reason", BSimMatches.reason(action));
+                BSimMatches.Hit best = fr.best();
+                if (best != null) {
+                    skip.put("best_name", best.name);
+                    skip.put("similarity", best.similarity);
+                    skip.put("confidence", best.confidence);
+                }
+                skipped.add(skip);
+                continue;
+            }
+            BSimMatches.Hit best = fr.best();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("function", fr.function);
+            if (fr.address != null) row.put("address", fr.address);
+            row.put("new_name", best.name);
+            row.put("similarity", best.similarity);
+            row.put("confidence", best.confidence);
+            row.put("executable", best.executable);
+            if (dryRun) {
+                wouldRename.add(row);
+                continue;
+            }
+            if (func == null) {
+                row.put("reason", "function_not_found");
+                skipped.add(row);
+                continue;
+            }
+            try {
+                final Function target = func;
+                final String newName = best.name;
+                threadingStrategy.executeWrite(program, "BSim apply " + newName, () -> {
+                    target.setName(newName, SourceType.USER_DEFINED);
+                    return null;
+                });
+                renamed.add(row);
+            } catch (Exception e) {
+                row.put("reason", "rename_failed");
+                row.put("error", e.getMessage());
+                skipped.add(row);
+            }
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", "success");
+        body.put("dry_run", dryRun);
+        body.put("min_confidence", minConfidence);
+        body.put("min_similarity", minSimilarity);
+        body.put("skip_named", skipNamed);
+        body.put("renamed", renamed);
+        body.put("would_rename", wouldRename);
+        body.put("skipped", skipped);
+        return Response.ok(body);
     }
 
     // ========================================================================
@@ -386,7 +497,8 @@ public class BSimService {
 
     @McpTool(path = "/bsim_list_corpus", method = "POST",
             description = "List executables in a BSim database (`bsim listexes` / `getexecount`). "
-                    + "Needed to answer what is actually in the corpus without shelling out.",
+                    + "Needed to answer what is actually in the corpus without shelling out. "
+                    + "Returns a job_id instead of a result when the CLI outlives wait_seconds.",
             category = "bsim")
     public Response listCorpus(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -396,7 +508,9 @@ public class BSimService {
             @Param(value = "name", source = ParamSource.BODY, defaultValue = "",
                     description = "Filter by executable name (passed as --name)") String name,
             @Param(value = "limit", source = ParamSource.BODY, defaultValue = "100",
-                    description = "Maximum executables to list (bsim default is 20)") int limit) {
+                    description = "Maximum executables to list (bsim default is 20)") int limit,
+            @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
+                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
             List<String> args = new ArrayList<>();
@@ -412,31 +526,55 @@ public class BSimService {
             }
             args.add("--limit");
             args.add(String.valueOf(Math.max(1, limit)));
-            BSimCli.Result r = runBsim(BSimCli.DEFAULT_TIMEOUT, args);
-            if (!r.ok()) return cliError("listexes failed", r);
 
-            List<BSimCliParser.ExeRecord> exes = BSimCliParser.parseExeList(r.output);
-            Integer parsed = BSimCliParser.parseExeCount(r.output);
-            int count = parsed != null ? parsed : exes.size();
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("db_url", url);
+            BSimJobs.Job job = jobs.submit("bsim_list_corpus", request, () -> {
+                BSimCli.Result r = runBsim(BSimCli.DEFAULT_TIMEOUT, args);
+                if (!r.ok()) return cliError("listexes failed", r);
 
-            BSimCli.Result countR = runBsim(BSimCli.DEFAULT_TIMEOUT, "getexecount", url);
-            Integer total = BSimCliParser.parseExeCount(countR.output);
+                List<BSimCliParser.ExeRecord> exes = BSimCliParser.parseExeList(r.output);
+                Integer parsed = BSimCliParser.parseExeCount(r.output);
+                int count = parsed != null ? parsed : exes.size();
 
-            List<Map<String, Object>> exeMaps = new ArrayList<>();
-            for (BSimCliParser.ExeRecord e : exes) exeMaps.add(e.toMap());
+                BSimCli.Result countR = runBsim(BSimCli.DEFAULT_TIMEOUT, List.of("getexecount", url));
+                Integer total = BSimCliParser.parseExeCount(countR.output);
 
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("status", "success");
-            body.put("db_url", url);
-            body.put("count", total != null ? total : count);
-            body.put("listed", exeMaps.size());
-            body.put("executables", exeMaps);
-            return Response.ok(body);
+                List<Map<String, Object>> exeMaps = new ArrayList<>();
+                for (BSimCliParser.ExeRecord e : exes) exeMaps.add(e.toMap());
+
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("status", "success");
+                body.put("db_url", url);
+                body.put("count", total != null ? total : count);
+                body.put("listed", exeMaps.size());
+                body.put("executables", exeMaps);
+                return Response.ok(body);
+            });
+            return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
         } catch (Exception e) {
             return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    // ========================================================================
+    // bsim_job_status
+    // ========================================================================
+
+    @McpTool(path = "/bsim_job_status", method = "GET",
+            description = "Status and result of a background BSim operation. BSim tools return "
+                    + "{status: \"started\", job_id} when a CLI run outlives wait_seconds; poll "
+                    + "this with that job_id until state is \"done\", then read the embedded "
+                    + "result (identical to what the tool would have returned inline). Blank "
+                    + "job_id lists every retained job.",
+            category = "bsim")
+    public Response jobStatus(
+            @Param(value = "job_id", defaultValue = "",
+                    description = "Job id from a BSim tool's started response. Blank lists all jobs.")
+                    String jobId) {
+        return jobs.status(jobId);
     }
 
     // ========================================================================
@@ -530,7 +668,7 @@ public class BSimService {
         }
         int srcBits = program.getLanguage().getLanguageDescription().getSize();
         BSimCli.Result listR = runBsim(BSimCli.DEFAULT_TIMEOUT,
-                "listexes", dbUrl, "--limit", "50");
+                List.of("listexes", dbUrl, "--limit", "50"));
         List<BSimCliParser.ExeRecord> existing = BSimCliParser.parseExeList(listR.output);
         List<String> archs = new ArrayList<>();
         for (BSimCliParser.ExeRecord e : existing) archs.add(e.arch);
@@ -571,30 +709,47 @@ public class BSimService {
         return null;
     }
 
-    private ResolvedSource resolveSource(String source, Program program, Path workDir)
-            throws Exception {
+    /**
+     * The synchronous, side-effect-free half of {@link #resolveSource}: return
+     * the ghidraURL this source resolves to when that is knowable without
+     * touching the filesystem or spawning anything, {@code null} when the
+     * source is an open program that needs staging inside the job, and throw
+     * {@link IllegalArgumentException} (with the remedy) when the source cannot
+     * resolve at all — so an invalid source is a specific, immediate error
+     * rather than a queued job that fails later.
+     */
+    private String classifySource(String source, Program program) {
         if (BSimUrls.looksLikeGhidraUrl(source)) {
-            return new ResolvedSource(BSimUrls.requireGhidraUrl(source), null, null);
+            return BSimUrls.requireGhidraUrl(source);
         }
-        if (program == null) {
-            if (source != null && source.startsWith("/")) {
-                String host = System.getenv("GHIDRA_SERVER_HOST");
-                String port = System.getenv("GHIDRA_SERVER_PORT");
-                if (host != null && !host.isBlank()) {
-                    String url = "ghidra://" + host
-                            + (port != null && !port.isBlank() ? ":" + port : "")
-                            + source;
-                    return new ResolvedSource(url, null, null);
-                }
-                throw new IllegalArgumentException(
-                        "Cannot resolve repository path '" + source + "' to a ghidraURL: "
-                                + "GHIDRA_SERVER_HOST is not set. Pass a full "
-                                + "ghidra://host/repo/path, or open the program.");
+        if (program != null) {
+            return null; // Staged (or shared-URL-resolved) inside the job.
+        }
+        if (source != null && source.startsWith("/")) {
+            String host = System.getenv("GHIDRA_SERVER_HOST");
+            String port = System.getenv("GHIDRA_SERVER_PORT");
+            if (host != null && !host.isBlank()) {
+                return "ghidra://" + host
+                        + (port != null && !port.isBlank() ? ":" + port : "")
+                        + source;
             }
             throw new IllegalArgumentException(
-                    "Cannot resolve source '" + source + "' to a ghidraURL. Pass "
-                            + "ghidra://host/repo/path, a repository path starting with /, "
-                            + "or the name of an open program.");
+                    "Cannot resolve repository path '" + source + "' to a ghidraURL: "
+                            + "GHIDRA_SERVER_HOST is not set. Pass a full "
+                            + "ghidra://host/repo/path, or open the program.");
+        }
+        throw new IllegalArgumentException(
+                "Cannot resolve source '" + source + "' to a ghidraURL. Pass "
+                        + "ghidra://host/repo/path, a repository path starting with /, "
+                        + "or the name of an open program.");
+    }
+
+    private ResolvedSource resolveSource(String source, Program program, Path workDir)
+            throws Exception {
+        if (program == null) {
+            // classifySource already vetted these forms synchronously; it
+            // throws the same specific errors for anything unresolvable.
+            return new ResolvedSource(classifySource(source, program), null, null);
         }
         java.net.URL shared = program.getDomainFile().getSharedProjectURL(null);
         if (shared != null) {
@@ -637,13 +792,14 @@ public class BSimService {
         }
     }
 
-    private BSimCli.Result runBsim(Duration timeout, String... args) throws Exception {
-        return runBsim(timeout, List.of(args));
+    private BSimCli.Result runBsim(Duration timeout, List<String> args) throws Exception {
+        return runBsim(timeout, args, null);
     }
 
-    private BSimCli.Result runBsim(Duration timeout, List<String> args) throws Exception {
+    private BSimCli.Result runBsim(Duration timeout, List<String> args, String stdinData)
+            throws Exception {
         synchronized (BSimCli.LOCK) {
-            return cli.bsim(timeout, args.toArray(String[]::new));
+            return cli.bsim(timeout, args, stdinData);
         }
     }
 

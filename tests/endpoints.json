@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 260,
+  "total_endpoints": 261,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -174,7 +174,7 @@
         "compact",
         "program"
       ],
-      "description": "Score a global variable's documentation completeness on a budgeted 0-100 scale â€” the data-address analog of analyze_function_completeness. Six axes: meaningful name, explanatory plate comment, real type, formatted bytes (core, drive effective_score + DOC_DRAFT) plus enum/equate and struct membership (advanced, forgiven in effective_score). A global with no real type (no defined data, or an undefined* type) is hard-capped at 79 and can never band COMPLETE_80 or above, no matter how good its name and comment are â€” apply a type with set_global first. Returns raw score, effective_score, COMPLETE_<band>, per-axis breakdown, and which axes are still missing."
+      "description": "Score a global variable's documentation completeness on a budgeted 0-100 scale \u00e2\u20ac\u201d the data-address analog of analyze_function_completeness. Six axes: meaningful name, explanatory plate comment, real type, formatted bytes (core, drive effective_score + DOC_DRAFT) plus enum/equate and struct membership (advanced, forgiven in effective_score). A global with no real type (no defined data, or an undefined* type) is hard-capped at 79 and can never band COMPLETE_80 or above, no matter how good its name and comment are \u00e2\u20ac\u201d apply a type with set_global first. Returns raw score, effective_score, COMPLETE_<band>, per-axis breakdown, and which axes are still missing."
     },
     {
       "path": "/analyze_struct_field_usage",
@@ -258,7 +258,7 @@
         "output_dir",
         "output_name"
       ],
-      "description": "Archive the currently open project to a Ghidra-native .gar file. The result can be restored into any Ghidra GUI via File â†’ Restore Project, or back into a headless instance via /restore_project. Captures the entire project (all programs, folders, settings, version-control metadata) â€” unlike /export_program which ships a single program as .gzf. Output is written to `output_dir/output_name` (defaults: /data/exports and `<project>.gar`). Refuses to overwrite an existing file. Callers should /save_all_programs first to flush pending in-memory edits."
+      "description": "Archive the currently open project to a Ghidra-native .gar file. The result can be restored into any Ghidra GUI via File \u00e2\u2020\u2019 Restore Project, or back into a headless instance via /restore_project. Captures the entire project (all programs, folders, settings, version-control metadata) \u00e2\u20ac\u201d unlike /export_program which ships a single program as .gzf. Output is written to `output_dir/output_name` (defaults: /data/exports and `<project>.gar`). Refuses to overwrite an existing file. Callers should /save_all_programs first to flush pending in-memory edits."
     },
     {
       "path": "/audit_global",
@@ -278,7 +278,7 @@
         "address",
         "program"
       ],
-      "description": "Audit every global variable referenced from within a function in one call. Walks the function's instructions, collects unique data references, and returns the per-global audit (same shape as audit_global) plus a summary of how many are fully documented vs have issues. The killer per-function pre-flight tool â€” start every doc pass with this when the function has global xrefs."
+      "description": "Audit every global variable referenced from within a function in one call. Walks the function's instructions, collects unique data references, and returns the per-global audit (same shape as audit_global) plus a summary of how many are fully documented vs have issues. The killer per-function pre-flight tool \u00e2\u20ac\u201d start every doc pass with this when the function has global xrefs."
     },
     {
       "path": "/batch_apply_documentation",
@@ -360,7 +360,8 @@
         "dry_run",
         "similarity_threshold",
         "max_matches",
-        "program"
+        "program",
+        "wait_seconds"
       ],
       "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default. dry_run defaults to true and does not write. skip_named defaults to true. Ambiguous matches are never applied."
     },
@@ -373,7 +374,8 @@
         "config_template",
         "name",
         "description",
-        "callgraph"
+        "callgraph",
+        "wait_seconds"
       ],
       "description": "Create a BSim database via bsim createdatabase. Default template medium_32. Call-graph data is recorded unless callgraph=false. Empty until bsim_ingest."
     },
@@ -387,9 +389,19 @@
         "xml_dir",
         "commit",
         "overwrite",
-        "program"
+        "program",
+        "wait_seconds"
       ],
       "description": "Generate BSim signatures from a ghidraURL or open program and commit them. Refuses a source with no functions and a pointer-size mismatch against the existing corpus. Warns when the source has few user-defined names."
+    },
+    {
+      "path": "/bsim_job_status",
+      "method": "GET",
+      "category": "bsim",
+      "params": [
+        "job_id"
+      ],
+      "description": "Status and result of a background BSim operation. BSim tools return {status: started, job_id} when a CLI run outlives wait_seconds; poll this until state is done, then read the embedded result. Blank job_id lists every retained job."
     },
     {
       "path": "/bsim_list_corpus",
@@ -399,7 +411,8 @@
         "db_url",
         "arch",
         "name",
-        "limit"
+        "limit",
+        "wait_seconds"
       ],
       "description": "List executables in a BSim database (bsim listexes / getexecount)."
     },
@@ -413,7 +426,8 @@
         "similarity_threshold",
         "confidence_threshold",
         "max_matches",
-        "program"
+        "program",
+        "wait_seconds"
       ],
       "description": "Query one function or the whole open program against a BSim database. Each match has separate numeric similarity and confidence fields. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity."
     },
@@ -469,7 +483,7 @@
         "end_address",
         "program"
       ],
-      "description": "Run Ghidra's GUI 'Clear Flow and Repair' action on a seed range: clears instruction flow reachable from the seed, then repairs function bodies and re-disassembles retained flow (ClearFlowAndRepairCmd with clear_data=false, clear_labels=false, repair=true). Use to rebuild regions whose flow was created under wrong assumptions, e.g. a function truncated while a callee was incorrectly marked non-returning. The command follows control flow BEYOND the seed range; the reported observations are seed-local only and do not describe everything the command changed. The flow traversal is not cancellable â€” a very large connected flow can hold the write lock (GUI: the Swing thread) until it completes. Ghidra treats a seed with exactly one candidate flow start (an instruction that is neither a function entry nor reached by fallthrough from inside the seed) as the flow being intentionally removed and does not reseed that start during repair; consequently, applying this action to otherwise healthy flow can clear code, matching the GUI action's behavior. The response's seed_range.end_address_exclusive is null when the seed ends at its address space's maximum address, since that boundary has no representable exclusive successor. Results are reachability-dependent and the command is not idempotent: some damaged regions may require more than one application to rebuild, while applying it again to healthy flow can clear code â€” inspect the before/after observations and resulting disassembly after every call."
+      "description": "Run Ghidra's GUI 'Clear Flow and Repair' action on a seed range: clears instruction flow reachable from the seed, then repairs function bodies and re-disassembles retained flow (ClearFlowAndRepairCmd with clear_data=false, clear_labels=false, repair=true). Use to rebuild regions whose flow was created under wrong assumptions, e.g. a function truncated while a callee was incorrectly marked non-returning. The command follows control flow BEYOND the seed range; the reported observations are seed-local only and do not describe everything the command changed. The flow traversal is not cancellable \u00e2\u20ac\u201d a very large connected flow can hold the write lock (GUI: the Swing thread) until it completes. Ghidra treats a seed with exactly one candidate flow start (an instruction that is neither a function entry nor reached by fallthrough from inside the seed) as the flow being intentionally removed and does not reseed that start during repair; consequently, applying this action to otherwise healthy flow can clear code, matching the GUI action's behavior. The response's seed_range.end_address_exclusive is null when the seed ends at its address space's maximum address, since that boundary has no representable exclusive successor. Results are reachability-dependent and the command is not idempotent: some damaged regions may require more than one application to rebuild, while applying it again to healthy flow can clear code \u00e2\u20ac\u201d inspect the before/after observations and resulting disassembly after every call."
     },
     {
       "path": "/clear_function_comments",
@@ -1876,7 +1890,7 @@
       "params": [
         "program"
       ],
-      "description": "List program option groups (e.g. 'Program Information', 'Analyzers', 'Decompiler'). Each group holds typed keyâ†’value settings; use get_program_options to read a group's entries."
+      "description": "List program option groups (e.g. 'Program Information', 'Analyzers', 'Decompiler'). Each group holds typed key\u00e2\u2020\u2019value settings; use get_program_options to read a group's entries."
     },
     {
       "path": "/list_project_files",
@@ -1917,7 +1931,7 @@
       "params": [
         "program"
       ],
-      "description": "List user-defined property maps â€” typed per-address keyâ†’value stores. Each map reports its name, value type (int|long|string|object|void), and the number of addresses holding a value."
+      "description": "List user-defined property maps \u00e2\u20ac\u201d typed per-address key\u00e2\u2020\u2019value stores. Each map reports its name, value type (int|long|string|object|void), and the number of addresses holding a value."
     },
     {
       "path": "/list_scripts",
@@ -2156,7 +2170,7 @@
         "assignments",
         "program"
       ],
-      "description": "Detach one or more tags from a function. Does not delete the program-wide tag definition â€” use delete_function_tag for that."
+      "description": "Detach one or more tags from a function. Does not delete the program-wide tag definition \u00e2\u20ac\u201d use delete_function_tag for that."
     },
     {
       "path": "/remove_program_option",
@@ -2190,7 +2204,7 @@
         "operand_index",
         "program"
       ],
-      "description": "Remove memory cross-reference(s) from one address to another â€” the inverse of add_memory_reference. Removes every reference from_address -> to_address regardless of operand by default; pass operand_index >= 0 to remove only the reference on that operand. Removes both user-defined and analyzer-inferred references and reports each removed reference's source_type. Accepts space-prefixed addresses (mem:1000)."
+      "description": "Remove memory cross-reference(s) from one address to another \u00e2\u20ac\u201d the inverse of add_memory_reference. Removes every reference from_address -> to_address regardless of operand by default; pass operand_index >= 0 to remove only the reference on that operand. Removes both user-defined and analyzer-inferred references and reports each removed reference's source_type. Accepts space-prefixed addresses (mem:1000)."
     },
     {
       "path": "/remove_struct_field",
@@ -2657,7 +2671,7 @@
         "calling_convention",
         "program"
       ],
-      "description": "Set function prototype (return type, param types, calling convention). NOTE: the function name in the prototype string does NOT rename the function â€” call rename_function separately if needed."
+      "description": "Set function prototype (return type, param types, calling convention). NOTE: the function name in the prototype string does NOT rename the function \u00e2\u20ac\u201d call rename_function separately if needed."
     },
     {
       "path": "/set_function_tag_comment",
@@ -2695,7 +2709,7 @@
         "strict_mode",
         "allow_evict"
       ],
-      "description": "Atomically apply name + type + plate-comment + array length to a global variable. Single-transaction; rejects on validation failure with no partial write. Replaces the 4-tool chain (apply_data_type â†’ rename_data â†’ batch_set_comments â†’ create_label)."
+      "description": "Atomically apply name + type + plate-comment + array length to a global variable. Single-transaction; rejects on validation failure with no partial write. Replaces the 4-tool chain (apply_data_type \u00e2\u2020\u2019 rename_data \u00e2\u2020\u2019 batch_set_comments \u00e2\u2020\u2019 create_label)."
     },
     {
       "path": "/set_image_base",

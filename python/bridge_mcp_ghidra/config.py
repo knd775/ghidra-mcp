@@ -24,11 +24,15 @@ ENDPOINT_TIMEOUTS = {
     "import_file": 300,
     "run_ghidra_script": 1800,
     "run_script_inline": 1800,
+    # BSim tools answer within their wait_seconds (max 55) and hand back a
+    # job_id for anything slower; generous ceilings kept for older servers
+    # that still run the CLI synchronously in the handler.
     "bsim_ingest": 1800,
     "bsim_query": 1800,
     "bsim_apply_matches": 1800,
     "bsim_create_db": 120,
-    "bsim_list_corpus": 60,
+    "bsim_list_corpus": 120,
+    "bsim_job_status": 30,
     # Ghidra's default decompile cap is 60s. The bridge must outlive it so the
     # plugin can return a structured timeout instead of writing into a closed
     # socket after the client has already gone away.
@@ -44,6 +48,14 @@ ENDPOINT_TIMEOUTS = {
     "launch": 120,
     "default": 30,
 }
+
+# Log a bridge-side warning when a single tool call runs longer than this.
+# MCP gateways and tunnel hops observed in front of this bridge abandon a
+# response around 60-100s and fabricate a bare "-32603 Internal Error" with no
+# detail — while the call keeps running here and in Ghidra. Without this line
+# neither container logs anything, and the failure is undebuggable from the
+# client side (that is exactly how bsim_ingest burned two debugging rounds).
+SLOW_TOOL_WARN_SECONDS = 50
 
 REQUEST_TIMEOUT_GRACE_SECONDS = 15
 # Long-running endpoints may legitimately ask Ghidra to spend 1800 seconds on

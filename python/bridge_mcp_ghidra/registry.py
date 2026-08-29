@@ -4,11 +4,12 @@ import asyncio
 import inspect
 import json
 import sys
+import time
 
 from . import dispatch
 from . import state
 from . import transport
-from .config import STATIC_TOOL_NAMES, _ALL_STATIC_TOOL_NAMES, logger
+from .config import SLOW_TOOL_WARN_SECONDS, STATIC_TOOL_NAMES, _ALL_STATIC_TOOL_NAMES, logger
 from .schema import _TYPE_MAP, _coerce_default, _normalize_tool_def_names, _parse_schema
 from .server import Context, mcp, format_tool_exception_json
 from .validation import sanitize_address, validate_tool_name
@@ -197,10 +198,26 @@ def _register_tool_def(tool_def: dict) -> bool:
         # FastMCP calls synchronous tools directly on its event loop. Keep the
         # blocking Ghidra HTTP lifecycle in a worker thread so one slow request
         # cannot close or starve the entire MCP session.
+        started = time.monotonic()
         try:
             return await state.run_blocking_ghidra_call(sync_handler, **kwargs)
         except Exception as e:
             return _tool_exception_payload(e, name)
+        finally:
+            took = time.monotonic() - started
+            if took >= SLOW_TOOL_WARN_SECONDS:
+                # Gateways/tunnels in front of this bridge abandon responses
+                # around 60-100s and fabricate a blank -32603; this line is the
+                # only server-side evidence that the call was merely slow, not
+                # broken. (BSim tools accept wait_seconds and return a job_id
+                # via bsim_job_status specifically to stay under that budget.)
+                logger.warning(
+                    "Tool %s took %.1fs — longer than typical MCP gateway/tunnel "
+                    "response budgets (~60-100s). If the client reported a bare "
+                    "-32603/timeout, the response was produced but abandoned upstream.",
+                    name,
+                    took,
+                )
 
     handler.__signature__ = sync_handler.__signature__
     handler.__annotations__ = sync_handler.__annotations__
