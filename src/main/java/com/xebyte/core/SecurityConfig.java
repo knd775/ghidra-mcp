@@ -25,7 +25,9 @@ import java.nio.file.Paths;
  *       code against the Ghidra process and are off by default in v5.4.1+.
  *       Without an explicit opt-in they return 403. Scripts endpoints were
  *       always-on before v5.4.1; the flip to default-off is a deliberate
- *       breaking change in the security release.
+ *       breaking change in the security release. When opted in,
+ *       {@link #scriptsEnabledAdvisory()} returns a warning logged at
+ *       startup: these endpoints execute arbitrary Java against this process.
  *   <li>{@code GHIDRA_MCP_FILE_ROOT} — if set to a directory path, endpoints that take a
  *       real <em>filesystem</em> path canonicalize the input (via
  *       {@link #resolveWithinFileRoot(String)}) and require that the resolved path fall
@@ -195,6 +197,31 @@ public final class SecurityConfig {
     /** True when {@code GHIDRA_MCP_ALLOW_SCRIPTS} opts in. */
     public boolean areScriptsAllowed() {
         return scriptsAllowed;
+    }
+
+    /**
+     * Advisory when {@code GHIDRA_MCP_ALLOW_SCRIPTS} is opted in. Script
+     * endpoints execute arbitrary Java against this process — that is
+     * dangerous by itself. Returns a warning string, or {@code null} when
+     * scripts are off. Call this at startup and log the result; it does not
+     * disable the endpoints.
+     */
+    public String scriptsEnabledAdvisory() {
+        return scriptsEnabledAdvisory(scriptsAllowed);
+    }
+
+    /**
+     * Factored for direct unit testing (the instance method reads the
+     * env-captured field, so the enabled branch is awkward to exercise
+     * otherwise).
+     */
+    public static String scriptsEnabledAdvisory(boolean scriptsAllowed) {
+        if (!scriptsAllowed) {
+            return null;
+        }
+        return "GHIDRA_MCP_ALLOW_SCRIPTS is enabled: /run_script_inline and "
+                + "/run_ghidra_script execute arbitrary Java against this process. "
+                + "Leave this unset unless you need script execution.";
     }
 
     /** True when {@code GHIDRA_MCP_PROJECT_FOLDER} is set (any value). */

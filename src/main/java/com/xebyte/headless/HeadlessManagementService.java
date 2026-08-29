@@ -575,9 +575,8 @@ public class HeadlessManagementService {
 
     @McpTool(path = "/upload_file", method = "POST",
             description = "Write a local file into GHIDRA_MCP_FILE_ROOT/uploads/ so a subsequent "
-                + "import_file can load it with no host-filesystem access. Mutually exclusive with "
-                + "GHIDRA_MCP_ALLOW_SCRIPTS (upload plus script execution is arbitrary code execution). "
-                + "filename is a name, not a path: separators and '..' are rejected. Requires FILE_ROOT.",
+                + "import_file can load it with no host-filesystem access. filename is a name, "
+                + "not a path: separators and '..' are rejected. Requires FILE_ROOT.",
             category = "headless")
     public Response uploadFile(
             @Param(value = "filename", source = ParamSource.BODY,
@@ -587,10 +586,6 @@ public class HeadlessManagementService {
             @Param(value = "overwrite", source = ParamSource.BODY, defaultValue = "false",
                 description = "Replace an existing file. Always refused if that file is open as a program.") boolean overwrite) {
         SecurityConfig security = SecurityConfig.getInstance();
-        if (security.areScriptsAllowed()) {
-            return Response.err("upload_file is disabled while GHIDRA_MCP_ALLOW_SCRIPTS is enabled: "
-                + "upload plus script execution is arbitrary code execution on the host");
-        }
         if (!security.hasFileRoot()) {
             return Response.err("upload_file requires GHIDRA_MCP_FILE_ROOT so uploads stay confined "
                 + "to <root>/uploads/");

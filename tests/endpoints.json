@@ -2751,7 +2751,7 @@
         "content_base64",
         "overwrite"
       ],
-      "description": "Write a local file into GHIDRA_MCP_FILE_ROOT/uploads/ so a subsequent import_file can load it with no host-filesystem access. Mutually exclusive with GHIDRA_MCP_ALLOW_SCRIPTS (upload plus script execution is arbitrary code execution). filename is a name, not a path: separators and '..' are rejected. Requires FILE_ROOT."
+      "description": "Write a local file into GHIDRA_MCP_FILE_ROOT/uploads/ so a subsequent import_file can load it with no host-filesystem access. filename is a name, not a path: separators and '..' are rejected. Requires FILE_ROOT."
     },
     {
       "path": "/validate_data_type",

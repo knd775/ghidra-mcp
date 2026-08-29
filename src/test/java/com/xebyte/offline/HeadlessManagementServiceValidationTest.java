@@ -72,22 +72,22 @@ public class HeadlessManagementServiceValidationTest extends TestCase {
     }
 
     public void testUploadFileRequiresFileRoot() {
+        if (SecurityConfig.getInstance().hasFileRoot()) {
+            // FILE_ROOT is set in this process; the fail-closed fixture cannot
+            // assert the missing-root error. The call may proceed to a real write.
+            return;
+        }
         Response r = svc.uploadFile("sample.bin", "AA==", false);
         assertTrue(r instanceof Response.Err);
         String msg = ((Response.Err) r).message();
-        if (SecurityConfig.getInstance().areScriptsAllowed()) {
-            assertTrue(msg, msg.contains("GHIDRA_MCP_ALLOW_SCRIPTS"));
-        } else if (!SecurityConfig.getInstance().hasFileRoot()) {
-            assertTrue(msg, msg.contains("GHIDRA_MCP_FILE_ROOT"));
-        }
-        // If both env vars happen to be set in this process, the call may
-        // proceed to a real write; that is outside this fail-closed fixture.
+        assertTrue(msg, msg.contains("GHIDRA_MCP_FILE_ROOT"));
+        assertFalse("scripts must not hard-block upload_file",
+            msg.contains("GHIDRA_MCP_ALLOW_SCRIPTS"));
     }
 
     public void testUploadFileRejectsPathSeparators() {
-        if (SecurityConfig.getInstance().areScriptsAllowed()
-                || !SecurityConfig.getInstance().hasFileRoot()) {
-            // Filename is checked after the scripts / FILE_ROOT gates.
+        if (!SecurityConfig.getInstance().hasFileRoot()) {
+            // Filename is checked after the FILE_ROOT gate.
             return;
         }
         Response r = svc.uploadFile("../escape.bin", "AA==", false);
