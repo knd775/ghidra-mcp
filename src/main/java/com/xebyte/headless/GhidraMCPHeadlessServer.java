@@ -368,8 +368,14 @@ public class GhidraMCPHeadlessServer implements GhidraLaunchable {
         server.start();
         running = true;
         System.out.println("HTTP server started on " + bindAddress + ":" + port);
-        if (com.xebyte.core.SecurityConfig.getInstance().isAuthEnabled()) {
+        com.xebyte.core.SecurityConfig security = com.xebyte.core.SecurityConfig.getInstance();
+        if (security.isAuthEnabled()) {
             System.out.println("Auth: enabled (GHIDRA_MCP_AUTH_TOKEN)");
+        }
+        String scriptsWarn = security.scriptsEnabledAdvisory();
+        if (scriptsWarn != null) {
+            Msg.warn(this, scriptsWarn);
+            System.err.println("WARNING: " + scriptsWarn);
         }
     }
 

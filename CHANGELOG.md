@@ -71,12 +71,17 @@ a client can go from bytes to an analyzed program without host filesystem access
 
 This is the only endpoint that writes attacker-controlled bytes to a path the
 server later feeds to a Ghidra loader. Constraints are structural, not
-documentary: refused while `GHIDRA_MCP_ALLOW_SCRIPTS` is on; confined via
-`resolveWithinFileRoot` to `<root>/uploads/`; filename is a name (separators and
-`..` rejected, not sanitised); overwrite requires `overwrite=true` and is always
-refused for a file open as a program; decoded size is capped by
-`GHIDRA_MCP_MAX_UPLOAD_BYTES` (default 16 MiB), separate from the 64 MiB JSON
-metadata ceiling.
+documentary: confined via `resolveWithinFileRoot` to `<root>/uploads/`; filename
+is a name (separators and `..` rejected, not sanitised); overwrite requires
+`overwrite=true` and is always refused for a file open as a program; decoded
+size is capped by `GHIDRA_MCP_MAX_UPLOAD_BYTES` (default 16 MiB), separate from
+the 64 MiB JSON metadata ceiling. Enabling `GHIDRA_MCP_ALLOW_SCRIPTS` no longer
+disables this endpoint.
+
+### Script-execution startup warning
+
+When `GHIDRA_MCP_ALLOW_SCRIPTS` is set, GUI and headless startup log a warning:
+script endpoints execute arbitrary Java against the process.
 
 ### Headless parity (P7–P13)
 

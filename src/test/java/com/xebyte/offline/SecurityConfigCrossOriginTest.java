@@ -161,4 +161,15 @@ public class SecurityConfigCrossOriginTest extends TestCase {
         assertEquals(SecurityConfig.DEFAULT_MAX_UPLOAD_BYTES,
             SecurityConfig.getInstance().getMaxUploadBytes());
     }
+
+    public void testScriptsEnabledAdvisoryOnlyWhenScriptsOn() {
+        assertNull(SecurityConfig.scriptsEnabledAdvisory(false));
+        String msg = SecurityConfig.scriptsEnabledAdvisory(true);
+        assertNotNull(msg);
+        assertTrue(msg, msg.contains("GHIDRA_MCP_ALLOW_SCRIPTS"));
+        assertTrue(msg, msg.contains("/run_script_inline"));
+        assertTrue(msg, msg.contains("/run_ghidra_script"));
+        assertFalse("advisory must not mention upload_file", msg.contains("upload_file"));
+        assertFalse("advisory must not mention FILE_ROOT", msg.contains("FILE_ROOT"));
+    }
 }

@@ -153,18 +153,32 @@ public class HardeningWiringTest extends TestCase {
                 src.contains("requires GUI mode (PluginTool not available)"));
     }
 
-    /** Upload plus script execution is arbitrary code execution; they must be exclusive. */
-    public void testUploadFileRefusesWhenScriptsAllowed() throws IOException {
+    /**
+     * {@code /upload_file} must not refuse based on the scripts gate. Script
+     * execution is warned about at startup on its own; uploads stay confined
+     * to uploads/.
+     */
+    public void testUploadFileDoesNotRefuseWhenScriptsAllowed() throws IOException {
         String src = read("headless", "HeadlessManagementService.java");
-        int sig = src.indexOf("public Response uploadFile(");
-        assertTrue("Could not locate uploadFile", sig >= 0);
-        String body = src.substring(sig);
-        int gate = body.indexOf("areScriptsAllowed()");
-        int write = body.indexOf("Files.write");
-        assertTrue("upload_file must check areScriptsAllowed()", gate >= 0);
-        assertTrue("scripts gate must precede the write", write > gate);
+        String method = body(src, "/upload_file");
+        assertTrue("upload_file must write", method.contains("Files.write"));
+        assertTrue("upload_file must not hard-block on areScriptsAllowed()",
+                method.indexOf("areScriptsAllowed()") < 0);
         assertTrue("upload_file must confine to uploads/",
-                body.contains("\"uploads\""));
+                method.contains("\"uploads\""));
+    }
+
+    /** Startup must log when GHIDRA_MCP_ALLOW_SCRIPTS is enabled. */
+    public void testStartupLogsScriptsEnabledAdvisory() throws IOException {
+        String headless = read("headless", "GhidraMCPHeadlessServer.java");
+        assertTrue("headless start must log scriptsEnabledAdvisory",
+                headless.contains("scriptsEnabledAdvisory("));
+        String plugin = read("GhidraMCPPlugin.java");
+        assertTrue("GUI plugin start must log scriptsEnabledAdvisory",
+                plugin.contains("scriptsEnabledAdvisory("));
+        String cfg = read("core", "SecurityConfig.java");
+        assertTrue("SecurityConfig must define the advisory",
+                cfg.contains("scriptsEnabledAdvisory"));
     }
 
     /** eclipse-temurin:21-jdk already owns uid 1000; reclaim it before groupadd. */

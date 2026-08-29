@@ -312,6 +312,10 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         Msg.info(this, "GhidraMCP " + VersionInfo.getFullVersion());
         Msg.info(this, "Endpoints: " + VersionInfo.getEndpointCount());
         Msg.info(this, "============================================");
+        String scriptsWarn = com.xebyte.core.SecurityConfig.getInstance().scriptsEnabledAdvisory();
+        if (scriptsWarn != null) {
+            Msg.warn(this, scriptsWarn);
+        }
 
         // Server authenticator: ensure credentials are registered before any project opens.
         // GhidraMCPAuthInitializer implements ModuleInitializer, but that ExtensionPoint
