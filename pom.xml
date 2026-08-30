@@ -184,6 +184,14 @@
                     <exclude>extension.properties</exclude>
                 </excludes>
             </resource>
+            <resource>
+                <directory>docker</directory>
+                <filtering>false</filtering>
+                <includes>
+                    <include>references.yaml</include>
+                </includes>
+                <targetPath>reference</targetPath>
+            </resource>
         </resources>
         <plugins>
             <!-- Maven Surefire Plugin — enable Byte Buddy experimental mode for Java 25.

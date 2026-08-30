@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 261,
+  "total_endpoints": 263,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -347,6 +347,36 @@
         "program"
       ],
       "description": "Report of source file strings and their FUN_* functions"
+    },
+    {
+      "path": "/build_manifest",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "path",
+        "dry_run"
+      ],
+      "description": "Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them. A matrix of toolchain x opt is how the corpus covers compiler drift. dry_run returns every command line without cloning or compiling."
+    },
+    {
+      "path": "/build_reference",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "name",
+        "repo",
+        "ref",
+        "sources",
+        "toolchain",
+        "arch_flags",
+        "opt",
+        "defines",
+        "extra_flags",
+        "strip_debug",
+        "output_name",
+        "dry_run"
+      ],
+      "description": "Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through this tool; the shared volume is the handoff. ref must be a tag or SHA (bare branch names are refused). strip_debug keeps .symtab. dry_run returns the gcc command line and output path without cloning or compiling."
     },
     {
       "path": "/bsim_apply_matches",

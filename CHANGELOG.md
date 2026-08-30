@@ -17,6 +17,23 @@ Query has no CLI command, so `bsim_query` runs `BSim_McpQuery.java` in a helper
 `analyzeHeadless` JVM and reads JSON back. `bsim_apply_matches` uses those
 scores and renames in the open program.
 
+**Reference corpus builds (`build_reference`, `build_manifest`).** BSim can
+only match what is in the corpus, and for embedded targets nothing is
+downloadable. The Ghidra container cannot compile (uid 1000, no compiler),
+and moving object bytes through an agent tool call has already silently
+corrupted a 34 KB file (same length, different sha256). A sibling
+`ghidra-builder:gcc10` / `:gcc12` / `:gcc13` service clones a pinned tag,
+compiles onto the shared `/data` volume, and `import_file` loads that path.
+Compiler version is the design driver: GCC 13.2 littlefs matched the right
+names at 0.27–0.35 similarity because the firmware was built with GCC 10–12;
+`lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. The
+image tag *is* the compiler — there is no `:latest`. Images install
+`libnewlib-arm-none-eabi` explicitly (`gcc-arm-none-eabi` only Recommends
+it; `--no-install-recommends` otherwise drops `<string.h>`). `ref` must
+be a tag or SHA. `dry_run` returns the gcc command line and does not clone.
+Manifest `docker/references.yaml` expands littlefs × three toolchains × three
+opt levels to nine objects. `strip --strip-debug` keeps `.symtab`.
+
 Every match carries separate numeric `similarity` and `confidence`. The top two
 differently-named hits within 0.05 similarity are `ambiguous` and are never
 applied. `min_confidence` has no default. `dry_run` defaults to true and does

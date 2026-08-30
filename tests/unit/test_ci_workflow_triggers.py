@@ -190,3 +190,11 @@ def test_bridge_dockerfile_is_python_312_and_loopback_oriented():
     assert "traefik" not in compose.lower()
     assert "13100:13100" in compose
     assert "GHIDRA_MCP_FILE_ROOT: /data" in compose
+    assert "ghidra-builder:gcc13" in compose
+    assert "builder-src-cache:/src" in compose
+    assert "user: \"1000:1000\"" in compose
+    assert "GHIDRA_MCP_BUILDER_URLS" in compose
+    assert not any(
+        line.strip().startswith("- ") and "docker.sock" in line
+        for line in compose.splitlines()
+    )

@@ -188,6 +188,19 @@ public class HardeningWiringTest extends TestCase {
                 src.contains("getent passwd 1000"));
         assertTrue("Dockerfile must still create ghidra as uid 1000",
                 src.contains("useradd --uid 1000 --gid 1000"));
+        String builder = Files.readString(Paths.get("docker", "Dockerfile.builder"));
+        assertTrue("builder image must free uid 1000",
+                builder.contains("getent passwd 1000"));
+        assertTrue("builder must run as uid 1000 so uploads are readable by ghidra-mcp",
+                builder.contains("useradd --uid 1000 --gid 1000"));
+        assertTrue("builder tag is the compiler, not latest",
+                builder.contains("ARG TOOLCHAIN_TAG"));
+        assertTrue("HEALTHCHECK must probe /health",
+                builder.contains("/health"));
+        assertFalse("HEALTHCHECK must not put the auth token on the command line",
+                builder.contains("Bearer"));
+        assertTrue("arm-none-eabi only Recommends newlib; without it -c fails on string.h",
+                builder.contains("libnewlib-arm-none-eabi"));
     }
 
     /**

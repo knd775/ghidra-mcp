@@ -517,7 +517,7 @@ java -jar GhidraMCPHeadless.jar --bind 0.0.0.0 --port 8089
 
 ---
 
-See `docs/prompts/BSIM.md` for the BSim tools (`bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`, `bsim_list_corpus`). Query returns similarity and confidence as separate numbers; `min_confidence` on apply has no default; `dry_run` defaults to true and does not rename.
+See `docs/prompts/BSIM.md` for the BSim tools (`build_reference`, `build_manifest`, `bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`, `bsim_list_corpus`). Query returns similarity and confidence as separate numbers; `min_confidence` on apply has no default; `dry_run` defaults to true and does not rename. `build_reference(dry_run=true)` clones nothing and compiles nothing.
 
 ---
 

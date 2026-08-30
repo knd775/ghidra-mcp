@@ -282,6 +282,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
     private final com.xebyte.core.ProgramScriptService programScriptService;
     private final com.xebyte.core.EmulationService emulationService;
     private final com.xebyte.core.BSimService bsimService;
+    private final com.xebyte.core.ReferenceBuildService referenceBuildService;
     private final com.xebyte.core.DebuggerService debuggerService;
     private final com.xebyte.core.PromptPolicyService promptPolicyService;
 
@@ -306,6 +307,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         this.programScriptService = new com.xebyte.core.ProgramScriptService(programProvider, threadingStrategy);
         this.emulationService = new com.xebyte.core.EmulationService(programProvider, threadingStrategy);
         this.bsimService = new com.xebyte.core.BSimService(programProvider, threadingStrategy);
+        this.referenceBuildService = new com.xebyte.core.ReferenceBuildService();
         this.debuggerService = new com.xebyte.core.DebuggerService(programProvider, threadingStrategy, tool);
         this.promptPolicyService = new com.xebyte.core.PromptPolicyService();
         Msg.info(this, "============================================");
@@ -652,7 +654,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
             listingService, functionService, commentService, symbolLabelService,
             xrefCallGraphService, dataTypeService, analysisService,
             documentationHashService, malwareSecurityService, programScriptService,
-            emulationService, bsimService, debuggerService, promptPolicyService);
+            emulationService, bsimService, referenceBuildService, debuggerService, promptPolicyService);
 
         for (EndpointDef ep : scanner.getEndpoints()) {
             server.createContext(ep.path(), safeHandler(exchange -> {

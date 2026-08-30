@@ -1,0 +1,23 @@
+# BSim reference corpus. The database is derived from this file and should
+# be rebuildable from scratch: build_manifest → import_file → bsim_ingest.
+#
+# One entry expands through its matrix. littlefs × {gcc10,gcc12,gcc13} ×
+# {-Os,-O2,-O3} is nine objects; that is the drift that made a single GCC 13
+# object match the right functions at 0.27–0.35 similarity. Version barely
+# moved lfs_dir_fetchmatch (1040–1120 bytes across v2.4.2–v2.9.3); compiler
+# version did.
+#
+# Names land on disk as <name>-<ref>-<toolchain>-<opt>.o so bsim_list_corpus
+# can still be read in six months. Pin tags or SHAs, never branches.
+
+references:
+  - name: littlefs
+    repo: https://github.com/littlefs-project/littlefs.git
+    ref: v2.9.3
+    sources: [lfs.c]
+    defines: [LFS_NO_MALLOC, LFS_NO_ASSERT]
+    arch_flags: "-mcpu=cortex-m0plus -mthumb"
+    strip_debug: true
+    matrix:
+      toolchain: [gcc10, gcc12, gcc13]
+      opt: [-Os, -O2, -O3]

@@ -96,6 +96,33 @@ mvn clean package -P docker -DskipTests
 | `ghidra-mcp-home` | `/home/ghidra` | `$HOME/.ghidra` settings |
 | `ghidra-mcp-projects` | `/projects` | Local (non-repo) project data |
 | `ghidra-bsim` | `/srv/ghidra/bsim` | H2 BSim databases (`file:/srv/ghidra/bsim/<db>`). Writable by uid 1000. Back this up; regenerating a corpus means recompiling everything in it. |
+| `builder-src-cache` | `/src` (builder) | Bare git clones for `build_reference`. Persists so a second build of the same ref does not re-clone. |
+| `docker/references.yaml` | `/data/references.yaml` | Corpus definition. `build_manifest` with no path reads this. |
+
+## Reference builder
+
+The Ghidra image has no compiler and runs as uid 1000. Reference libraries
+are compiled in sibling `ghidra-builder:gcc10` / `:gcc12` / `:gcc13`
+containers (the tag *is* the compiler; do not use `:latest`). They listen
+on the compose network only — no host ports, no docker.sock in ghidra-mcp.
+`build_reference` POSTs to them; objects land on the shared `/data/uploads`
+mount as uid 1000, and `import_file` loads that path. `SAMPLES_DIR` on the
+host must be writable by uid 1000 — the same constraint as ghidra-mcp.
+`GET /health` is unauthenticated so the image healthcheck does not put
+the auth token on the process command line; `POST /build` still requires
+the token. Images install `libnewlib-arm-none-eabi` explicitly:
+`gcc-arm-none-eabi` only Recommends it, and `--no-install-recommends`
+would leave the cross compiler without `<string.h>`.
+
+```bash
+# from repo root
+docker/build-builders.sh
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+```
+
+`dry_run=true` returns the gcc command line without cloning or compiling.
+The manifest at `docker/references.yaml` is the corpus; the BSim database
+is derived from it.
 
 ## API Endpoints
 

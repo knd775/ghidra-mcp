@@ -1,8 +1,9 @@
 # BSim cross-build matching
 
-Five MCP tools wrap Ghidra's `bsim` CLI. They do not invent a matching
-algorithm. Byte/opcode hashes fail across GCC versions. The older fuzzy
-matcher produced ranked lists that looked authoritative and were not:
+Seven MCP tools wrap Ghidra's `bsim` CLI and the sibling toolchain
+container that feeds it. They do not invent a matching algorithm.
+Byte/opcode hashes fail across GCC versions. The older fuzzy matcher
+produced ranked lists that looked authoritative and were not:
 `lfs_fs_traverse_` was the top candidate for three different firmware
 functions. BSim matches decompiled P-code structure and returns two
 numbers, similarity and confidence. Confidence is what makes a bulk
@@ -16,18 +17,45 @@ server. H2 databases are single-writer; the server serialises BSim calls.
 ## The tools are not the work
 
 A first query against an empty database returns nothing useful. There is
-nothing to download for embedded targets. Build the corpus:
+nothing to download for embedded targets. Build the corpus from pinned
+source, on the shared volume, never by moving object bytes through an
+agent tool call (a 34 KB object has already arrived with the right length
+and the wrong sha256 that way):
 
-- Compile the same library at several optimisation levels and compiler
-  versions. `-Os`, `-O2`, `-O3` across two or three GCC releases. That
-  drift is exactly what defeated hashing.
-- Ingest **with symbols**. A stripped binary adds signature noise and
-  yields no names. That is the usual way to waste a day.
+```
+build_reference(name="littlefs",
+                repo="https://github.com/littlefs-project/littlefs.git",
+                ref="v2.9.3",          # tag or SHA; branches are refused
+                sources=["lfs.c"],
+                toolchain="gcc13",
+                arch_flags="-mcpu=cortex-m0plus -mthumb",
+                opt="-Os",
+                defines=["LFS_NO_MALLOC", "LFS_NO_ASSERT"])
+```
+
+That writes `/data/uploads/littlefs-v2.9.3-gcc13-Os.o` as uid 1000.
+`import_file` can load that path with no copy. Then `bsim_ingest`.
+
+A corpus needs a matrix, not nine hand-written calls.
+`docker/references.yaml` is the corpus definition; `build_manifest` expands
+it. littlefs × {gcc10, gcc12, gcc13} × {-Os, -O2, -O3} is nine objects.
+Compiler version is why: every littlefs from v2.4.2 to v2.9.3 produced
+`lfs_dir_fetchmatch` at 1040–1120 bytes under GCC 13.2, while the firmware's
+was 1416. pico-sdk projects are commonly GCC 10–12. The builder image
+tag *is* the compiler (`ghidra-builder:gcc10`, `:gcc12`, `:gcc13`). There
+is no `:latest`. Images install `libnewlib-arm-none-eabi` so a `-c`
+compile has `<string.h>` (`gcc-arm-none-eabi` only Recommends it).
+
+`dry_run=true` returns the gcc command line and output path. It clones
+nothing and compiles nothing.
+
+- Ingest **with symbols**. `strip_debug` keeps `.symtab`. A stripped
+  binary adds signature noise and yields no names.
 - Ingest finished analysis too. Each check-in becomes corpus for the next
   target.
 
 Suggested `listexes` names: `<lib>-<version>-<compiler>-<optlevel>`, e.g.
-`littlefs-2.9.3-gcc13-Os`.
+`littlefs-v2.9.3-gcc13-Os`.
 
 Priority for this environment: littlefs, Frotz, pico-sdk, newlib, FreeRTOS.
 
@@ -60,6 +88,31 @@ a `dry_run=true` response proves nothing about any of this — it returns
 before the CLI runs.
 
 ## Tools
+
+### `build_reference`
+
+```
+build_reference(name, repo, ref, sources, toolchain="gcc13",
+                 arch_flags="-mcpu=cortex-m0plus -mthumb", opt="-Os",
+                 defines=[], extra_flags=[], strip_debug=True,
+                 output_name=None, dry_run=False)
+```
+
+Compiles in the `ghidra-builder:<toolchain>` container and writes
+`/data/uploads/<name>-<ref>-<toolchain>-<opt>.o`. Returns path, bytes,
+sha256, defined-function count, and the resolved commit SHA. `ref` must
+be a tag or commit; `main` is refused. A compile failure returns compiler
+stderr. Zero defined functions is a refuse, not a silent empty object.
+`dry_run=true` clones nothing and compiles nothing.
+
+### `build_manifest`
+
+```
+build_manifest(path="", dry_run=False)
+```
+
+Expands `docker/references.yaml` (or a path under FILE_ROOT). Empty
+`path` uses `/data/references.yaml` then the copy baked into the JAR.
 
 ### `bsim_create_db`
 
