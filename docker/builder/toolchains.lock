@@ -1,0 +1,6 @@
+# identity  release  sha256  url
+# Canonical pins. fetch_toolchains.sh verifies sha256 before extract.
+# Do not use distro gcc-arm-none-eabi — archive contents move under you.
+gcc10-arm 10.3-2021.10 97dbb4f019ad1650b732faffcc881689cedc14e2b7ee863d390e0a41ef16c9a3 https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3-2021.10/gcc-arm-none-eabi-10.3-2021.10-x86_64-linux.tar.bz2
+gcc12-arm 12.2.Rel1 84be93d0f9e96a15addd490b6e237f588c641c8afdf90e7610a628007fc96867 https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi.tar.xz
+gcc13-arm 13.2.Rel1 6cd1bbc1d9ae57312bcd169ae283153a9572bd6a8e4eeae2fedfbc33b115fdbb https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz

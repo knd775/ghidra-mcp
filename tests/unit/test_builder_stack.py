@@ -178,6 +178,27 @@ class TestBuilderCompose(unittest.TestCase):
         self.assertIn(f'org.ghidra-mcp.toolchain.gcc12-arm="{pins["gcc12-arm"][0]}"', df)
         self.assertIn(f'org.ghidra-mcp.toolchain.gcc13-arm="{pins["gcc13-arm"][0]}"', df)
 
+    def test_lock_and_stub_cmakelists_are_tracked(self):
+        """*.lock and *.txt in .gitignore silently dropped these from the PR.
+
+        CI then ran against a tree that had neither pin file nor pico-sdk stub.
+        """
+        for rel in (
+            "docker/builder/toolchains.lock",
+            "docker/stubs/pico-sdk/CMakeLists.txt",
+        ):
+            ignored = subprocess.run(
+                ["git", "check-ignore", "-q", rel],
+                cwd=REPO_ROOT,
+            )
+            self.assertNotEqual(ignored.returncode, 0, f"{rel} is gitignored")
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", rel],
+                cwd=REPO_ROOT,
+                capture_output=True,
+            )
+            self.assertEqual(tracked.returncode, 0, f"{rel} is not in git")
+
     def test_fetch_script_verifies_sha_and_drops_archive(self):
         text = (REPO_ROOT / "docker" / "builder" / "fetch_toolchains.sh").read_text(
             encoding="utf-8"
