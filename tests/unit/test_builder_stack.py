@@ -9,6 +9,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +26,9 @@ BUILDER_PY = REPO_ROOT / "docker" / "builder" / "ghidra_build_reference.py"
 COMPOSE = REPO_ROOT / "docker" / "docker-compose.yml"
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.builder"
 MANIFEST = REPO_ROOT / "docker" / "references.yaml"
+
+if str(REPO_ROOT / "docker" / "builder") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "docker" / "builder"))
 
 
 def _load_builder():
@@ -90,6 +94,10 @@ class TestBuilderCompose(unittest.TestCase):
         self.assertNotIn("builder-gcc10", mcp["depends_on"])
         volumes = mcp["volumes"]
         self.assertTrue(any("stubs" in str(v) for v in volumes))
+        self.assertTrue(
+            any("references.yaml" in str(v) and "userland" not in str(v) for v in volumes)
+        )
+        self.assertTrue(any("references.userland.yaml" in str(v) for v in volumes))
         self.assertFalse(
             any("docker.sock" in str(v) for v in volumes),
             "ghidra-mcp must not mount docker.sock",
@@ -112,6 +120,13 @@ class TestBuilderCompose(unittest.TestCase):
         self.assertIn("/opt/ghidra-builder/toolchains/gcc10-arm", text)
         self.assertIn("/opt/ghidra-builder/toolchains/gcc12-arm", text)
         self.assertIn("/opt/ghidra-builder/toolchains/gcc13-arm", text)
+        self.assertIn("/opt/ghidra-builder/toolchains/gcc13-x86_64", text)
+        self.assertIn("gcc-13", text)
+        self.assertIn("g++-13", text)
+        self.assertNotIn("libc6-dev-i386", text)
+        self.assertNotRegex(text, r"apt-get install[^\n]*gcc-multilib")
+        self.assertIn("dpkg -l gcc-multilib", text)
+        self.assertIn("debian:trixie-slim", text)
         self.assertIn("COPY --from=gcc10 --chown=1000:1000", text)
         self.assertIn("COPY --from=gcc12 --chown=1000:1000", text)
         self.assertIn("COPY --from=gcc13 --chown=1000:1000", text)
@@ -119,6 +134,7 @@ class TestBuilderCompose(unittest.TestCase):
         self.assertIn('org.ghidra-mcp.toolchain.gcc10-arm="10.3-2021.10"', text)
         self.assertIn('org.ghidra-mcp.toolchain.gcc12-arm="12.2.Rel1"', text)
         self.assertIn('org.ghidra-mcp.toolchain.gcc13-arm="13.2.Rel1"', text)
+        self.assertIn('org.ghidra-mcp.toolchain.gcc13-x86_64="distro"', text)
         self.assertNotIn("chown -R builder:builder /src /data /home/builder /opt/ghidra-builder", text)
         self.assertNotIn("\nENV CC=", "\n" + text)
         self.assertIn('CMD ["serve"]', text)
@@ -183,15 +199,31 @@ class TestBuilderCompose(unittest.TestCase):
 
         CI then ran against a tree that had neither pin file nor pico-sdk stub.
         """
-        for rel in (
+        must_exist = (
+            "docker/builder/toolchains.lock",
+            "docker/builder/source_read.py",
+            "docker/references.userland.yaml",
+            "docker/stubs/pico-sdk/CMakeLists.txt",
+            "docker/stubs/musl/stub.json",
+            "docker/stubs/glibc/stub.json",
+            "docker/stubs/openssl/stub.json",
+            "docker/stubs/libsodium/stub.json",
+            "docker/stubs/sqlite/stub.json",
+        )
+        # These were dropped from a PR by a blanket gitignore. Keep asserting
+        # they are tracked so a later ignore cannot hide them again.
+        must_be_tracked = (
             "docker/builder/toolchains.lock",
             "docker/stubs/pico-sdk/CMakeLists.txt",
-        ):
+        )
+        for rel in must_exist:
             ignored = subprocess.run(
                 ["git", "check-ignore", "-q", rel],
                 cwd=REPO_ROOT,
             )
             self.assertNotEqual(ignored.returncode, 0, f"{rel} is gitignored")
+            self.assertTrue((REPO_ROOT / rel).is_file(), f"{rel} is missing")
+        for rel in must_be_tracked:
             tracked = subprocess.run(
                 ["git", "ls-files", "--error-unmatch", rel],
                 cwd=REPO_ROOT,
@@ -242,6 +274,7 @@ class TestBuilderCompose(unittest.TestCase):
     def test_manifest_includes_pico_sdk_framework_matrix(self):
         doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(len(doc["references"]), 2)
+        self.assertNotIn("database", doc)
         pico = doc["references"][1]
         self.assertEqual(pico["name"], "pico-sdk")
         self.assertEqual(pico["mode"], "framework")
@@ -252,6 +285,29 @@ class TestBuilderCompose(unittest.TestCase):
         matrix = pico["matrix"]
         n = len(matrix["toolchain"]) * len(matrix["opt"]) * len(matrix["board"])
         self.assertEqual(n, 12)
+
+    def test_userland_manifest_is_separate_and_expands(self):
+        path = REPO_ROOT / "docker" / "references.userland.yaml"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertEqual(doc["database"], "file:/srv/ghidra/bsim/userland")
+        count = 0
+        names = []
+        for entry in doc["references"]:
+            names.append(entry["name"])
+            matrix = entry["matrix"]
+            n = 1
+            for axis in matrix.values():
+                n *= len(axis)
+            count += n
+            self.assertEqual(matrix["toolchain"], ["gcc13-x86_64"])
+            self.assertEqual(matrix["opt"], ["-O2", "-Os", "-O0"])
+        self.assertEqual(count, 24)
+        self.assertEqual(
+            names,
+            ["musl", "musl", "glibc", "glibc", "zlib", "openssl", "libsodium", "sqlite"],
+        )
+        embedded = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(len(embedded["references"]), 2)
 
 
 class TestBuilderScript(unittest.TestCase):
@@ -517,6 +573,7 @@ class TestBuilderInstallAndRefs(unittest.TestCase):
         gcc = calls[0]
         self.assertIn(f"-ffile-prefix-map={snap}=.", gcc)
         self.assertFalse(any(gbr.SNAPSHOT_PLACEHOLDER in flag for flag in gcc))
+        self.assertTrue(any(flag.startswith("-fdebug-prefix-map=") for flag in gcc))
 
     def test_successful_build_writes_object_with_symbols(self):
         with tempfile.TemporaryDirectory() as td:
@@ -610,6 +667,7 @@ class TestBuilderInstallAndRefs(unittest.TestCase):
             self.assertEqual(meta["defines"], ["LFS_NO_MALLOC", "LFS_NO_ASSERT"])
             self.assertEqual(meta["extra_flags"], [])
             self.assertTrue(meta["built_at"].endswith("Z"))
+            self.assertEqual(meta["debug_path_prefix"], "/ref/littlefs")
 
 
 class TestHttpControlPlane(unittest.TestCase):
@@ -774,6 +832,45 @@ class TestPackedToolchains(unittest.TestCase):
             finally:
                 os.environ.pop("GHIDRA_MCP_TOOLCHAINS", None)
 
+    def test_native_x86_64_identity_uses_identity_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            native = root / "gcc13-x86_64"
+            native.mkdir()
+            cc = root / "gcc-13"
+            cc.write_text("#!/bin/sh\n")
+            cc.chmod(0o755)
+            (native / "identity.json").write_text(
+                json.dumps(
+                    {
+                        "id": "gcc13-x86_64",
+                        "kind": "native",
+                        "release": "gcc (Debian) 13.3.0",
+                        "cc": str(cc),
+                        "cxx": str(cc),
+                        "ld": "ld",
+                        "strip": "strip",
+                        "nm": "nm",
+                        "objdump": "objdump",
+                    }
+                )
+            )
+            os.environ["GHIDRA_MCP_TOOLCHAINS"] = str(root)
+            try:
+                installed = gbr.packed_toolchains.list_installed()
+                self.assertEqual(set(installed), {"gcc13-x86_64"})
+                tools = gbr.packed_toolchains.resolve_tools(
+                    "gcc13-x86_64",
+                    fallback_cc="gcc",
+                    fallback_ld="ld",
+                    fallback_strip="strip",
+                    fallback_nm="nm",
+                )
+                self.assertEqual(tools["cc"], str(cc))
+                self.assertEqual(tools["objdump"], "objdump")
+            finally:
+                os.environ.pop("GHIDRA_MCP_TOOLCHAINS", None)
+
 
 def _arm_elf32(*, e_type: int = 1, machine: int = 40) -> bytes:
     """Minimal ELF32 little-endian header. e_type 1 = ET_REL, 2 = ET_EXEC."""
@@ -796,6 +893,13 @@ class TestFrameworkHarvest(unittest.TestCase):
         self.assertTrue((stub / "main.c").is_file())
         main = (stub / "main.c").read_text(encoding="utf-8")
         self.assertNotIn("i2c", main.lower())
+
+    def test_list_stubs_includes_make_frameworks(self):
+        names = gbr.fw.list_stubs()
+        for stub in ("musl", "glibc", "openssl", "libsodium", "sqlite"):
+            self.assertIn(stub, names)
+            meta = gbr.fw.load_stub_meta(gbr.fw.stub_dir(stub))
+            self.assertEqual(meta.get("generator"), "make")
 
     def test_harvest_skips_elf_and_keeps_unreferenced_library(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1033,6 +1137,7 @@ class TestFrameworkHarvest(unittest.TestCase):
                     meta["sha256"], hashlib.sha256(path.read_bytes()).hexdigest()
                 )
                 self.assertEqual(meta["artifact"], path.name)
+                self.assertEqual(meta["debug_path_prefix"], "/ref/pico-sdk")
 
     def test_combine_identical_inputs_same_sha256(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1050,6 +1155,126 @@ class TestFrameworkHarvest(unittest.TestCase):
                 hashlib.sha256(dest1.read_bytes()).hexdigest(),
                 hashlib.sha256(dest2.read_bytes()).hexdigest(),
             )
+
+
+class TestSourceRead(unittest.TestCase):
+    def test_path_mode_returns_numbered_lines(self):
+        import source_read as src
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            artifact = root / "uploads" / "littlefs-v2.9.3-gcc13-arm-Os.o"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"ELF")
+            (root / "uploads" / (artifact.name + ".json")).write_text(
+                json.dumps(
+                    {
+                        "name": "littlefs",
+                        "repo": "https://github.com/littlefs-project/littlefs.git",
+                        "commit": "abc1234",
+                        "debug_path_prefix": "/ref/littlefs",
+                        "toolchain": "gcc13-arm",
+                    }
+                )
+            )
+            git_dir = root / "src" / "github.com_littlefs-project_littlefs.git"
+            git_dir.mkdir(parents=True)
+            file_text = "int a;\n" + "int lfs_bd_read(void) { return 0; }\n" * 3
+
+            def run(argv, **kwargs):
+                if argv[:2] == ["git", "--git-dir"] and "cat-file" in argv and argv[-2] == "-t":
+                    return subprocess.CompletedProcess(argv, 0, "commit\n", "")
+                if argv[:2] == ["git", "--git-dir"] and "cat-file" in argv and argv[-2] == "-e":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[:2] == ["git", "--git-dir"] and "show" in argv:
+                    return subprocess.CompletedProcess(argv, 0, file_text, "")
+                self.fail(argv)
+                return subprocess.CompletedProcess(argv, 1, "", "")
+
+            body = src.handle_source_request(
+                {
+                    "artifact": str(artifact),
+                    "path": "lfs.c",
+                    "start_line": 1,
+                    "end_line": 2,
+                },
+                run=run,
+                src_cache=root / "src",
+                confine_artifact=lambda p: p,
+            )
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["path"], "lfs.c")
+            self.assertEqual(body["commit"], "abc1234")
+            self.assertEqual(len(body["lines"]), 2)
+            self.assertEqual(body["lines"][0]["n"], 1)
+            self.assertFalse(body["truncated"])
+
+    def test_rejects_dotdot_and_caps_lines(self):
+        import source_read as src
+
+        with self.assertRaises(src.SourceError) as ctx:
+            src.confine_repo_path("../secret")
+        self.assertEqual(ctx.exception.status, "path_outside_cache")
+        with self.assertRaises(src.SourceError):
+            src.confine_repo_path("/etc/passwd")
+        text = "\n".join(f"line {i}" for i in range(1, 2000))
+        rows, truncated, start, end = src.slice_lines(text, 1, 2000)
+        self.assertTrue(truncated)
+        self.assertEqual(len(rows), src.HARD_MAX_LINES)
+        self.assertEqual(end, src.HARD_MAX_LINES)
+
+    def test_missing_commit_is_specific(self):
+        import source_read as src
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            artifact = root / "obj.o"
+            artifact.write_bytes(b"ELF")
+            artifact.with_name(artifact.name + ".json").write_text(
+                json.dumps(
+                    {
+                        "repo": "https://example.com/repo.git",
+                        "commit": "deadbeef",
+                        "debug_path_prefix": "/ref/x",
+                    }
+                )
+            )
+            git_dir = root / "src" / "example.com_repo.git"
+            git_dir.mkdir(parents=True)
+
+            def run(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, "", "not a commit")
+
+            with self.assertRaises(src.SourceError) as ctx:
+                src.handle_source_request(
+                    {"artifact": str(artifact), "path": "lfs.c"},
+                    run=run,
+                    src_cache=root / "src",
+                    confine_artifact=lambda p: p,
+                )
+            self.assertEqual(ctx.exception.status, "commit_not_cached")
+            self.assertIn("deadbeef", str(ctx.exception))
+
+    def test_function_span_from_nm_and_dwarf(self):
+        import source_read as src
+
+        nm = "00000000 T lfs_bd_read\n00000100 T lfs_bd_prog\n"
+        dump = (
+            "CU: /ref/littlefs/lfs.c:\n"
+            "File name                            Line number    Starting address    View    Stmt\n"
+            "lfs.c                                        40            0x0               x\n"
+            "lfs.c                                        50           0x10               x\n"
+            "lfs.c                                        80          0x100               x\n"
+        )
+        source, lo, hi = src.resolve_function_span(
+            "lfs_bd_read",
+            src.parse_nm_symbols(nm),
+            src.parse_decodedline(dump),
+            2,
+        )
+        self.assertIn("lfs.c", source)
+        self.assertEqual(lo, 38)
+        self.assertEqual(hi, 52)
 
 
 if __name__ == "__main__":

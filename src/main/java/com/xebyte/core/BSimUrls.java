@@ -3,9 +3,16 @@ package com.xebyte.core;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -19,6 +26,10 @@ import java.util.regex.Pattern;
 public final class BSimUrls {
 
     public static final Set<String> CONFIG_TEMPLATES = Set.of(
+            "large_32", "medium_32", "medium_64", "medium_cpool", "medium_nosize");
+
+    /** Display order for {@code bsim_list_databases}. */
+    public static final List<String> CONFIG_TEMPLATE_ORDER = List.of(
             "large_32", "medium_32", "medium_64", "medium_cpool", "medium_nosize");
 
     private static final Pattern BSIM_URL = Pattern.compile(
@@ -189,5 +200,82 @@ public final class BSimUrls {
             if (bits > 0) sizes.add(bits);
         }
         return sizes;
+    }
+
+    /** Sidecar written next to an H2 {@code file:} database: {@code <name>.ghidra-mcp.json}. */
+    public static Path databaseSidecar(String fileUrl) {
+        File path = fileUrlToPath(fileUrl);
+        return Path.of(path.getPath() + ".ghidra-mcp.json");
+    }
+
+    public static void writeDatabaseSidecar(String dbUrl, String configTemplate) throws IOException {
+        if (dbUrl == null || !dbUrl.toLowerCase(Locale.ROOT).startsWith("file:")) return;
+        Path sidecar = databaseSidecar(dbUrl);
+        Path parent = sidecar.getParent();
+        if (parent != null) Files.createDirectories(parent);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("db_url", dbUrl);
+        body.put("config_template", configTemplate);
+        Files.writeString(sidecar, JsonHelper.toJson(body) + "\n", StandardCharsets.UTF_8);
+    }
+
+    /** {@code config_template} from the sidecar, or {@code null} if missing/unreadable. */
+    public static String readSidecarTemplate(String dbUrl) {
+        if (dbUrl == null || !dbUrl.toLowerCase(Locale.ROOT).startsWith("file:")) return null;
+        try {
+            Path sidecar = databaseSidecar(dbUrl);
+            if (!Files.isRegularFile(sidecar)) return null;
+            Map<String, Object> parsed = JsonHelper.parseJson(
+                    Files.readString(sidecar, StandardCharsets.UTF_8));
+            if (parsed == null) return null;
+            Object t = parsed.get("config_template");
+            return t == null ? null : String.valueOf(t).trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static String pointerSizeQueryWarning(int programBits, String configTemplate) {
+        int corpusBits = templatePointerBits(configTemplate);
+        if (programBits <= 0 || corpusBits <= 0 || programBits == corpusBits) return null;
+        return "This program is " + programBits + "-bit but the database template is "
+                + configTemplate + " (" + corpusBits + "-bit). 32-bit and 64-bit corpora "
+                + "cannot share a database. Expect no useful matches. Query the matching "
+                + "database (medium_32 / embedded for ARM firmware, medium_64 / userland "
+                + "for x86-64).";
+    }
+
+    /**
+     * H2 databases under a BSim root: {@code name.mv.db} plus any sidecar-only
+     * entries from {@code bsim_create_db}.
+     */
+    public static List<Map<String, Object>> listFileDatabases(Path root) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (root == null || !Files.isDirectory(root)) return out;
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(root)) {
+            for (Path child : stream) {
+                String fn = child.getFileName().toString();
+                if (fn.endsWith(".mv.db")) {
+                    names.add(fn.substring(0, fn.length() - ".mv.db".length()));
+                } else if (fn.endsWith(".ghidra-mcp.json")) {
+                    names.add(fn.substring(0, fn.length() - ".ghidra-mcp.json".length()));
+                }
+            }
+        } catch (IOException ignored) {
+            return out;
+        }
+        for (String name : names) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            Path dbPath = root.resolve(name);
+            String url = "file:" + dbPath.toAbsolutePath().normalize();
+            row.put("name", name);
+            row.put("db_url", url);
+            row.put("path", dbPath.toString());
+            row.put("config_template", readSidecarTemplate(url));
+            row.put("present", Files.isRegularFile(root.resolve(name + ".mv.db")));
+            out.add(row);
+        }
+        return out;
     }
 }

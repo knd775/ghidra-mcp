@@ -1,0 +1,101 @@
+# x86-64 Linux userland corpus. Separate from docker/references.yaml
+# (ARM embedded). 32-bit and 64-bit BSim databases cannot share a
+# template: ingest these into file:/srv/ghidra/bsim/userland created
+# with medium_64. Leave file:/srv/ghidra/bsim/re (medium_32) for ARM.
+#
+# DWARF: every artifact is compiled with -g. Recorded source paths use
+# the prefix /ref/<name>/ (e.g. /ref/musl/src/string/memcpy.c). In Ghidra,
+# Window -> Source Files and Transforms, one rule covers the corpus:
+#
+#   /ref/  ->  <local checkout root>/
+#
+# Sidecars record repo, commit, and debug_path_prefix so a local clone
+# at that commit can satisfy "View Source...". source_read does the same
+# lookup through the builder cache.
+#
+# Tier 2 (Rust core/alloc/std, Go runtime) needs toolchains this image
+# does not ship. Follow-on work.
+#
+# musl 2 versions x 3 opt = 6. glibc 2 x 3 = 6. zlib, openssl,
+# libsodium, sqlite: 1 version x 3 opt each = 12. Total 24.
+
+database: file:/srv/ghidra/bsim/userland
+
+references:
+  - name: musl
+    repo: https://git.musl-libc.org/musl
+    ref: v1.2.5
+    mode: framework
+    framework: musl
+    libraries: [libc]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: musl
+    repo: https://git.musl-libc.org/musl
+    ref: v1.2.4
+    mode: framework
+    framework: musl
+    libraries: [libc]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: glibc
+    repo: https://sourceware.org/git/glibc.git
+    ref: glibc-2.39
+    mode: framework
+    framework: glibc
+    libraries: [libc]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: glibc
+    repo: https://sourceware.org/git/glibc.git
+    ref: glibc-2.38
+    mode: framework
+    framework: glibc
+    libraries: [libc]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: zlib
+    repo: https://github.com/madler/zlib.git
+    ref: v1.3.1
+    sources: [adler32.c, crc32.c, deflate.c, inflate.c, inftrees.c, inffast.c, trees.c, zutil.c, compress.c, uncompr.c]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: openssl
+    repo: https://github.com/openssl/openssl.git
+    ref: openssl-3.3.2
+    mode: framework
+    framework: openssl
+    libraries: [libcrypto]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: libsodium
+    repo: https://github.com/jedisct1/libsodium.git
+    ref: 1.0.20-RELEASE
+    mode: framework
+    framework: libsodium
+    libraries: [libsodium]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]
+
+  - name: sqlite
+    repo: https://github.com/sqlite/sqlite.git
+    ref: version-3.46.1
+    mode: framework
+    framework: sqlite
+    libraries: [sqlite3]
+    matrix:
+      toolchain: [gcc13-x86_64]
+      opt: [-O2, -Os, -O0]

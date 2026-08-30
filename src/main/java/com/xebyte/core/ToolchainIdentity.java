@@ -31,16 +31,16 @@ public record ToolchainIdentity(
         String nm,
         String defaultArchFlags
 ) {
-    /** {@code gcc13-arm}, {@code clang17-arm}, {@code gcc12-xtensa}. */
+    /** {@code gcc13-arm}, {@code gcc13-x86_64}, {@code clang17-arm}. */
     public static final Pattern ID = Pattern.compile(
-            "^([a-z]+)([0-9]+)-([a-z][a-z0-9]*)$");
+            "^([a-z]+)([0-9]+)-([a-z][a-z0-9_]*)$");
 
     public static final String FORMAT_HINT =
-            "<compiler><major>-<target> (e.g. gcc13-arm, clang17-arm)";
+            "<compiler><major>-<target> (e.g. gcc13-arm, gcc13-x86_64, clang17-arm)";
 
     /** Pairs this class can turn into a compiler command line. */
     public static final List<String> KNOWN_PAIRS = List.of(
-            "gcc-arm", "clang-arm", "gcc-xtensa", "gcc-riscv");
+            "gcc-arm", "clang-arm", "gcc-xtensa", "gcc-riscv", "gcc-x86_64");
 
     public static ToolchainIdentity parse(String raw) {
         if (raw == null || raw.isBlank()) {
@@ -56,13 +56,13 @@ public record ToolchainIdentity(
         String family = m.group(1);
         int major = Integer.parseInt(m.group(2));
         String target = m.group(3);
-        Tools tools = toolsFor(family, target);
+        Tools tools = toolsFor(family, major, target);
         return new ToolchainIdentity(
                 id, family, major, target, tools.cc, tools.ld, tools.strip, tools.nm,
                 tools.archFlags);
     }
 
-    static Tools toolsFor(String family, String target) {
+    static Tools toolsFor(String family, int major, String target) {
         String pair = family + "-" + target;
         return switch (pair) {
             case "gcc-arm" -> new Tools(
@@ -89,6 +89,12 @@ public record ToolchainIdentity(
                     "riscv32-unknown-elf-strip",
                     "riscv32-unknown-elf-nm",
                     "-march=rv32imac -mabi=ilp32");
+            case "gcc-x86_64" -> new Tools(
+                    "gcc-" + major,
+                    "ld",
+                    "strip",
+                    "nm",
+                    "-m64");
             default -> throw new IllegalArgumentException(
                     "unknown compiler/target '" + family + "-" + target
                             + "'; known pairs: " + KNOWN_PAIRS);

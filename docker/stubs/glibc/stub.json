@@ -1,0 +1,13 @@
+{
+  "name": "glibc",
+  "generator": "make",
+  "out_of_tree": true,
+  "configure": [
+    "{snapshot}/configure",
+    "--prefix=/tmp/glibc-prefix",
+    "--disable-werror",
+    "--enable-static-nss"
+  ],
+  "make": ["make", "-j"],
+  "harvest": [{"path": "libc.a", "library": "libc"}]
+}

@@ -43,6 +43,8 @@ public final class ReferenceBuild {
     public static final int DEFAULT_WAIT_SECONDS = 45;
     /** Builder substitutes the snapshot directory for this token at compile. */
     public static final String SNAPSHOT_PLACEHOLDER = "<snapshot>";
+    /** DWARF paths recorded as {@code /ref/<name>/...} so one Ghidra transform covers the corpus. */
+    public static final String DEBUG_PATH_ROOT = "/ref";
 
     /**
      * Identities the compose file ships, used as {@link BuilderConfig} map keys
@@ -117,8 +119,11 @@ public final class ReferenceBuild {
             flags.add("-ffunction-sections");
             flags.add("-fno-ident");
             flags.add("-frandom-seed=" + resolvedOutputName());
-            flags.add("-ffile-prefix-map=" + SNAPSHOT_PLACEHOLDER + "=.");
-            flags.add("-fmacro-prefix-map=" + SNAPSHOT_PLACEHOLDER + "=.");
+            flags.add("-g");
+            String debugPrefix = debugPathPrefix(name);
+            flags.add("-fdebug-prefix-map=" + SNAPSHOT_PLACEHOLDER + "=" + debugPrefix);
+            flags.add("-ffile-prefix-map=" + SNAPSHOT_PLACEHOLDER + "=" + debugPrefix);
+            flags.add("-fmacro-prefix-map=" + SNAPSHOT_PLACEHOLDER + "=" + debugPrefix);
             flags.add(normalizeOpt(opt));
             flags.addAll(splitFlags(archFlags));
             for (String d : defines) {
@@ -464,6 +469,13 @@ public final class ReferenceBuild {
 
     public static String filenameSafe(String ref) {
         return ref.replaceAll("[^A-Za-z0-9._-]+", "_");
+    }
+
+    /** Recorded DWARF prefix for a corpus entry, e.g. {@code /ref/littlefs}. */
+    public static String debugPathPrefix(String name) {
+        String n = filenameSafe(name == null ? "" : name.trim());
+        if (n.isEmpty()) n = "unnamed";
+        return DEBUG_PATH_ROOT + "/" + n;
     }
 
     public static List<String> splitFlags(String raw) {

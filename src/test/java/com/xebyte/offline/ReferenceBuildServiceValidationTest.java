@@ -239,7 +239,10 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertEquals("arm-none-eabi-gcc", cmd.get(0).get(0));
         assertTrue(cmd.get(0).contains("-c"));
         assertTrue(cmd.get(0).contains("-mcpu=cortex-m0plus"));
-        assertTrue(cmd.get(0).contains("-ffile-prefix-map=<snapshot>=."));
+        assertTrue(cmd.get(0).contains("-g"));
+        assertTrue(cmd.get(0).contains("-fdebug-prefix-map=<snapshot>=/ref/littlefs"));
+        assertTrue(cmd.get(0).contains("-ffile-prefix-map=<snapshot>=/ref/littlefs"));
+        assertFalse(cmd.get(0).contains("-ffile-prefix-map=<snapshot>=."));
         assertTrue(cmd.get(cmd.size() - 1).contains("--strip-debug"));
         assertFalse("must not strip .symtab", cmd.toString().contains("--strip-all"));
         assertFalse(cmd.toString().contains("--strip-unneeded"));
@@ -279,6 +282,11 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         ToolchainIdentity rv = ToolchainIdentity.parse("gcc13-riscv");
         assertEquals("riscv32-unknown-elf-gcc", rv.cc());
         assertTrue(rv.defaultArchFlags().contains("rv32"));
+        ToolchainIdentity x64 = ToolchainIdentity.parse("gcc13-x86_64");
+        assertEquals("gcc-13", x64.cc());
+        assertEquals("-m64", x64.defaultArchFlags());
+        assertEquals("gcc14-x86_64", ToolchainIdentity.parse("gcc14-x86_64").id());
+        assertEquals("gcc-14", ToolchainIdentity.parse("gcc14-x86_64").cc());
     }
 
     public void testRealBuildSendsRequestAndReturnsShaAndCount() {
@@ -432,6 +440,43 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertEquals(3, opts);
         long boards = pico.stream().map(ReferenceBuild.Spec::board).distinct().count();
         assertEquals(2, boards);
+        assertFalse("DWARF is the default", littlefs.get(0).stripDebug());
+    }
+
+    public void testUserlandManifestExpandsSeparately() throws Exception {
+        Path manifest = Path.of("docker", "references.userland.yaml");
+        assertTrue(Files.isRegularFile(manifest));
+        List<ReferenceBuild.Spec> jobs = ReferenceManifest.load(
+                manifest, List.of("gcc13-x86_64"));
+        assertEquals(24, jobs.size());
+        assertEquals("file:/srv/ghidra/bsim/userland",
+                ReferenceManifest.databaseUrl(Files.readString(manifest)));
+        assertTrue(jobs.stream().allMatch(s -> "gcc13-x86_64".equals(s.toolchain())));
+        assertTrue(jobs.stream().noneMatch(ReferenceBuild.Spec::stripDebug));
+        long musl = jobs.stream().filter(s -> "musl".equals(s.name())).count();
+        assertEquals(6, musl);
+    }
+
+    public void testSourceReadProxiesBuilderAndRejectsEscape() {
+        Map<String, Object> src = new LinkedHashMap<>();
+        src.put("ok", true);
+        src.put("path", "lfs.c");
+        src.put("commit", "abc");
+        src.put("lines", List.of(Map.of("n", 1, "text", "int x;")));
+        client.setSourceResponse(src);
+        Response r = svc.sourceRead(
+                "littlefs-v2.9.3-gcc13-arm-Os.o", "lfs_bd_read", "", 0, 0, 20);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertEquals(1, client.sourceCalls.size());
+        Map<?, ?> req = (Map<?, ?>) client.sourceCalls.get(0).get("request");
+        assertEquals("lfs_bd_read", req.get("function"));
+        Response bad = svc.sourceRead("../etc/passwd", "f", "", 0, 0, 20);
+        assertTrue(bad instanceof Response.Err);
+        assertTrue(bad.toJson().contains(".."));
+        assertEquals(1, client.sourceCalls.size());
+        Response missing = svc.sourceRead("obj.o", "", "", 0, 0, 20);
+        assertTrue(missing instanceof Response.Err);
+        assertTrue(missing.toJson().contains("function or path"));
     }
 
     public void testManifestDryRunDoesNotCallBuilder() throws Exception {

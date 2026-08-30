@@ -88,8 +88,10 @@ Ask the container what it can compile before picking `toolchain` or `framework`:
 builder_health()
 ```
 
-- Ingest **with symbols**. `strip_debug` keeps `.symtab`. Framework mode never
-  strips. A stripped binary adds signature noise and yields no names.
+- Ingest **with symbols**. Compile keeps DWARF (`-g`). `strip_debug=true`
+  runs `strip --strip-debug` and keeps `.symtab` when disk is the
+  constraint; the default is false. Framework mode never strips. A
+  stripped binary adds signature noise and yields no names.
 - Ingest finished analysis too. Each check-in becomes corpus for the next
   target.
 
@@ -144,7 +146,7 @@ constant.
 ```
 build_reference(name, repo, ref, sources=[], toolchain="gcc13-arm",
                  arch_flags="", opt="-Os",
-                 defines=[], extra_flags=[], strip_debug=True,
+                 defines=[], extra_flags=[], strip_debug=False,
                  output_name=None, dry_run=False,
                  mode="sources", framework=None, libraries=[],
                  board=None, config={}, wait_seconds=45)
@@ -180,7 +182,28 @@ Expands `docker/references.yaml` (or a path under FILE_ROOT). Empty
 `path` uses `/data/references.yaml` then the copy baked into the JAR.
 Jobs whose artifact exists and whose sidecar sha256 still matches are
 skipped. Delete the sidecar to force a rebuild. One shared `wait_seconds`
-covers the matrix; leftovers are tickets.
+covers the matrix; leftovers are tickets. Userland:
+`path="references.userland.yaml"` (mounted at
+`/data/references.userland.yaml`). That file's `database:` field is
+`file:/srv/ghidra/bsim/userland` (`medium_64`). Do not ingest x86-64 into
+the existing ARM `file:/srv/ghidra/bsim/re` database.
+
+DWARF paths are `/ref/<name>/...`. In Ghidra, one Source Files transform
+covers the corpus: `/ref/` -> `<local checkout root>/`. Sidecars record
+`debug_path_prefix`, repo, and commit.
+
+### `source_read`
+
+```
+source_read(artifact, function=None, path=None, start_line=0, end_line=0, context=20)
+```
+
+Reads pinned source from the builder git cache. `artifact` names the
+corpus object; the sidecar supplies repo and commit. `function=` uses
+that object's DWARF to pick a file and line range. `path=` reads a
+repo-relative file (or a `/ref/<name>/...` DWARF path). Numbered lines,
+capped at 800 with an explicit truncation marker. Missing commits name
+the cache directory.
 
 ### `build_reference_status`
 
@@ -202,7 +225,20 @@ writer. Use PostgreSQL when two processes need to write. `medium_32` is
 the template for 32-bit ARM firmware. `callgraph=True` is the default
 because call-graph data is the one thing that actually helped in the
 failed littlefs attempt. `dry_run=true` returns `would_execute` and does
-not create the database.
+not create the database. Writes `<name>.ghidra-mcp.json` next to an H2
+`file:` database so `bsim_list_databases` can report the template.
+`medium_64` is required for x86-64 userland; 32-bit and 64-bit cannot
+share a database.
+
+### `bsim_list_databases`
+
+```
+bsim_list_databases()
+```
+
+Lists H2 databases under `GHIDRA_MCP_BSIM_ROOT` and the known config
+templates. Does not spawn the bsim CLI. Querying an x86-64 program
+against a `medium_32` database returns a warning, not a confusing error.
 
 ### `bsim_ingest`
 

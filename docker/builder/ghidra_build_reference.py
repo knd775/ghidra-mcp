@@ -36,6 +36,7 @@ if str(_BUILDER_DIR) not in sys.path:
     sys.path.insert(0, str(_BUILDER_DIR))
 import framework_build as fw  # noqa: E402
 import jobs as builder_jobs  # noqa: E402
+import source_read as src_read  # noqa: E402
 import toolchains as packed_toolchains  # noqa: E402
 
 DEFAULT_PORT = 8092
@@ -46,6 +47,7 @@ DEFAULT_STRIP = "arm-none-eabi-strip"
 DEFAULT_NM = "arm-none-eabi-nm"
 # Java dry_run argv uses this token; we substitute the snapshot path at compile.
 SNAPSHOT_PLACEHOLDER = "<snapshot>"
+DEBUG_PATH_ROOT = "/ref"
 
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 BRANCH_NAMES = frozenset(
@@ -54,6 +56,26 @@ BRANCH_NAMES = frozenset(
 TEXT_NM_TYPES = frozenset("TtWw")
 
 RunFn = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def debug_path_prefix(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip()) or "unnamed"
+    return f"{DEBUG_PATH_ROOT}/{safe}"
+
+
+def with_debug_maps(flags: list[str], snapshot: Path, name: str) -> list[str]:
+    prefix = debug_path_prefix(name)
+    snap = str(snapshot)
+    out = list(flags)
+    if not any(flag == "-g" or flag.startswith("-g") for flag in out):
+        out.insert(0, "-g")
+    if not any(flag.startswith("-fdebug-prefix-map=") for flag in out):
+        out.append(f"-fdebug-prefix-map={snap}={prefix}")
+    if not any(flag.startswith("-ffile-prefix-map=") for flag in out):
+        out.append(f"-ffile-prefix-map={snap}={prefix}")
+    if not any(flag.startswith("-fmacro-prefix-map=") for flag in out):
+        out.append(f"-fmacro-prefix-map={snap}={prefix}")
+    return out
 
 
 class BuildError(Exception):
@@ -289,11 +311,14 @@ def compile_objects(
     output: Path,
     run: RunFn,
     env: Mapping[str, str],
+    name: str = "",
 ) -> tuple[list[list[str]], str]:
     """Compile sources; return (commands, compiler_stderr_from_last_failure)."""
     commands: list[list[str]] = []
     objects: list[Path] = []
     workdir.mkdir(parents=True, exist_ok=True)
+    mapped_base = [flag.replace(SNAPSHOT_PLACEHOLDER, str(snapshot)) for flag in cflags]
+    mapped_base = with_debug_maps(mapped_base, snapshot, name or output.stem)
     for index, rel in enumerate(sources):
         src_path = snapshot / rel
         if not src_path.is_file():
@@ -303,13 +328,8 @@ def compile_objects(
                 extra={"source": rel},
             )
         obj = workdir / f"{index:03d}-{Path(rel).name}.o"
-        mapped_flags = [flag.replace(SNAPSHOT_PLACEHOLDER, str(snapshot)) for flag in cflags]
         argv = [cc, "-c"]
-        if not any(flag.startswith("-ffile-prefix-map=") for flag in mapped_flags):
-            argv.append(f"-ffile-prefix-map={snapshot}=.")
-        if not any(flag.startswith("-fmacro-prefix-map=") for flag in mapped_flags):
-            argv.append(f"-fmacro-prefix-map={snapshot}=.")
-        argv.extend(mapped_flags)
+        argv.extend(mapped_base)
         argv.extend([rel, "-o", str(obj)])
         commands.append(argv)
         compiled = run(argv, cwd=snapshot, env=env, timeout=120)
@@ -487,6 +507,8 @@ def write_provenance_sidecar(
     }
     if extra:
         payload.update(extra)
+    if not payload.get("debug_path_prefix"):
+        payload["debug_path_prefix"] = debug_path_prefix(str(req.get("name") or dest.stem))
     write_text_atomic(
         sidecar_path(dest),
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
@@ -500,6 +522,9 @@ def cc_version(cc: str, run: RunFn) -> str:
 
 
 def cxx_from_cc(cc: str) -> str:
+    numbered = re.search(r"gcc-(\d+)$", cc)
+    if numbered:
+        return re.sub(r"gcc-(\d+)$", r"g++-\1", cc)
     if cc.endswith("-gcc"):
         return cc[: -len("gcc")] + "g++"
     if cc == "gcc":
@@ -592,26 +617,47 @@ def handle_framework_request(
     ld = tools["ld"]
     nm_bin = tools["nm"]
     cxx = tools.get("cxx") or cxx_from_cc(cc)
+    meta = fw.load_stub_meta(stub)
+    generator = str(meta.get("generator") or "cmake")
+    extra_flags = with_debug_maps(extra_flags, Path(SNAPSHOT_PLACEHOLDER), name)
     if bool(req.get("dry_run")):
-        configure = fw.cmake_configure_argv(
-            stub=stub,
-            build_dir=Path("<build>"),
-            sdk_path=SNAPSHOT_PLACEHOLDER,
-            board=board,
-            libraries=libraries,
-            opt=opt,
-            config=config,
-            extra_flags=extra_flags,
-            cc=cc,
-            cxx=cxx,
-        )
+        mapping = {
+            "cc": cc,
+            "cxx": cxx,
+            "opt": opt,
+            "cflags": " ".join(extra_flags),
+            "snapshot": SNAPSHOT_PLACEHOLDER,
+            "build": "<build>",
+        }
+        if generator == "make":
+            commands = []
+            for key in ("prepare", "configure", "make"):
+                argv = fw.argv_from_meta(meta, key, mapping)
+                if argv:
+                    commands.append(argv)
+            if not commands:
+                commands.append(["make", "-j"])
+        else:
+            configure = fw.cmake_configure_argv(
+                stub=stub,
+                build_dir=Path("<build>"),
+                sdk_path=SNAPSHOT_PLACEHOLDER,
+                board=board,
+                libraries=libraries,
+                opt=opt,
+                config=config,
+                extra_flags=extra_flags,
+                cc=cc,
+                cxx=cxx,
+            )
+            commands = [configure, fw.cmake_build_argv(Path("<build>"))]
         harvest = [artifact_filename(name, lib, ref, toolchain, opt, board) for lib in libraries]
         return {
             "ok": True,
             "dry_run": True,
             "mode": "framework",
             "framework": framework,
-            "command": [configure, fw.cmake_build_argv(Path("<build>"))],
+            "command": commands,
             "harvest": harvest,
             "board": board,
         }
@@ -643,42 +689,87 @@ def handle_framework_request(
         env["TZ"] = "UTC"
         env["SOURCE_DATE_EPOCH"] = epoch
         env["PICO_SDK_PATH"] = str(snapshot)
-        env.pop("CC", None)
-        env.pop("CXX", None)
-
-        configure = fw.cmake_configure_argv(
-            stub=stub,
-            build_dir=build_dir,
-            sdk_path=str(snapshot),
-            board=board,
-            libraries=libraries,
-            opt=opt,
-            config=config,
-            extra_flags=extra_flags,
-            cc=cc,
-            cxx=cxx,
-        )
-        commands = [configure]
-        configured = run(configure, env=env, timeout=180)
-        if configured.returncode != 0:
-            stderr = (configured.stderr or configured.stdout or "").strip()
-            raise BuildError(
-                f"cmake configure failed:\n{stderr}",
-                status="configure_failed",
-                extra={"stderr": stderr, "command": configure},
+        extra_flags = [
+            flag.replace(SNAPSHOT_PLACEHOLDER, str(snapshot)) for flag in extra_flags
+        ]
+        extra_flags = with_debug_maps(extra_flags, snapshot, name)
+        mapping = {
+            "cc": cc,
+            "cxx": cxx,
+            "opt": opt,
+            "cflags": " ".join(extra_flags),
+            "snapshot": str(snapshot),
+            "build": str(build_dir),
+        }
+        commands: list[list[str]] = []
+        if generator == "make":
+            out_of_tree = bool(meta.get("out_of_tree"))
+            cwd = build_dir if out_of_tree else snapshot
+            if out_of_tree:
+                build_dir.mkdir(parents=True, exist_ok=True)
+            env["CC"] = cc
+            env["CXX"] = cxx
+            env["CFLAGS"] = " ".join([opt, *extra_flags])
+            env["CXXFLAGS"] = env["CFLAGS"]
+            for key, timeout, status in (
+                ("prepare", 180, "configure_failed"),
+                ("configure", 300, "configure_failed"),
+                ("make", 1800, "compile_failed"),
+            ):
+                argv = fw.argv_from_meta(meta, key, mapping)
+                if not argv:
+                    if key == "make":
+                        argv = ["make", "-j"]
+                    else:
+                        continue
+                commands.append(argv)
+                stepped = run(argv, cwd=cwd, env=env, timeout=timeout)
+                if stepped.returncode != 0:
+                    stderr = (stepped.stderr or stepped.stdout or "").strip()
+                    raise BuildError(
+                        f"{key} failed:\n{stderr}",
+                        status=status,
+                        extra={"stderr": stderr, "command": argv},
+                    )
+            groups = fw.harvest_declared(meta, snapshot, cwd)
+            if not groups:
+                groups = fw.harvest_groups(build_dir) or fw.harvest_groups(snapshot)
+        else:
+            env.pop("CC", None)
+            env.pop("CXX", None)
+            configure = fw.cmake_configure_argv(
+                stub=stub,
+                build_dir=build_dir,
+                sdk_path=str(snapshot),
+                board=board,
+                libraries=libraries,
+                opt=opt,
+                config=config,
+                extra_flags=extra_flags,
+                cc=cc,
+                cxx=cxx,
             )
-        build = fw.cmake_build_argv(build_dir)
-        commands.append(build)
-        built = run(build, env=env, timeout=900)
-        if built.returncode != 0:
-            stderr = (built.stderr or built.stdout or "").strip()
-            raise BuildError(
-                f"cmake build failed:\n{stderr}",
-                status="compile_failed",
-                extra={"stderr": stderr, "command": build},
-            )
+            commands = [configure]
+            configured = run(configure, env=env, timeout=180)
+            if configured.returncode != 0:
+                stderr = (configured.stderr or configured.stdout or "").strip()
+                raise BuildError(
+                    f"cmake configure failed:\n{stderr}",
+                    status="configure_failed",
+                    extra={"stderr": stderr, "command": configure},
+                )
+            build = fw.cmake_build_argv(build_dir)
+            commands.append(build)
+            built = run(build, env=env, timeout=900)
+            if built.returncode != 0:
+                stderr = (built.stderr or built.stdout or "").strip()
+                raise BuildError(
+                    f"cmake build failed:\n{stderr}",
+                    status="compile_failed",
+                    extra={"stderr": stderr, "command": build},
+                )
+            groups = fw.harvest_groups(build_dir)
 
-        groups = fw.harvest_groups(build_dir)
         if not groups:
             raise BuildError(
                 "refusing to write: 0 defined functions harvested "
@@ -798,7 +889,7 @@ def handle_request(
     ref = str(req.get("ref") or "").strip()
     sources = [str(s).strip() for s in (req.get("sources") or []) if str(s).strip()]
     cflags = [str(s) for s in (req.get("cflags") or [])]
-    do_strip = bool(req.get("strip_debug", True))
+    do_strip = bool(req.get("strip_debug", False))
     toolchain = str(req.get("toolchain") or "").strip()
 
     if not repo:
@@ -849,6 +940,7 @@ def handle_request(
             output=staging,
             run=run,
             env=env,
+            name=str(req.get("name") or ""),
         )
         if do_strip:
             commands.append(strip_debug(strip_bin, staging, run, env))
@@ -920,11 +1012,30 @@ def health_payload(run: RunFn = _default_run) -> dict[str, Any]:
     if releases:
         body["releases"] = releases
     if identities:
-        first = installed[identities[0]] / "bin" / "arm-none-eabi-gcc"
-        clang = installed[identities[0]] / "bin" / "clang"
-        probe = str(clang if clang.is_file() and not first.is_file() else first)
-        body["cc"] = probe
-        body["cc_version"] = cc_version(probe, run)
+        probe = ""
+        for ident in identities:
+            prefix = installed[ident]
+            gcc = prefix / "bin" / "arm-none-eabi-gcc"
+            clang = prefix / "bin" / "clang"
+            if clang.is_file() and not gcc.is_file():
+                probe = str(clang)
+                break
+            if gcc.is_file():
+                probe = str(gcc)
+                break
+            ident_meta = packed_toolchains._identity_meta(prefix)
+            if str(ident_meta.get("kind") or "").strip() == "native":
+                cc_path = str(ident_meta.get("cc") or "").strip()
+                if cc_path:
+                    probe = cc_path
+                    break
+        if probe:
+            body["cc"] = probe
+            body["cc_version"] = cc_version(probe, run)
+        else:
+            cc = os.environ.get("BUILDER_CC", DEFAULT_CC)
+            body["cc"] = cc
+            body["cc_version"] = cc_version(cc, run)
     else:
         cc = os.environ.get("BUILDER_CC", DEFAULT_CC)
         body["cc"] = cc
@@ -993,9 +1104,6 @@ class BuilderHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = self.path.rstrip("/")
-        if route != "/build":
-            self._send(404, {"ok": False, "error": "not found", "status": "not_found"})
-            return
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length > 1_000_000:
             self._send(413, {"ok": False, "error": "request too large", "status": "oversized"})
@@ -1007,6 +1115,34 @@ class BuilderHandler(BaseHTTPRequestHandler):
             return
         if not isinstance(req, dict):
             self._send(400, {"ok": False, "error": "JSON object required", "status": "malformed"})
+            return
+        if route == "/source":
+            try:
+                payload = src_read.handle_source_request(
+                    req,
+                    run=self.run,
+                    src_cache=self.src_cache,
+                    confine_artifact=require_output_under_root,
+                )
+                self._send(200, payload)
+            except src_read.SourceError as exc:
+                body = {"ok": False, "error": str(exc), "status": exc.status}
+                body.update(exc.extra)
+                code = 404 if exc.status in {
+                    "artifact_not_found",
+                    "commit_not_cached",
+                    "path_not_in_commit",
+                    "function_not_found",
+                    "sidecar_missing",
+                } else 400
+                self._send(code, body)
+            except BuildError as exc:
+                self._send(400, error_payload(exc))
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, error_payload(exc))
+            return
+        if route != "/build":
+            self._send(404, {"ok": False, "error": "not found", "status": "not_found"})
             return
         self.ensure_worker()
         job = QUEUE.submit(req)

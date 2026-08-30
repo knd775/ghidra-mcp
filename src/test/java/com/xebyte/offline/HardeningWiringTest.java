@@ -197,6 +197,13 @@ public class HardeningWiringTest extends TestCase {
                 builder.contains("/opt/ghidra-builder/toolchains/gcc13-arm"));
         assertTrue("gcc10-arm is packed into the same image",
                 builder.contains("/opt/ghidra-builder/toolchains/gcc10-arm"));
+        assertTrue("native x86-64 is packed as gcc13-x86_64",
+                builder.contains("/opt/ghidra-builder/toolchains/gcc13-x86_64"));
+        assertFalse("must not apt-install gcc-multilib",
+                builder.contains("install gcc-multilib")
+                        || builder.matches("(?m)^\\s*gcc-multilib\\s*$"));
+        assertTrue("image build asserts gcc-multilib is absent",
+                builder.contains("dpkg -l gcc-multilib"));
         assertFalse("identity is not an image tag / build-arg",
                 builder.contains("ARG TOOLCHAIN_TAG"));
         assertTrue("HEALTHCHECK must probe /health",

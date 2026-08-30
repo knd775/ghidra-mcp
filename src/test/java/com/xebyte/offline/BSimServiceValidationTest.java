@@ -86,7 +86,7 @@ public class BSimServiceValidationTest extends TestCase {
         }
     }
 
-    public void testCreateDbCommandLine() {
+    public void testCreateDbCommandLine() throws Exception {
         Path dbDir = tmp.resolve("bsimdb");
         Response r = svc.createDb("file:" + dbDir.resolve("lfs"), "medium_32", "lfs", "test db",
                 true, WAIT);
@@ -99,6 +99,9 @@ public class BSimServiceValidationTest extends TestCase {
         assertFalse("callgraph=true must not pass --nocallgraph", created.contains("--nocallgraph"));
         assertTrue(created.contains("--name"));
         assertTrue(Files.isDirectory(dbDir));
+        Path sidecar = Path.of(dbDir.resolve("lfs").toString() + ".ghidra-mcp.json");
+        assertTrue("create writes a template sidecar", Files.isRegularFile(sidecar));
+        assertTrue(Files.readString(sidecar).contains("medium_32"));
     }
 
     public void testCreateDbNocallgraphWhenDisabled() {
@@ -113,6 +116,33 @@ public class BSimServiceValidationTest extends TestCase {
         Response r = svc.createDb("file:" + tmp.resolve("x"), "not_a_template", "", "", true, WAIT);
         assertTrue(r instanceof Response.Err);
         assertTrue(r.toJson().contains("config_template"));
+    }
+
+    public void testListDatabasesReportsTemplates() {
+        Response r = svc.listDatabases();
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("medium_32"));
+        assertTrue(json, json.contains("medium_64"));
+        assertTrue(json, json.contains("config_templates"));
+    }
+
+    public void testPointerSizeQueryWarningIsAdvisory() {
+        assertNotNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(64, "medium_32"));
+        assertNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(32, "medium_32"));
+        assertNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(64, "medium_64"));
+        Path root = tmp.resolve("bsimroot");
+        try {
+            Files.createDirectories(root);
+            Files.writeString(root.resolve("userland.ghidra-mcp.json"),
+                    "{\"db_url\":\"file:" + root.resolve("userland")
+                            + "\",\"config_template\":\"medium_64\"}\n");
+            var listed = com.xebyte.core.BSimUrls.listFileDatabases(root);
+            assertEquals(1, listed.size());
+            assertEquals("medium_64", listed.get(0).get("config_template"));
+        } catch (Exception e) {
+            fail(e.getMessage());
+        }
     }
 
     public void testIngestInvalidSourceIsSpecificError() {

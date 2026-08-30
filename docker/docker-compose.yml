@@ -78,6 +78,7 @@ services:
       # Absolute host path. Relative paths are unreliable in Portainer.
       - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
       - ./references.yaml:/data/references.yaml:ro
+      - ./references.userland.yaml:/data/references.userland.yaml:ro
       - ./stubs:/opt/ghidra-builder/stubs:ro
       - ghidra-mcp-home:/home/ghidra
       - ghidra-mcp-projects:/projects
@@ -124,7 +125,8 @@ services:
       # Must include the tunnel hostname or forwarded Host headers are rejected.
       GHIDRA_MCP_ALLOWED_HOSTS: ${GHIDRA_MCP_ALLOWED_HOSTS:?set in .env}
 
-  # One resident builder. Holds gcc10-arm, gcc12-arm, and gcc13-arm.
+  # One resident builder. Holds gcc10-arm, gcc12-arm, gcc13-arm, and
+  # gcc13-x86_64 (distro gcc-13, no 32-bit multilib).
   # ghidra-mcp POSTs jobs on the compose network (not docker exec: that
   # would require docker.sock in the process that parses untrusted binaries).
   # No host ports, no tunnel, no auth beyond the internal network.

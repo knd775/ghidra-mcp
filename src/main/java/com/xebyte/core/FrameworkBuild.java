@@ -69,7 +69,8 @@ public final class FrameworkBuild {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(root)) {
             for (Path child : stream) {
                 if (Files.isDirectory(child)
-                        && Files.isRegularFile(child.resolve("CMakeLists.txt"))) {
+                        && (Files.isRegularFile(child.resolve("CMakeLists.txt"))
+                                || Files.isRegularFile(child.resolve("stub.json")))) {
                     names.add(child.getFileName().toString());
                 }
             }
@@ -227,10 +228,85 @@ public final class FrameworkBuild {
     }
 
     public static List<List<String>> commandLines(ReferenceBuild.Spec spec) {
+        Path stub = findStubDir(spec.framework());
+        String generator = stubGenerator(stub);
+        if ("make".equals(generator)) {
+            return makeCommandLines(spec, stub);
+        }
+        return cmakeCommandLines(spec);
+    }
+
+    static Path findStubDir(String framework) {
+        if (framework == null || framework.isBlank()) return null;
+        String env = System.getenv("GHIDRA_MCP_STUBS");
+        List<Path> roots = new ArrayList<>();
+        if (env != null && !env.isBlank()) roots.add(Path.of(env));
+        roots.add(Path.of("docker", "stubs"));
+        roots.add(Path.of("/opt/ghidra-builder/stubs"));
+        for (Path root : roots) {
+            Path child = root.resolve(framework);
+            if (Files.isDirectory(child)
+                    && (Files.isRegularFile(child.resolve("stub.json"))
+                            || Files.isRegularFile(child.resolve("CMakeLists.txt")))) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    static String stubGenerator(Path stub) {
+        if (stub == null) return "cmake";
+        Path meta = stub.resolve("stub.json");
+        if (!Files.isRegularFile(meta)) return "cmake";
+        try {
+            JsonElement el = JsonParser.parseString(Files.readString(meta, StandardCharsets.UTF_8));
+            if (el.isJsonObject() && el.getAsJsonObject().has("generator")) {
+                String g = el.getAsJsonObject().get("generator").getAsString().trim();
+                if (!g.isEmpty()) return g;
+            }
+        } catch (Exception ignored) {
+            return "cmake";
+        }
+        return "cmake";
+    }
+
+    static List<List<String>> makeCommandLines(ReferenceBuild.Spec spec, Path stub) {
+        try {
+            JsonObject meta = JsonParser.parseString(
+                    Files.readString(stub.resolve("stub.json"), StandardCharsets.UTF_8)).getAsJsonObject();
+            List<List<String>> steps = new ArrayList<>();
+            addStringArrayStep(steps, meta, "prepare");
+            addStringArrayStep(steps, meta, "configure");
+            addStringArrayStep(steps, meta, "make");
+            if (steps.isEmpty()) {
+                steps.add(List.of("make", "-j"));
+            }
+            return steps;
+        } catch (IOException e) {
+            return List.of(List.of("make", "-j"));
+        }
+    }
+
+    static void addStringArrayStep(List<List<String>> steps, JsonObject meta, String key) {
+        if (!meta.has(key) || !meta.get(key).isJsonArray()) return;
+        List<String> argv = new ArrayList<>();
+        for (JsonElement el : meta.getAsJsonArray(key)) {
+            if (el == null || el.isJsonNull()) continue;
+            argv.add(el.getAsString());
+        }
+        if (!argv.isEmpty()) steps.add(argv);
+    }
+
+    static List<List<String>> cmakeCommandLines(ReferenceBuild.Spec spec) {
         ToolchainIdentity id = spec.identity();
         String cxx = cxxFromCc(id.cc());
         String sdk = ReferenceBuild.SNAPSHOT_PLACEHOLDER;
-        List<String> extras = new ArrayList<>(spec.extraFlags());
+        List<String> extras = new ArrayList<>();
+        extras.add("-g");
+        extras.add("-fdebug-prefix-map=" + sdk + "=" + ReferenceBuild.debugPathPrefix(spec.name()));
+        extras.add("-ffile-prefix-map=" + sdk + "=" + ReferenceBuild.debugPathPrefix(spec.name()));
+        extras.add("-fmacro-prefix-map=" + sdk + "=" + ReferenceBuild.debugPathPrefix(spec.name()));
+        extras.addAll(spec.extraFlags());
         for (String d : spec.defines()) {
             extras.add(d.startsWith("-D") ? d : "-D" + d);
         }
@@ -260,6 +336,8 @@ public final class FrameworkBuild {
     }
 
     static String cxxFromCc(String cc) {
+        if (cc == null) return "g++";
+        if (cc.matches(".*gcc-\\d+$")) return cc.replaceFirst("gcc-", "g++-");
         if (cc.endsWith("-gcc")) return cc.substring(0, cc.length() - 3) + "g++";
         if ("gcc".equals(cc)) return "g++";
         if ("clang".equals(cc)) return "clang++";

@@ -46,12 +46,13 @@ public class ReferenceBuildService {
             description = "Clone a git tag or commit in the builder container and compile "
                     + "it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through "
                     + "this tool; the shared volume is the handoff. ref must be a tag or SHA "
-                    + "(bare branch names are refused). strip_debug keeps .symtab. dry_run "
+                    + "(bare branch names are refused). Compiled with -g; strip_debug=true runs "
+                    + "strip --strip-debug (keeps .symtab) when corpus disk is tight. dry_run "
                     + "returns the compiler command line and output path without cloning or compiling. "
                     + "Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode "
                     + "<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework "
                     + "configures a stub (docker/stubs/<framework>/), builds, and harvests "
-                    + "build-tree objects — never the linked ELF. Each artifact is written with "
+                    + "build-tree objects, never the linked ELF. Each artifact is written with "
                     + "a <artifact>.json sidecar (resolved commit SHA, compiler --version, "
                     + "sha256). Long builds return "
                     + "{status: started, job_id} when they outlive wait_seconds; poll "
@@ -68,8 +69,8 @@ public class ReferenceBuildService {
                     description = "Source files to compile, JSON array e.g. [\"lfs.c\"]") Object sources,
             @Param(value = "toolchain", source = ParamSource.BODY, defaultValue = "gcc13-arm",
                     description = "Full identity <compiler><major>-<target> (gcc13-arm, "
-                            + "clang17-arm). Selects which binary the builder invokes. "
-                            + "Unknown names list identities from builder_health.")
+                            + "gcc13-x86_64, clang17-arm). Selects which binary the builder "
+                            + "invokes. Unknown names list identities from builder_health.")
                     String toolchain,
             @Param(value = "arch_flags", source = ParamSource.BODY,
                     defaultValue = "",
@@ -83,8 +84,9 @@ public class ReferenceBuildService {
                     Object defines,
             @Param(value = "extra_flags", source = ParamSource.BODY, defaultValue = "",
                     description = "Extra compiler flags, JSON array") Object extraFlags,
-            @Param(value = "strip_debug", source = ParamSource.BODY, defaultValue = "true",
-                    description = "strip --strip-debug (keeps .symtab). Default true.")
+            @Param(value = "strip_debug", source = ParamSource.BODY, defaultValue = "false",
+                    description = "strip --strip-debug (keeps .symtab). Default false so "
+                            + "references keep DWARF for typed import and View Source.")
                     boolean stripDebug,
             @Param(value = "output_name", source = ParamSource.BODY, defaultValue = "",
                     description = "Override filename. Default <name>-<ref>-<toolchain>-<opt>.o")
@@ -160,7 +162,7 @@ public class ReferenceBuildService {
                     + "skipped; a missing or mismatched sidecar rebuilds. dry_run returns every "
                     + "command line without cloning or compiling. One shared wait_seconds "
                     + "deadline covers the whole matrix; unfinished jobs return a job_id for "
-                    + "build_reference_status.",
+                    + "build_reference_status. Userland corpus: path=references.userland.yaml.",
             category = "bsim")
     public Response buildManifest(
             @Param(value = "path", source = ParamSource.BODY, defaultValue = "",
@@ -224,6 +226,8 @@ public class ReferenceBuildService {
             body.put("count", jobs.size());
             body.put("failed", failed);
             body.put("skipped", skipped);
+            String db = ReferenceManifest.databaseUrl(yaml);
+            if (db != null && !db.isBlank()) body.put("database", db);
             body.put("results", results);
             return Response.ok(body);
         } catch (IllegalArgumentException e) {
@@ -262,6 +266,101 @@ public class ReferenceBuildService {
         } catch (IOException e) {
             return Response.err(e.getMessage(), "builder_unreachable");
         }
+    }
+
+    @McpTool(path = "/source_read", method = "POST",
+            description = "Read a span of pinned reference source from the builder cache. "
+                    + "artifact names the corpus object (sidecar supplies repo and commit). "
+                    + "function= resolves file and line range from that object's DWARF; "
+                    + "path= reads a repo-relative file. Confined to the source cache. "
+                    + "Response is numbered lines, capped; a missing commit names the cache.",
+            category = "bsim")
+    public Response sourceRead(
+            @Param(value = "artifact", source = ParamSource.BODY,
+                    description = "Corpus artifact filename or path under FILE_ROOT, "
+                            + "e.g. littlefs-v2.9.3-gcc13-arm-Os.o")
+                    String artifact,
+            @Param(value = "function", source = ParamSource.BODY, defaultValue = "",
+                    description = "Resolve file/line from the artifact's DWARF, then return "
+                            + "that span plus context lines either side")
+                    String function,
+            @Param(value = "path", source = ParamSource.BODY, defaultValue = "",
+                    description = "Repo-relative path (or a /ref/<name>/... DWARF path)")
+                    String path,
+            @Param(value = "start_line", source = ParamSource.BODY, defaultValue = "0",
+                    description = "First line (1-based). 0 means start of the resolved span.")
+                    int startLine,
+            @Param(value = "end_line", source = ParamSource.BODY, defaultValue = "0",
+                    description = "Last line inclusive. 0 means end of the resolved span.")
+                    int endLine,
+            @Param(value = "context", source = ParamSource.BODY, defaultValue = "20",
+                    description = "Extra lines either side when resolving by function")
+                    int context) {
+        try {
+            if (artifact == null || artifact.isBlank()) {
+                return Response.err("artifact is required");
+            }
+            String func = function == null ? "" : function.trim();
+            String rel = path == null ? "" : path.trim();
+            if (func.isEmpty() && rel.isEmpty()) {
+                return Response.err("function or path is required");
+            }
+            String confined = confineArtifact(artifact.trim());
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("artifact", confined);
+            if (!func.isEmpty()) req.put("function", func);
+            if (!rel.isEmpty()) req.put("path", rel);
+            if (startLine > 0) req.put("start_line", startLine);
+            if (endLine > 0) req.put("end_line", endLine);
+            req.put("context", context > 0 ? context : 20);
+            URI url = firstBuilderUrl();
+            if (url == null) {
+                return Response.err("no builder URL configured", "builder_unreachable");
+            }
+            Map<String, Object> body = client.source(url, req);
+            Object http = body.get("_http_status");
+            if (http instanceof Number n && n.intValue() >= 400) {
+                return Response.err(String.valueOf(body.getOrDefault("error",
+                        "builder /source HTTP " + n)),
+                        String.valueOf(body.getOrDefault("status", "source_failed")));
+            }
+            if (Boolean.FALSE.equals(body.get("ok")) && body.get("error") != null) {
+                return Response.err(String.valueOf(body.get("error")),
+                        String.valueOf(body.getOrDefault("status", "source_failed")));
+            }
+            Map<String, Object> out = new LinkedHashMap<>(body);
+            out.remove("_http_status");
+            return Response.ok(out);
+        } catch (IllegalArgumentException e) {
+            return Response.err(e.getMessage());
+        } catch (IOException e) {
+            return Response.err(e.getMessage(), "builder_unreachable");
+        }
+    }
+
+    String confineArtifact(String artifact) {
+        Path p = Path.of(artifact);
+        for (Path part : p) {
+            if ("..".equals(part.toString())) {
+                throw new IllegalArgumentException("artifact path must not contain '..'");
+            }
+        }
+        if (config.fileRoot() == null) {
+            return artifact;
+        }
+        Path candidate;
+        if (p.isAbsolute()) {
+            candidate = p;
+        } else if (p.getNameCount() == 1) {
+            candidate = config.fileRoot().resolve(ReferenceBuild.UPLOADS).resolve(artifact);
+        } else {
+            candidate = config.fileRoot().resolve(artifact);
+        }
+        Path resolved = SecurityConfig.getInstance().resolveWithinFileRoot(candidate.toString());
+        if (resolved == null) {
+            throw new IllegalArgumentException("artifact path is outside GHIDRA_MCP_FILE_ROOT");
+        }
+        return resolved.toString();
     }
 
     @McpTool(path = "/build_reference_status", method = "GET",

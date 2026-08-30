@@ -12,8 +12,14 @@
 # can still be read in six months. toolchain is <compiler><major>-<target>.
 # Framework entries add -<library>[-<board>]. Pin tags or SHAs, never branches.
 #
+# Compiled with -g. DWARF paths are rewritten to /ref/<name>/... so one
+# Ghidra Source Files transform covers the corpus: /ref/ -> <local checkout>/.
+# strip_debug defaults to false; set it only if corpus disk is the constraint.
+# Sidecars record debug_path_prefix.
+#
 # littlefs × 3 toolchains × 3 opt = 9. pico-sdk × 3 toolchains × 2 opt ×
 # 2 boards = 12. build_manifest skips jobs whose outputs already exist.
+# x86-64 userland lives in docker/references.userland.yaml (medium_64).
 
 references:
   - name: littlefs
@@ -22,7 +28,6 @@ references:
     sources: [lfs.c]
     defines: [LFS_NO_MALLOC, LFS_NO_ASSERT]
     arch_flags: "-mcpu=cortex-m0plus -mthumb"
-    strip_debug: true
     matrix:
       toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]
       opt: [-Os, -O2, -O3]

@@ -93,11 +93,13 @@ public class BSimService {
 
     @McpTool(path = "/bsim_create_db", method = "POST",
             description = "Create a BSim database via `bsim createdatabase`. Default template "
-                    + "medium_32 (32-bit ARM firmware). Call-graph data is recorded unless "
-                    + "callgraph=false. H2 file: URLs need a writable parent directory; "
-                    + "PostgreSQL when more than one writer is needed. The database is empty "
-                    + "until bsim_ingest; a query against an empty corpus returns nothing useful. "
-                    + "Returns a job_id instead of a result when the CLI outlives wait_seconds.",
+                    + "medium_32 (32-bit ARM firmware). Use medium_64 for x86-64 userland "
+                    + "(32-bit and 64-bit cannot share a database). Call-graph data is recorded "
+                    + "unless callgraph=false. H2 file: URLs need a writable parent directory; "
+                    + "PostgreSQL when more than one writer is needed. Writes a "
+                    + "<name>.ghidra-mcp.json sidecar with the template so bsim_list_databases "
+                    + "can report it. The database is empty until bsim_ingest. Returns a job_id "
+                    + "instead of a result when the CLI outlives wait_seconds.",
             category = "bsim")
     public Response createDb(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -143,6 +145,7 @@ public class BSimService {
                 if (!r.ok()) {
                     return cliError("createdatabase failed", r);
                 }
+                BSimUrls.writeDatabaseSidecar(url, template);
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("status", "success");
                 body.put("db_url", url);
@@ -157,6 +160,30 @@ public class BSimService {
         } catch (Exception e) {
             return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    // ========================================================================
+    // bsim_list_databases
+    // ========================================================================
+
+    @McpTool(path = "/bsim_list_databases", method = "GET",
+            description = "List H2 BSim databases under GHIDRA_MCP_BSIM_ROOT and the known "
+                    + "config templates. Templates (medium_32, medium_64, ...) are fixed at "
+                    + "createdatabase time. Sidecars written by bsim_create_db report which "
+                    + "template each file: database used. Does not spawn the bsim CLI.",
+            category = "bsim")
+    public Response listDatabases() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", "success");
+        body.put("config_templates", List.copyOf(BSimUrls.CONFIG_TEMPLATE_ORDER));
+        String root = BSimUrls.bsimRootEnv();
+        body.put("bsim_root", root);
+        List<Map<String, Object>> databases = (root == null || root.isBlank())
+                ? List.of()
+                : BSimUrls.listFileDatabases(Path.of(root));
+        body.put("databases", databases);
+        body.put("count", databases.size());
+        return Response.ok(body);
     }
 
     // ========================================================================
@@ -637,9 +664,20 @@ public class BSimService {
             }
             String md5 = program.getExecutableMD5();
             List<BSimMatches.FunctionResult> results = BSimMatches.parseQueryPayload(payload, md5);
+            List<String> warnings = new ArrayList<>();
+            String simWarn = BSimMatches.similarityThresholdWarning(similarity);
+            if (simWarn != null) warnings.add(simWarn);
+            try {
+                int bits = program.getLanguage().getLanguageDescription().getSize();
+                String sizeWarn = BSimUrls.pointerSizeQueryWarning(
+                        bits, BSimUrls.readSidecarTemplate(dbUrl));
+                if (sizeWarn != null) warnings.add(sizeWarn);
+            } catch (Exception ignored) {
+                // Language metadata missing on a stub program is not a query failure.
+            }
             if (function != null && !function.isBlank() && results.size() == 1) {
                 Map<String, Object> body = results.get(0).toMap();
-                BSimMatches.attachSimilarityWarning(body, similarity);
+                if (!warnings.isEmpty()) body.put("warnings", warnings);
                 return Response.ok(body);
             }
             List<Map<String, Object>> rows = new ArrayList<>();
@@ -648,7 +686,7 @@ public class BSimService {
             body.put("program", program.getName());
             body.put("results", rows);
             body.put("count", rows.size());
-            BSimMatches.attachSimilarityWarning(body, similarity);
+            if (!warnings.isEmpty()) body.put("warnings", warnings);
             return Response.ok(body);
         } finally {
             deleteRecursively(workDir);

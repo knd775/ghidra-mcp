@@ -27,7 +27,7 @@ compiles onto the shared `/data` volume, and `import_file` loads that path.
 Compiler version is the design driver: GCC 13.2 littlefs matched the right
 names at 0.27–0.35 similarity because the firmware was built with GCC 10–12;
 `lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. One
-image holds gcc10-arm, gcc12-arm, and gcc13-arm; the identity string
+image holds gcc10-arm, gcc12-arm, gcc13-arm, and gcc13-x86_64; the identity string
 selects the binary, not a compose service. There is no Docker socket
 anywhere: `ghidra-mcp` POSTs to `http://ghidra-builder:8092/build` and
 gets a job id back; `GET /build/{id}` (MCP: `build_reference_status`)
@@ -36,6 +36,8 @@ layer in the same image and a manifest axis, not a new MCP parameter.
 Each identity is a pinned ARM GNU tarball (`docker/builder/toolchains.lock`:
 gcc10-arm 10.3-2021.10, gcc12-arm 12.2.Rel1, gcc13-arm 13.2.Rel1),
 fetched in a build stage so the archive never lands in the final image.
+`gcc13-x86_64` is Debian trixie's `gcc-13`, not a second ARM tarball: a
+native compiler has no multilib newlib, and 32-bit x86 is not installed.
 Distro `gcc-arm-none-eabi` is not used: the archive moves under you.
 `ref` must
 be a tag or SHA. `dry_run` returns the compiler command line and does not clone.
@@ -44,8 +46,14 @@ opt levels to nine objects, and pico-sdk × three toolchains × two opt levels
 × two boards (`pico`, `pico_w`) to twelve framework jobs. `mode=framework`
 configures `docker/stubs/<framework>/`, builds, and harvests per-library
 objects from the CMake build tree — never the linked ELF (`--gc-sections`
-would keep only what the stub's `main.c` referenced). `strip --strip-debug`
-keeps `.symtab`; framework mode never strips.
+would keep only what the stub's `main.c` referenced). Compile keeps DWARF
+(`-g`; `strip_debug` defaults false). Recorded paths use `/ref/<name>/...`
+via `-fdebug-prefix-map`; sidecars include `debug_path_prefix`. x86-64
+userland (musl, glibc, zlib, OpenSSL, libsodium, SQLite) lives in
+`docker/references.userland.yaml` and ingests into a separate `medium_64`
+database (`file:/srv/ghidra/bsim/userland`). `bsim_list_databases` lists
+H2 databases and templates. `source_read` returns a numbered span from
+the builder source cache, resolved by function (DWARF) or path.
 
 Every match carries separate numeric `similarity` and `confidence`. The top two
 differently-named hits within 0.05 similarity are `ambiguous` and are never

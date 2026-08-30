@@ -18,7 +18,8 @@ from typing import Any, Callable, Mapping
 ET_REL = 1
 EM_ARM = 40
 EM_AARCH64 = 183
-TARGET_MACHINES = {EM_ARM, EM_AARCH64}
+EM_X86_64 = 62
+TARGET_MACHINES = {EM_ARM, EM_AARCH64, EM_X86_64}
 
 HOST_TOOL_DIR_NAMES = frozenset(
     {
@@ -62,13 +63,19 @@ def stubs_root() -> Path:
     return DEFAULT_STUBS
 
 
+def is_stub_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    return (path / "stub.json").is_file() or (path / "CMakeLists.txt").is_file()
+
+
 def list_stubs(root: Path | None = None) -> list[str]:
     base = root or stubs_root()
     if not base.is_dir():
         return []
     names = []
     for child in sorted(base.iterdir()):
-        if child.is_dir() and (child / "CMakeLists.txt").is_file():
+        if is_stub_dir(child):
             names.append(child.name)
     return names
 
@@ -83,7 +90,7 @@ def stub_dir(framework: str, root: Path | None = None) -> Path:
             extra={"available": available},
         )
     dest = (root or stubs_root()) / name
-    if not dest.is_dir() or not (dest / "CMakeLists.txt").is_file():
+    if not is_stub_dir(dest):
         raise FrameworkError(
             f"unknown framework {name!r}; available: {available}",
             status="unknown_framework",
@@ -125,7 +132,7 @@ def elf_machine(path: Path) -> int | None:
 
 
 def is_target_object(path: Path) -> bool:
-    """ARM/AArch64 relocatable objects only — never the linked ELF (ET_EXEC)."""
+    """Relocatable objects for packed targets — never the linked ELF (ET_EXEC)."""
     hdr = elf_type_and_machine(path)
     if hdr is None:
         return False
@@ -321,3 +328,60 @@ def load_stub_meta(stub: Path) -> dict[str, Any]:
     if not meta_path.is_file():
         return {"name": stub.name, "generator": "cmake"}
     return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def substitute_tokens(argv: list[str], mapping: Mapping[str, str]) -> list[str]:
+    out: list[str] = []
+    for item in argv:
+        value = str(item)
+        for key, replacement in mapping.items():
+            value = value.replace("{" + key + "}", replacement)
+        out.append(value)
+    return out
+
+
+def argv_from_meta(meta: Mapping[str, Any], key: str, mapping: Mapping[str, str]) -> list[str]:
+    raw = meta.get(key) or []
+    if not isinstance(raw, list) or not raw:
+        return []
+    return substitute_tokens([str(x) for x in raw], mapping)
+
+
+def harvest_declared(
+    meta: Mapping[str, Any],
+    snapshot: Path,
+    build_dir: Path,
+) -> dict[str, list[Path]]:
+    """Explicit harvest paths from stub.json, mapped to library names."""
+    declared = meta.get("harvest") or []
+    if not isinstance(declared, list) or not declared:
+        return {}
+    groups: dict[str, list[Path]] = {}
+    missing: list[str] = []
+    for item in declared:
+        if isinstance(item, str):
+            rel = item
+            lib = archive_library_name(Path(item)) or Path(item).stem
+        elif isinstance(item, Mapping):
+            rel = str(item.get("path") or "").strip()
+            lib = str(item.get("library") or "").strip() or (
+                archive_library_name(Path(rel)) or Path(rel).stem
+            )
+        else:
+            continue
+        if not rel:
+            continue
+        candidates = [build_dir / rel, snapshot / rel]
+        found = next((p for p in candidates if p.is_file()), None)
+        if found is None:
+            missing.append(rel)
+            continue
+        groups.setdefault(lib, []).append(found)
+    if missing and not groups:
+        raise FrameworkError(
+            "harvest paths not found: " + ", ".join(missing),
+            status="library_not_harvested",
+            extra={"missing": missing},
+        )
+    return groups
+

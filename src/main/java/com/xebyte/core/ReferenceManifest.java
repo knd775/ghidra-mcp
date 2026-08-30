@@ -56,6 +56,15 @@ public final class ReferenceManifest {
         return jobs;
     }
 
+    /** Optional top-level {@code database:} (documentation / ingest hint). */
+    public static String databaseUrl(String text) {
+        if (text == null || text.isBlank()) return "";
+        Object root = looksLikeJson(text) ? parseJson(text) : MiniYaml.parse(text);
+        if (!(root instanceof Map<?, ?> map)) return "";
+        Object db = map.get("database");
+        return db == null ? "" : String.valueOf(db).trim();
+    }
+
     @SuppressWarnings("unchecked")
     static List<ReferenceBuild.Spec> expandEntry(Map<String, Object> entry, List<String> knownToolchains) {
         return expandEntry(entry, knownToolchains, null);
@@ -70,7 +79,7 @@ public final class ReferenceManifest {
         // Blank → identity default (gcc-arm vs clang-arm differ). Do not
         // inherit the gcc-arm flags onto a clang/xtensa/riscv cell.
         String archFlags = stringOr(entry, "arch_flags", "");
-        boolean stripDebug = boolOr(entry, "strip_debug", true);
+        boolean stripDebug = boolOr(entry, "strip_debug", false);
         String outputName = stringOr(entry, "output_name", "");
         Object defines = entry.get("defines");
         Object extra = entry.get("extra_flags");

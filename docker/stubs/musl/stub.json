@@ -1,0 +1,8 @@
+{
+  "name": "musl",
+  "generator": "make",
+  "out_of_tree": false,
+  "configure": ["./configure", "--disable-shared"],
+  "make": ["make", "-j"],
+  "harvest": [{"path": "lib/libc.a", "library": "libc"}]
+}

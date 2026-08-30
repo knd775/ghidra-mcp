@@ -34,6 +34,11 @@ public interface BuilderClient {
      */
     Map<String, Object> health(URI url) throws IOException;
 
+    /**
+     * Synchronous source-cache read ({@code POST /source}). Not a build job.
+     */
+    Map<String, Object> source(URI url, Map<String, Object> request) throws IOException;
+
     final class Http implements BuilderClient {
         private static final Duration HOP = Duration.ofSeconds(15);
 
@@ -75,6 +80,31 @@ public interface BuilderClient {
         @Override
         public Map<String, Object> health(URI url) throws IOException {
             return get("health", url, "/health");
+        }
+
+        @Override
+        public Map<String, Object> source(URI url, Map<String, Object> request) throws IOException {
+            URI target = url.resolve("/source");
+            byte[] body = JsonHelper.toJson(request).getBytes(StandardCharsets.UTF_8);
+            HttpURLConnection conn = (HttpURLConnection) target.toURL().openConnection();
+            try {
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout((int) HOP.toMillis());
+                conn.setReadTimeout((int) HOP.toMillis());
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Content-Length", Integer.toString(body.length));
+                try {
+                    try (OutputStream out = conn.getOutputStream()) {
+                        out.write(body);
+                    }
+                } catch (IOException e) {
+                    throw unreachable("source", url, e);
+                }
+                return read("source", url, conn);
+            } finally {
+                conn.disconnect();
+            }
         }
 
         private static Map<String, Object> get(String toolchain, URI url, String path)
@@ -131,10 +161,13 @@ public interface BuilderClient {
         public final List<Map<String, Object>> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
         public final List<String> statusCalls = new java.util.concurrent.CopyOnWriteArrayList<>();
         public final List<URI> healthCalls = new java.util.concurrent.CopyOnWriteArrayList<>();
+        public final List<Map<String, Object>> sourceCalls = new java.util.concurrent.CopyOnWriteArrayList<>();
         private Map<String, Object> response = Map.of("ok", true);
         private Map<String, Object> statusResponse;
         private Map<String, Object> healthResponse = defaultHealth();
+        private Map<String, Object> sourceResponse = Map.of("ok", true);
         private IOException healthError;
+        private IOException sourceError;
 
         public void setResponse(Map<String, Object> response) {
             this.response = response;
@@ -151,6 +184,15 @@ public interface BuilderClient {
 
         public void setHealthError(IOException healthError) {
             this.healthError = healthError;
+        }
+
+        public void setSourceResponse(Map<String, Object> sourceResponse) {
+            this.sourceResponse = sourceResponse;
+            this.sourceError = null;
+        }
+
+        public void setSourceError(IOException sourceError) {
+            this.sourceError = sourceError;
         }
 
         public static Map<String, Object> defaultHealth() {
@@ -197,6 +239,16 @@ public interface BuilderClient {
             healthCalls.add(url);
             if (healthError != null) throw healthError;
             return new LinkedHashMap<>(healthResponse);
+        }
+
+        @Override
+        public Map<String, Object> source(URI url, Map<String, Object> request) throws IOException {
+            Map<String, Object> rec = new LinkedHashMap<>();
+            rec.put("url", url == null ? "" : url.toString());
+            rec.put("request", request);
+            sourceCalls.add(rec);
+            if (sourceError != null) throw sourceError;
+            return new LinkedHashMap<>(sourceResponse);
         }
     }
 }
