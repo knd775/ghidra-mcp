@@ -17,7 +17,8 @@ import java.util.Map;
  *
  * <p>The manifest <em>is</em> the corpus definition. A matrix of toolchain × opt
  * expands to one {@link ReferenceBuild.Spec} per cell so nine littlefs objects
- * are one reviewable document, not nine hand-written calls.
+ * and twelve pico-sdk framework jobs are one reviewable document, not
+ * twenty-one hand-written calls.
  */
 public final class ReferenceManifest {
 
@@ -56,19 +57,27 @@ public final class ReferenceManifest {
         String repo = string(entry, "repo");
         String ref = string(entry, "ref");
         Object sources = entry.get("sources");
-        String archFlags = stringOr(entry, "arch_flags", ReferenceBuild.DEFAULT_ARCH_FLAGS);
+        // Blank → identity default (gcc-arm vs clang-arm differ). Do not
+        // inherit the gcc-arm flags onto a clang/xtensa/riscv cell.
+        String archFlags = stringOr(entry, "arch_flags", "");
         boolean stripDebug = boolOr(entry, "strip_debug", true);
         String outputName = stringOr(entry, "output_name", "");
         Object defines = entry.get("defines");
         Object extra = entry.get("extra_flags");
+        String mode = stringOr(entry, "mode", FrameworkBuild.MODE_SOURCES);
+        String framework = stringOr(entry, "framework", "");
+        Object libraries = entry.get("libraries");
+        String board = stringOr(entry, "board", "");
+        Object cmakeConfig = entry.get("config");
 
         Map<String, List<String>> matrix = matrixOf(entry.get("matrix"));
         if (matrix.isEmpty()) {
             String toolchain = stringOr(entry, "toolchain", ReferenceBuild.DEFAULT_TOOLCHAIN);
             String opt = stringOr(entry, "opt", ReferenceBuild.DEFAULT_OPT);
-            return List.of(ReferenceBuild.parse(
+            return List.of(parseEntry(
                     name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
-                    stripDebug, outputName, knownToolchains));
+                    stripDebug, outputName, knownToolchains,
+                    mode, framework, libraries, board, cmakeConfig));
         }
 
         // Fill missing axes from the entry-level defaults so a matrix of only
@@ -76,6 +85,10 @@ public final class ReferenceManifest {
         matrix.putIfAbsent("toolchain", List.of(
                 stringOr(entry, "toolchain", ReferenceBuild.DEFAULT_TOOLCHAIN)));
         matrix.putIfAbsent("opt", List.of(stringOr(entry, "opt", ReferenceBuild.DEFAULT_OPT)));
+        if (FrameworkBuild.MODE_FRAMEWORK.equals(FrameworkBuild.requireMode(mode))
+                && !board.isEmpty()) {
+            matrix.putIfAbsent("board", List.of(board));
+        }
 
         List<ReferenceBuild.Spec> jobs = new ArrayList<>();
         for (Map<String, String> cell : cartesian(matrix)) {
@@ -83,11 +96,29 @@ public final class ReferenceManifest {
                     stringOr(entry, "toolchain", ReferenceBuild.DEFAULT_TOOLCHAIN));
             String opt = cell.getOrDefault("opt", stringOr(entry, "opt", ReferenceBuild.DEFAULT_OPT));
             String arch = cell.getOrDefault("arch_flags", archFlags);
-            jobs.add(ReferenceBuild.parse(
+            String cellBoard = cell.getOrDefault("board", board);
+            jobs.add(parseEntry(
                     name, repo, ref, sources, toolchain, arch, opt, defines, extra,
-                    stripDebug, outputName, knownToolchains));
+                    stripDebug, outputName, knownToolchains,
+                    mode, framework, libraries, cellBoard, cmakeConfig));
         }
         return jobs;
+    }
+
+    private static ReferenceBuild.Spec parseEntry(
+            String name, String repo, String ref, Object sources, String toolchain,
+            String archFlags, String opt, Object defines, Object extra,
+            boolean stripDebug, String outputName, List<String> knownToolchains,
+            String mode, String framework, Object libraries, String board, Object cmakeConfig) {
+        if (FrameworkBuild.MODE_FRAMEWORK.equals(FrameworkBuild.requireMode(mode))) {
+            return ReferenceBuild.parse(
+                    name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
+                    stripDebug, outputName, knownToolchains,
+                    mode, framework, libraries, board, cmakeConfig);
+        }
+        return ReferenceBuild.parse(
+                name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
+                stripDebug, outputName, knownToolchains);
     }
 
     static List<Map<String, String>> cartesian(Map<String, List<String>> matrix) {

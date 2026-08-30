@@ -25,11 +25,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
+
+_BUILDER_DIR = Path(__file__).resolve().parent
+if str(_BUILDER_DIR) not in sys.path:
+    sys.path.insert(0, str(_BUILDER_DIR))
+import framework_build as fw  # noqa: E402
+import jobs as builder_jobs  # noqa: E402
+import toolchains as packed_toolchains  # noqa: E402
 
 DEFAULT_PORT = 8092
 DEFAULT_SRC_CACHE = Path("/src")
@@ -425,10 +432,351 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sidecar_path(artifact: Path) -> Path:
+    return artifact.with_name(artifact.name + ".json")
+
+
+def write_text_atomic(dest: Path, text: str) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}.",
+        suffix=".tmp",
+        dir=str(dest.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, dest)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def write_provenance_sidecar(
+    dest: Path,
+    *,
+    req: Mapping[str, Any],
+    commit: str,
+    compiler_version: str,
+    function_count: int,
+    digest: str,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "name": str(req.get("name") or dest.stem),
+        "artifact": dest.name,
+        "sha256": digest,
+        "bytes": dest.stat().st_size,
+        "function_count": function_count,
+        "repo": str(req.get("repo") or ""),
+        "ref": str(req.get("ref") or ""),
+        "commit": commit,
+        "toolchain": str(req.get("toolchain") or ""),
+        "compiler_version": compiler_version,
+        "mode": str(req.get("mode") or "sources").strip() or "sources",
+        "sources": [str(s).strip() for s in (req.get("sources") or []) if str(s).strip()],
+        "opt": str(req.get("opt") or ""),
+        "defines": [str(d).strip() for d in (req.get("defines") or []) if str(d).strip()],
+        "extra_flags": [str(f) for f in (req.get("extra_flags") or [])],
+        "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if extra:
+        payload.update(extra)
+    write_text_atomic(
+        sidecar_path(dest),
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+    )
+
+
 def cc_version(cc: str, run: RunFn) -> str:
     r = run([cc, "--version"], timeout=15)
     line = (r.stdout or r.stderr or "").splitlines()
     return line[0].strip() if line else cc
+
+
+def cxx_from_cc(cc: str) -> str:
+    if cc.endswith("-gcc"):
+        return cc[: -len("gcc")] + "g++"
+    if cc == "gcc":
+        return "g++"
+    if cc == "clang":
+        return "clang++"
+    return cc
+
+
+def tools_for_request(req: Mapping[str, Any]) -> dict[str, str]:
+    identity = str(req.get("toolchain") or "").strip()
+    try:
+        tools = packed_toolchains.resolve_tools(
+            identity,
+            fallback_cc=str(req.get("cc") or DEFAULT_CC),
+            fallback_ld=str(req.get("ld") or DEFAULT_LD),
+            fallback_strip=str(req.get("strip") or DEFAULT_STRIP),
+            fallback_nm=str(req.get("nm") or DEFAULT_NM),
+        )
+    except KeyError as exc:
+        ident = str(exc.args[0]) if exc.args else identity
+        available = list(exc.args[1]) if len(exc.args) > 1 else []
+        raise BuildError(
+            f"unknown toolchain {ident!r}; installed: {available}",
+            status="unknown_toolchain",
+            extra={"installed": available, "toolchain": ident},
+        ) from exc
+    if not tools.get("cxx"):
+        tools["cxx"] = cxx_from_cc(tools["cc"])
+    return tools
+
+
+def artifact_filename(
+    name: str,
+    library: str,
+    ref: str,
+    toolchain: str,
+    opt: str,
+    board: str,
+) -> str:
+    opt_label = opt[1:] if opt.startswith("-") else opt
+
+    def safe(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+
+    parts = [name, library, ref, toolchain, opt_label]
+    if board.strip():
+        parts.append(board)
+    return "-".join(safe(p) for p in parts) + ".o"
+
+
+def handle_framework_request(
+    req: Mapping[str, Any],
+    *,
+    run: RunFn,
+    src_cache: Path,
+    extract: Callable[[Path, str, Path], None] | None,
+) -> dict[str, Any]:
+    repo = str(req.get("repo") or "").strip()
+    ref = str(req.get("ref") or "").strip()
+    framework = str(req.get("framework") or "").strip()
+    libraries = [str(s).strip() for s in (req.get("libraries") or []) if str(s).strip()]
+    board = str(req.get("board") or "").strip()
+    config_raw = req.get("config") or {}
+    config = {str(k): str(v) for k, v in dict(config_raw).items()} if isinstance(config_raw, dict) else {}
+    name = str(req.get("name") or "framework").strip() or "framework"
+    opt = str(req.get("opt") or "-Os").strip() or "-Os"
+    extra_flags = [str(s) for s in (req.get("extra_flags") or [])]
+    for d in req.get("defines") or []:
+        item = str(d).strip()
+        if not item:
+            continue
+        extra_flags.append(item if item.startswith("-D") else "-D" + item)
+    toolchain = str(req.get("toolchain") or "").strip()
+
+    if not repo:
+        raise BuildError("repo is required", status="invalid_repo")
+    if not libraries:
+        raise BuildError(
+            "libraries is required in mode=framework (linking nothing produces nothing)",
+            status="empty_libraries",
+        )
+    try:
+        stub = fw.stub_dir(framework)
+    except fw.FrameworkError as exc:
+        raise BuildError(str(exc), status=exc.status, extra=exc.extra) from exc
+
+    tools = tools_for_request(req)
+    cc = tools["cc"]
+    ld = tools["ld"]
+    nm_bin = tools["nm"]
+    cxx = tools.get("cxx") or cxx_from_cc(cc)
+    if bool(req.get("dry_run")):
+        configure = fw.cmake_configure_argv(
+            stub=stub,
+            build_dir=Path("<build>"),
+            sdk_path=SNAPSHOT_PLACEHOLDER,
+            board=board,
+            libraries=libraries,
+            opt=opt,
+            config=config,
+            extra_flags=extra_flags,
+            cc=cc,
+            cxx=cxx,
+        )
+        harvest = [artifact_filename(name, lib, ref, toolchain, opt, board) for lib in libraries]
+        return {
+            "ok": True,
+            "dry_run": True,
+            "mode": "framework",
+            "framework": framework,
+            "command": [configure, fw.cmake_build_argv(Path("<build>"))],
+            "harvest": harvest,
+            "board": board,
+        }
+
+    raw_dir = str(req.get("output_dir") or "").strip()
+    if not raw_dir:
+        raise BuildError("output_dir is required in mode=framework", status="invalid_output")
+    output_dir = require_output_under_root(Path(raw_dir))
+
+    reject_branch_name(ref)
+    git_dir = ensure_bare_clone(repo, src_cache, run)
+    sha = resolve_commit(git_dir, ref, run)
+    epoch = commit_timestamp(git_dir, sha, run)
+
+    work_root = Path(tempfile.mkdtemp(prefix="ghidra-fw-", dir=tempfile.gettempdir()))
+    snapshot = work_root / "sdk"
+    build_dir = work_root / "build"
+    staging_dir = work_root / "harvest"
+    worktree_added = False
+    try:
+        if extract is not None:
+            extract(git_dir, sha, snapshot)
+        else:
+            fw.checkout_with_submodules(git_dir, sha, snapshot, run, _git)
+            worktree_added = True
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        env["LANG"] = "C"
+        env["TZ"] = "UTC"
+        env["SOURCE_DATE_EPOCH"] = epoch
+        env["PICO_SDK_PATH"] = str(snapshot)
+        env.pop("CC", None)
+        env.pop("CXX", None)
+
+        configure = fw.cmake_configure_argv(
+            stub=stub,
+            build_dir=build_dir,
+            sdk_path=str(snapshot),
+            board=board,
+            libraries=libraries,
+            opt=opt,
+            config=config,
+            extra_flags=extra_flags,
+            cc=cc,
+            cxx=cxx,
+        )
+        commands = [configure]
+        configured = run(configure, env=env, timeout=180)
+        if configured.returncode != 0:
+            stderr = (configured.stderr or configured.stdout or "").strip()
+            raise BuildError(
+                f"cmake configure failed:\n{stderr}",
+                status="configure_failed",
+                extra={"stderr": stderr, "command": configure},
+            )
+        build = fw.cmake_build_argv(build_dir)
+        commands.append(build)
+        built = run(build, env=env, timeout=900)
+        if built.returncode != 0:
+            stderr = (built.stderr or built.stdout or "").strip()
+            raise BuildError(
+                f"cmake build failed:\n{stderr}",
+                status="compile_failed",
+                extra={"stderr": stderr, "command": build},
+            )
+
+        groups = fw.harvest_groups(build_dir)
+        if not groups:
+            raise BuildError(
+                "refusing to write: 0 defined functions harvested "
+                "(0 target objects in the build tree; the linked ELF was not used)",
+                status="zero_functions",
+                extra={"function_count": 0, "commit_sha": sha},
+            )
+
+        missing = [lib for lib in libraries if lib not in groups]
+        if missing:
+            raise BuildError(
+                "library not harvested from the build tree: "
+                + ", ".join(missing)
+                + f" (found: {sorted(groups)})",
+                status="library_not_harvested",
+                extra={"missing": missing, "found": sorted(groups)},
+            )
+
+        # Requested libraries first, then submodule extras that compiled.
+        ordered: list[str] = []
+        for lib in libraries:
+            if lib not in ordered:
+                ordered.append(lib)
+        for lib in sorted(groups):
+            if lib not in ordered:
+                ordered.append(lib)
+
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        artifacts: list[dict[str, Any]] = []
+        total_fns = 0
+        compiler_ver = cc_version(cc, run)
+        for lib in ordered:
+            filename = artifact_filename(name, lib, ref, toolchain, opt, board)
+            staged = staging_dir / filename
+            dest = output_dir / filename
+            combine_cmd = fw.combine_objects(groups[lib], staged, ld, run, env)
+            commands.append(combine_cmd)
+            names = defined_functions(nm_bin, staged, run, env)
+            if not names:
+                raise BuildError(
+                    f"refusing to write: 0 defined functions in harvested {lib} "
+                    "(everything was optimised out or the ELF was harvested)",
+                    status="zero_functions",
+                    extra={"function_count": 0, "library": lib, "commit_sha": sha},
+                )
+            install_built_object(staged, dest)
+            digest = sha256_file(dest)
+            write_provenance_sidecar(
+                dest,
+                req=req,
+                commit=sha,
+                compiler_version=compiler_ver,
+                function_count=len(names),
+                digest=digest,
+                extra={
+                    "framework": framework,
+                    "library": lib,
+                    "board": board,
+                    "config": config,
+                },
+            )
+            total_fns += len(names)
+            artifacts.append(
+                {
+                    "path": str(dest),
+                    "bytes": dest.stat().st_size,
+                    "sha256": digest,
+                    "function_count": len(names),
+                    "defined_functions": names[:200],
+                    "library": lib,
+                }
+            )
+
+        if total_fns == 0:
+            raise BuildError(
+                "refusing to write: 0 defined functions harvested",
+                status="zero_functions",
+                extra={"function_count": 0, "commit_sha": sha},
+            )
+
+        return {
+            "ok": True,
+            "mode": "framework",
+            "framework": framework,
+            "artifacts": artifacts,
+            "function_count": total_fns,
+            "commit_sha": sha,
+            "command": commands,
+            "cc_version": compiler_ver,
+            "toolchain": toolchain,
+            "board": board,
+        }
+    except fw.FrameworkError as exc:
+        raise BuildError(str(exc), status=exc.status, extra=exc.extra) from exc
+    finally:
+        if worktree_added:
+            _git(run, ["--git-dir", str(git_dir), "worktree", "remove", "--force", str(snapshot)])
+        shutil.rmtree(work_root, ignore_errors=True)
 
 
 def handle_request(
@@ -438,15 +786,20 @@ def handle_request(
     src_cache: Path = DEFAULT_SRC_CACHE,
     extract: Callable[[Path, str, Path], None] | None = None,
 ) -> dict[str, Any]:
+    mode = str(req.get("mode") or "sources").strip() or "sources"
+    if mode == "framework":
+        return handle_framework_request(req, run=run, src_cache=src_cache, extract=extract)
+    if mode != "sources":
+        raise BuildError(
+            f"mode must be 'sources' or 'framework'; got {mode!r}",
+            status="invalid_mode",
+        )
     repo = str(req.get("repo") or "").strip()
     ref = str(req.get("ref") or "").strip()
     sources = [str(s).strip() for s in (req.get("sources") or []) if str(s).strip()]
     cflags = [str(s) for s in (req.get("cflags") or [])]
-    cc = str(req.get("cc") or DEFAULT_CC)
-    ld = str(req.get("ld") or DEFAULT_LD)
-    strip_bin = str(req.get("strip") or DEFAULT_STRIP)
-    nm_bin = str(req.get("nm") or DEFAULT_NM)
     do_strip = bool(req.get("strip_debug", True))
+    toolchain = str(req.get("toolchain") or "").strip()
 
     if not repo:
         raise BuildError("repo is required", status="invalid_repo")
@@ -458,6 +811,11 @@ def handle_request(
     output = require_output_under_root(Path(raw_output))
 
     reject_branch_name(ref)
+    tools = tools_for_request(req)
+    cc = tools["cc"]
+    ld = tools["ld"]
+    strip_bin = tools["strip"]
+    nm_bin = tools["nm"]
     for src in sources:
         if src.startswith("/") or src.startswith("-") or ".." in Path(src).parts:
             raise BuildError(
@@ -503,17 +861,27 @@ def handle_request(
                 extra={"function_count": 0, "commit_sha": sha},
             )
         install_built_object(staging, output)
+        compiler_ver = cc_version(cc, run)
+        digest = sha256_file(output)
+        write_provenance_sidecar(
+            output,
+            req=req,
+            commit=sha,
+            compiler_version=compiler_ver,
+            function_count=len(names),
+            digest=digest,
+        )
         result = {
             "ok": True,
             "path": str(output),
             "bytes": output.stat().st_size,
-            "sha256": sha256_file(output),
+            "sha256": digest,
             "function_count": len(names),
             "defined_functions": names[:200],
             "commit_sha": sha,
             "command": commands,
-            "cc_version": cc_version(cc, run),
-            "toolchain": os.environ.get("TOOLCHAIN_TAG", ""),
+            "cc_version": compiler_ver,
+            "toolchain": toolchain,
         }
         return result
     finally:
@@ -529,15 +897,43 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
 
 
 def health_payload(run: RunFn = _default_run) -> dict[str, Any]:
-    cc = os.environ.get("BUILDER_CC", DEFAULT_CC)
-    tag = os.environ.get("TOOLCHAIN_TAG", "")
-    return {
+    installed = packed_toolchains.list_installed()
+    identities = sorted(installed)
+    body: dict[str, Any] = {
         "ok": True,
-        "toolchain": tag,
-        "cc": cc,
-        "cc_version": cc_version(cc, run),
+        "identities": identities,
         "uid": os.getuid(),
+        "stubs": fw.list_stubs(),
     }
+    releases: dict[str, str] = {}
+    for ident, prefix in installed.items():
+        meta = prefix / "identity.json"
+        if not meta.is_file():
+            continue
+        try:
+            payload = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        rel = str(payload.get("release") or "").strip()
+        if rel:
+            releases[ident] = rel
+    if releases:
+        body["releases"] = releases
+    if identities:
+        first = installed[identities[0]] / "bin" / "arm-none-eabi-gcc"
+        clang = installed[identities[0]] / "bin" / "clang"
+        probe = str(clang if clang.is_file() and not first.is_file() else first)
+        body["cc"] = probe
+        body["cc_version"] = cc_version(probe, run)
+    else:
+        cc = os.environ.get("BUILDER_CC", DEFAULT_CC)
+        body["cc"] = cc
+        body["cc_version"] = cc_version(cc, run)
+    return body
+
+
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+QUEUE = builder_jobs.JobQueue()
 
 
 class BuilderHandler(BaseHTTPRequestHandler):
@@ -545,18 +941,9 @@ class BuilderHandler(BaseHTTPRequestHandler):
     # and pass the handler instance as argv to gcc --version.
     run = staticmethod(_default_run)
     src_cache: Path = DEFAULT_SRC_CACHE
-    token: str = ""
-    build_lock = threading.Lock()
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
-
-    def _unauthorized(self) -> bool:
-        expected = (self.token or "").strip()
-        if not expected:
-            return False
-        got = self.headers.get("Authorization", "")
-        return got != f"Bearer {expected}"
 
     def _send(self, code: int, payload: dict[str, Any]) -> None:
         raw = json.dumps(payload, indent=None).encode("utf-8")
@@ -566,23 +953,47 @@ class BuilderHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    @classmethod
+    def ensure_worker(cls) -> None:
+        QUEUE.start(
+            handle=handle_request,
+            error_payload=error_payload,
+            run=cls.run,
+            src_cache=cls.src_cache,
+        )
+
     def do_GET(self) -> None:  # noqa: N802
-        # /health is unauthenticated so the image HEALTHCHECK does not put
-        # GHIDRA_MCP_AUTH_TOKEN on the process command line. POST /build still
-        # requires the token when it is set. No host ports are published.
-        if self.path.split("?", 1)[0].rstrip("/") in {"/health", ""}:
+        route = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if route in {"/health", "/"}:
             self._send(200, health_payload(self.run))
             return
-        if self._unauthorized():
-            self._send(401, {"ok": False, "error": "unauthorized", "status": "unauthorized"})
+        if route == "/stubs":
+            self._send(200, {"ok": True, "stubs": fw.list_stubs()})
+            return
+        if route == "/builds":
+            listed = QUEUE.list_jobs()
+            self._send(200, {"ok": True, "jobs": listed, "count": len(listed)})
+            return
+        if route.startswith("/build/"):
+            job_id = route[len("/build/") :]
+            if not JOB_ID_RE.fullmatch(job_id):
+                self._send(400, {"ok": False, "error": "invalid job_id", "status": "invalid_job_id"})
+                return
+            job = QUEUE.get(job_id)
+            if job is None:
+                self._send(404, {
+                    "ok": False,
+                    "error": f"no build job '{job_id}'",
+                    "status": "job_not_found",
+                })
+                return
+            self._send(200, job.snapshot())
             return
         self._send(404, {"ok": False, "error": "not found", "status": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self._unauthorized():
-            self._send(401, {"ok": False, "error": "unauthorized", "status": "unauthorized"})
-            return
-        if self.path.rstrip("/") != "/build":
+        route = self.path.rstrip("/")
+        if route != "/build":
             self._send(404, {"ok": False, "error": "not found", "status": "not_found"})
             return
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -594,23 +1005,22 @@ class BuilderHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send(400, {"ok": False, "error": "malformed JSON", "status": "malformed"})
             return
-        try:
-            with self.build_lock:
-                payload = handle_request(req, run=self.run, src_cache=self.src_cache)
-            self._send(200, payload)
-        except BuildError as exc:
-            self._send(400, error_payload(exc))
-        except Exception as exc:  # pragma: no cover - unexpected
-            self._send(500, error_payload(exc))
+        if not isinstance(req, dict):
+            self._send(400, {"ok": False, "error": "JSON object required", "status": "malformed"})
+            return
+        self.ensure_worker()
+        job = QUEUE.submit(req)
+        self._send(202, {"ok": True, "job_id": job.id, "status": "queued"})
 
 
-def serve(host: str, port: int, token: str, src_cache: Path) -> None:
-    BuilderHandler.token = token
+def serve(host: str, port: int, src_cache: Path) -> None:
     BuilderHandler.src_cache = src_cache
+    BuilderHandler.ensure_worker()
     httpd = ThreadingHTTPServer((host, port), BuilderHandler)
+    installed = packed_toolchains.list_installed()
     sys.stderr.write(
         f"ghidra-build-reference listening on {host}:{port} "
-        f"toolchain={os.environ.get('TOOLCHAIN_TAG', '?')} uid={os.getuid()}\n"
+        f"identities={sorted(installed) or ['(unpacked)']} uid={os.getuid()}\n"
     )
     httpd.serve_forever()
 
@@ -629,7 +1039,6 @@ def main(argv: list[str] | None = None) -> int:
         serve(
             args.host,
             args.port,
-            os.environ.get("GHIDRA_MCP_AUTH_TOKEN", ""),
             Path(os.environ.get("GHIDRA_MCP_SRC_CACHE", str(DEFAULT_SRC_CACHE))),
         )
         return 0

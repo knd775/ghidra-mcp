@@ -193,13 +193,19 @@ public class HardeningWiringTest extends TestCase {
                 builder.contains("getent passwd 1000"));
         assertTrue("builder must run as uid 1000 so uploads are readable by ghidra-mcp",
                 builder.contains("useradd --uid 1000 --gid 1000"));
-        assertTrue("builder tag is the compiler, not latest",
+        assertTrue("one image holds every identity prefix",
+                builder.contains("/opt/ghidra-builder/toolchains/gcc13-arm"));
+        assertTrue("gcc10-arm is packed into the same image",
+                builder.contains("/opt/ghidra-builder/toolchains/gcc10-arm"));
+        assertFalse("identity is not an image tag / build-arg",
                 builder.contains("ARG TOOLCHAIN_TAG"));
         assertTrue("HEALTHCHECK must probe /health",
                 builder.contains("/health"));
         assertFalse("HEALTHCHECK must not put the auth token on the command line",
                 builder.contains("Bearer"));
-        assertTrue("arm-none-eabi only Recommends newlib; without it -c fails on string.h",
+        assertTrue("toolchains are pinned ARM tarballs, not distro packages",
+                builder.contains("developer.arm.com"));
+        assertFalse("distro gcc-arm-none-eabi is not a corpus pin",
                 builder.contains("libnewlib-arm-none-eabi"));
     }
 

@@ -3,10 +3,12 @@ package com.xebyte.offline;
 import com.xebyte.core.AnnotationScanner;
 import com.xebyte.core.BuilderClient;
 import com.xebyte.core.EndpointDef;
+import com.xebyte.core.FrameworkBuild;
 import com.xebyte.core.ReferenceBuild;
 import com.xebyte.core.ReferenceBuildService;
 import com.xebyte.core.ReferenceManifest;
 import com.xebyte.core.Response;
+import com.xebyte.core.ToolchainIdentity;
 import junit.framework.TestCase;
 
 import java.net.URI;
@@ -35,7 +37,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         client = new BuilderClient.Recording();
         Map<String, Object> ok = new LinkedHashMap<>();
         ok.put("ok", true);
-        ok.put("path", tmp.resolve("uploads/littlefs-v2.9.3-gcc13-Os.o").toString());
+        ok.put("path", tmp.resolve("uploads/littlefs-v2.9.3-gcc13-arm-Os.o").toString());
         ok.put("bytes", 34_000);
         ok.put("sha256", "abc");
         ok.put("function_count", 12);
@@ -61,7 +63,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "-mcpu=cortex-m0plus -mthumb",
                 "-Os",
                 List.of("LFS_NO_MALLOC", "LFS_NO_ASSERT"),
@@ -76,7 +78,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("-fno-common"));
         assertTrue(json, json.contains("-ffunction-sections"));
         assertTrue(json, json.contains("-DLFS_NO_MALLOC"));
-        assertTrue(json, json.contains("littlefs-v2.9.3-gcc13-Os.o"));
+        assertTrue(json, json.contains("littlefs-v2.9.3-gcc13-arm-Os.o"));
         assertTrue("dry_run must not clone or compile", client.calls.isEmpty());
     }
 
@@ -108,7 +110,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "main",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "",
                 "-Os",
                 List.of(),
@@ -128,7 +130,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc99",
+                "gcc99-arm",
                 "",
                 "-Os",
                 List.of(),
@@ -138,9 +140,30 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 true);
         assertTrue(r instanceof Response.Err);
         String json = r.toJson();
-        assertTrue(json, json.contains("gcc10"));
-        assertTrue(json, json.contains("gcc12"));
-        assertTrue(json, json.contains("gcc13"));
+        assertTrue(json, json.contains("gcc10-arm"));
+        assertTrue(json, json.contains("gcc12-arm"));
+        assertTrue(json, json.contains("gcc13-arm"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testBareGcc13IsNotAnIdentity() {
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("compiler") || json.contains("<compiler>"));
+        assertTrue(json, json.contains("gcc13-arm"));
         assertTrue(client.calls.isEmpty());
     }
 
@@ -150,22 +173,59 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "-mcpu=cortex-m0plus -mthumb",
                 "-Os",
                 List.of("LFS_NO_MALLOC"),
                 List.of(),
                 true,
                 "",
-                List.of("gcc10", "gcc12", "gcc13"));
-        assertEquals("littlefs-v2.9.3-gcc13-Os.o", spec.resolvedOutputName());
+                List.of("gcc10-arm", "gcc12-arm", "gcc13-arm"));
+        assertEquals("littlefs-v2.9.3-gcc13-arm-Os.o", spec.resolvedOutputName());
         List<List<String>> cmd = spec.commandLines(Path.of("/data/uploads", spec.resolvedOutputName()));
         assertEquals("arm-none-eabi-gcc", cmd.get(0).get(0));
         assertTrue(cmd.get(0).contains("-c"));
+        assertTrue(cmd.get(0).contains("-mcpu=cortex-m0plus"));
         assertTrue(cmd.get(0).contains("-ffile-prefix-map=<snapshot>=."));
         assertTrue(cmd.get(cmd.size() - 1).contains("--strip-debug"));
         assertFalse("must not strip .symtab", cmd.toString().contains("--strip-all"));
         assertFalse(cmd.toString().contains("--strip-unneeded"));
+    }
+
+    public void testClangArmIdentitySelectsClangAndTargetTriple() {
+        ReferenceBuild.Spec spec = ReferenceBuild.parse(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "clang17-arm",
+                "",
+                "-Os",
+                List.of("LFS_NO_ASSERT"),
+                List.of(),
+                true,
+                "",
+                List.of("clang17-arm"));
+        assertEquals("littlefs-v2.9.3-clang17-arm-Os.o", spec.resolvedOutputName());
+        List<String> cc = spec.commandLines(Path.of("/data/uploads", spec.resolvedOutputName())).get(0);
+        assertEquals("clang", cc.get(0));
+        assertTrue(cc.toString(), cc.contains("--target=thumbv6m-none-eabi"));
+        assertFalse(cc.toString(), cc.contains("-mcpu=cortex-m0plus"));
+        Map<String, Object> req = spec.toBuilderRequest(Path.of("/data/uploads", spec.resolvedOutputName()));
+        assertEquals("clang", req.get("cc"));
+        assertEquals("llvm-strip", req.get("strip"));
+        assertEquals("llvm-nm", req.get("nm"));
+        assertEquals("clang17-arm", req.get("toolchain"));
+        assertEquals("littlefs", req.get("name"));
+    }
+
+    public void testXtensaAndRiscvIdentitiesNeedNoNewToolParam() {
+        ToolchainIdentity xt = ToolchainIdentity.parse("gcc12-xtensa");
+        assertEquals("xtensa-esp32-elf-gcc", xt.cc());
+        assertTrue(xt.defaultArchFlags().contains("-mlongcalls"));
+        ToolchainIdentity rv = ToolchainIdentity.parse("gcc13-riscv");
+        assertEquals("riscv32-unknown-elf-gcc", rv.cc());
+        assertTrue(rv.defaultArchFlags().contains("rv32"));
     }
 
     public void testRealBuildSendsRequestAndReturnsShaAndCount() {
@@ -174,7 +234,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "",
                 "-Os",
                 List.of("LFS_NO_ASSERT"),
@@ -191,6 +251,11 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         Map<?, ?> req = (Map<?, ?>) client.calls.get(0).get("request");
         assertEquals("v2.9.3", req.get("ref"));
         assertEquals(Boolean.TRUE, req.get("strip_debug"));
+        assertEquals("littlefs", req.get("name"));
+        assertEquals("-Os", req.get("opt"));
+        assertEquals("gcc13-arm", req.get("toolchain"));
+        assertEquals("sources", req.get("mode"));
+        assertEquals(List.of("LFS_NO_ASSERT"), req.get("defines"));
     }
 
     public void testCompileFailureReturnsStderr() {
@@ -205,7 +270,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "",
                 "-Os",
                 List.of(),
@@ -231,7 +296,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v9.9.9",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "",
                 "-Os",
                 List.of(),
@@ -255,7 +320,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "",
                 "-Os",
                 List.of(),
@@ -277,7 +342,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 "https://github.com/littlefs-project/littlefs.git",
                 "v2.9.3",
                 List.of("lfs.c"),
-                "gcc13",
+                "gcc13-arm",
                 "",
                 "-Os",
                 List.of(),
@@ -289,18 +354,31 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(r.toJson(), r.toJson().contains("function_count"));
     }
 
-    public void testManifestExpandsToNineLittlefsJobs() throws Exception {
+    public void testManifestExpandsLittlefsAndPicoSdk() throws Exception {
         Path manifest = Path.of("docker", "references.yaml");
         assertTrue("docker/references.yaml must exist", Files.isRegularFile(manifest));
         List<ReferenceBuild.Spec> jobs = ReferenceManifest.load(
-                manifest, List.of("gcc10", "gcc12", "gcc13"));
-        assertEquals(9, jobs.size());
-        assertEquals("littlefs-v2.9.3-gcc10-Os.o", jobs.get(0).resolvedOutputName());
-        assertEquals("littlefs-v2.9.3-gcc13-O3.o", jobs.get(8).resolvedOutputName());
-        long toolchains = jobs.stream().map(ReferenceBuild.Spec::toolchain).distinct().count();
-        long opts = jobs.stream().map(ReferenceBuild.Spec::opt).distinct().count();
+                manifest, List.of("gcc10-arm", "gcc12-arm", "gcc13-arm"));
+        assertEquals(21, jobs.size());
+        List<ReferenceBuild.Spec> littlefs = jobs.stream()
+                .filter(s -> "littlefs".equals(s.name())).toList();
+        List<ReferenceBuild.Spec> pico = jobs.stream()
+                .filter(s -> "pico-sdk".equals(s.name())).toList();
+        assertEquals(9, littlefs.size());
+        assertEquals(12, pico.size());
+        assertEquals("littlefs-v2.9.3-gcc10-arm-Os.o", littlefs.get(0).resolvedOutputName());
+        assertEquals("littlefs-v2.9.3-gcc13-arm-O3.o", littlefs.get(8).resolvedOutputName());
+        assertTrue(pico.get(0).isFramework());
+        assertEquals("pico-sdk-pico_stdlib-2.1.0-gcc10-arm-Os-pico.o",
+                pico.get(0).artifactName("pico_stdlib"));
+        assertEquals("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico_w.o",
+                pico.get(11).artifactName("hardware_i2c"));
+        long toolchains = littlefs.stream().map(ReferenceBuild.Spec::toolchain).distinct().count();
+        long opts = littlefs.stream().map(ReferenceBuild.Spec::opt).distinct().count();
         assertEquals(3, toolchains);
         assertEquals(3, opts);
+        long boards = pico.stream().map(ReferenceBuild.Spec::board).distinct().count();
+        assertEquals(2, boards);
     }
 
     public void testManifestDryRunDoesNotCallBuilder() throws Exception {
@@ -309,29 +387,85 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertFalse(r.toJson(), r instanceof Response.Err);
         assertTrue(client.calls.isEmpty());
         String json = r.toJson();
-        assertTrue(json, json.contains("\"count\":9") || json.contains("\"count\": 9"));
+        assertTrue(json, json.contains("\"count\":21") || json.contains("\"count\": 21"));
         assertTrue(json, json.contains("would_execute"));
     }
 
     public void testIdenticalInputsProduceIdenticalArgv() {
         ReferenceBuild.Spec a = ReferenceBuild.parse(
                 "littlefs", "https://github.com/littlefs-project/littlefs.git", "v2.9.3",
-                List.of("lfs.c"), "gcc13", "", "-Os", List.of("LFS_NO_ASSERT"),
-                List.of(), true, "", List.of("gcc13"));
+                List.of("lfs.c"), "gcc13-arm", "", "-Os", List.of("LFS_NO_ASSERT"),
+                List.of(), true, "", List.of("gcc13-arm"));
         ReferenceBuild.Spec b = ReferenceBuild.parse(
                 "littlefs", "https://github.com/littlefs-project/littlefs.git", "v2.9.3",
-                List.of("lfs.c"), "gcc13", "", "-Os", List.of("LFS_NO_ASSERT"),
-                List.of(), true, "", List.of("gcc13"));
-        Path out = Path.of("/data/uploads/littlefs-v2.9.3-gcc13-Os.o");
+                List.of("lfs.c"), "gcc13-arm", "", "-Os", List.of("LFS_NO_ASSERT"),
+                List.of(), true, "", List.of("gcc13-arm"));
+        Path out = Path.of("/data/uploads/littlefs-v2.9.3-gcc13-arm-Os.o");
         assertEquals(a.commandLines(out), b.commandLines(out));
         assertEquals(a.cflags(), b.cflags());
+        assertTrue(a.cflags().contains("-mcpu=cortex-m0plus"));
     }
 
     public void testParseToolchainUrlsSplitsOnFirstColon() {
         Map<String, URI> urls = ReferenceBuild.parseToolchainUrls(
-                "gcc13:http://ghidra-builder:8092,gcc12:http://ghidra-builder-gcc12:8092");
-        assertEquals(URI.create("http://ghidra-builder:8092"), urls.get("gcc13"));
-        assertEquals(URI.create("http://ghidra-builder-gcc12:8092"), urls.get("gcc12"));
+                "gcc13-arm:http://ghidra-builder:8092,gcc12-arm:http://other-builder:8092");
+        assertEquals(URI.create("http://ghidra-builder:8092"), urls.get("gcc13-arm"));
+        assertEquals(URI.create("http://other-builder:8092"), urls.get("gcc12-arm"));
+        assertNull(urls.get("gcc13"));
+        assertTrue(ReferenceBuild.defaultToolchainUrls().keySet()
+                .containsAll(ReferenceBuild.DEFAULT_TOOLCHAINS));
+        URI one = URI.create("http://ghidra-builder:8092");
+        assertEquals(one, ReferenceBuild.defaultToolchainUrls().get("gcc10-arm"));
+        assertEquals(one, ReferenceBuild.defaultToolchainUrls().get("gcc12-arm"));
+        assertEquals(one, ReferenceBuild.defaultToolchainUrls().get("gcc13-arm"));
+    }
+
+    public void testWaitTimeoutReturnsTicketWithoutHarvestChecks() {
+        Map<String, Object> queued = new LinkedHashMap<>();
+        queued.put("ok", true);
+        queued.put("job_id", "build-1-aa");
+        queued.put("status", "queued");
+        client.setResponse(queued);
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                false,
+                "sources",
+                "",
+                null,
+                "",
+                null,
+                0);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("\"status\":\"started\"") || json.contains("\"status\": \"started\""));
+        assertTrue(json, json.contains("build-1-aa"));
+        assertTrue(json, json.contains("build_reference_status"));
+        assertFalse(json, json.contains("function_count"));
+        assertEquals(1, client.calls.size());
+    }
+
+    public void testBuildReferenceStatusPollsBuilder() {
+        Map<String, Object> snap = new LinkedHashMap<>();
+        snap.put("ok", true);
+        snap.put("job_id", "build-1-aa");
+        snap.put("status", "running");
+        client.setStatusResponse(snap);
+        Response r = svc.buildReferenceStatus("build-1-aa");
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("running"));
+        assertEquals(List.of("build-1-aa"), client.statusCalls);
+        Response listed = svc.buildReferenceStatus("");
+        assertTrue(listed.toJson(), listed.toJson().contains("jobs") || listed.toJson().contains("count"));
     }
 
     public void testRejectsFileRepo() {
@@ -341,6 +475,410 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         } catch (IllegalArgumentException e) {
             assertTrue(e.getMessage(), e.getMessage().contains("file:"));
         }
+    }
+
+    public void testFrameworkDryRunDoesNotCallBuilder() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true,
+                "framework",
+                "pico-sdk",
+                List.of("pico_stdlib", "hardware_i2c"),
+                "pico",
+                Map.of());
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("would_execute") || json.contains("\"dry_run\":true"));
+        assertTrue(json, json.contains("cmake"));
+        assertTrue(json, json.contains("hardware_i2c"));
+        assertTrue(json, json.contains("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o"));
+        assertFalse("sources compile must not appear", json.contains("-ffunction-sections"));
+        assertTrue("dry_run must not configure or compile", client.calls.isEmpty());
+    }
+
+    public void testFrameworkUnknownListsInstalledStubs() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true,
+                "framework",
+                "no-such-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("unknown framework"));
+        assertTrue(json, json.contains("pico-sdk"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testFrameworkEmptyLibrariesRefused() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true,
+                "framework",
+                "pico-sdk",
+                List.of(),
+                "pico",
+                Map.of());
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("libraries"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testFrameworkMissingNameListsStubs() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true,
+                "framework",
+                "",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("framework is required"));
+        assertTrue(r.toJson(), r.toJson().contains("pico-sdk"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testFrameworkStripDebugForcedFalseAndReturnsArtifacts() {
+        Map<String, Object> art = new LinkedHashMap<>();
+        art.put("path", tmp.resolve("uploads/pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o").toString());
+        art.put("sha256", "abc");
+        art.put("function_count", 7);
+        art.put("library", "hardware_i2c");
+        Map<String, Object> ok = new LinkedHashMap<>();
+        ok.put("ok", true);
+        ok.put("artifacts", List.of(art));
+        ok.put("function_count", 7);
+        ok.put("commit_sha", "cafebabe");
+        client.setResponse(ok);
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                false,
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertEquals(1, client.calls.size());
+        Map<?, ?> req = (Map<?, ?>) client.calls.get(0).get("request");
+        assertEquals(Boolean.FALSE, req.get("strip_debug"));
+        assertEquals("framework", req.get("mode"));
+        assertTrue(r.toJson(), r.toJson().contains("hardware_i2c"));
+        assertTrue(r.toJson(), r.toJson().contains("cafebabe"));
+    }
+
+    public void testFrameworkZeroFunctionHarvestRefused() {
+        Map<String, Object> art = new LinkedHashMap<>();
+        art.put("path", "x.o");
+        art.put("sha256", "abc");
+        art.put("function_count", 0);
+        art.put("library", "hardware_i2c");
+        Map<String, Object> ok = new LinkedHashMap<>();
+        ok.put("ok", true);
+        ok.put("artifacts", List.of(art));
+        client.setResponse(ok);
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                false,
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("0 defined functions"));
+        assertTrue(r.toJson(), r.toJson().contains("ELF"));
+    }
+
+    public void testFrameworkNamingIncludesLibraryAndBoard() {
+        ReferenceBuild.Spec spec = ReferenceBuild.parse(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                List.of("gcc13-arm"),
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        assertEquals(
+                "pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o",
+                spec.artifactName("hardware_i2c"));
+        ReferenceBuild.Spec w = ReferenceBuild.parse(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                List.of("gcc13-arm"),
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico_w",
+                Map.of());
+        assertEquals(
+                "pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico_w.o",
+                w.artifactName("hardware_i2c"));
+        assertFalse(spec.artifactName("hardware_i2c").equals(w.artifactName("hardware_i2c")));
+        List<List<String>> cmd = spec.commandLines(Path.of("/data/uploads"));
+        assertEquals("cmake", cmd.get(0).get(0));
+        assertTrue(cmd.get(0).toString(), cmd.get(0).contains("-DGHIDRA_BOARD=pico"));
+        assertFalse(cmd.toString(), cmd.toString().contains("--strip-debug"));
+    }
+
+    public void testSourcesModeUnchangedByFrameworkParams() {
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of("LFS_NO_ASSERT"),
+                List.of(),
+                true,
+                "",
+                true);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("arm-none-eabi-gcc"));
+        assertTrue(json, json.contains("littlefs-v2.9.3-gcc13-arm-Os.o"));
+        assertFalse(json, json.contains("cmake"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testManifestSkipsWhenSidecarHashMatches() throws Exception {
+        String yaml = "references:\n"
+                + "  - name: pico-sdk\n"
+                + "    mode: framework\n"
+                + "    framework: pico-sdk\n"
+                + "    repo: https://github.com/raspberrypi/pico-sdk.git\n"
+                + "    ref: 2.1.0\n"
+                + "    libraries: [hardware_i2c]\n"
+                + "    toolchain: gcc13-arm\n"
+                + "    opt: -Os\n"
+                + "    board: pico\n";
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads")
+                .resolve("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {1, 2, 3});
+        Response r = svc.buildManifest("", false);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertTrue(client.calls.isEmpty());
+        assertTrue(r.toJson(), r.toJson().contains("skipped"));
+        assertTrue(r.toJson(), r.toJson().contains("sidecar hash matches"));
+    }
+
+    public void testManifestRebuildsWhenSidecarMissing() throws Exception {
+        String yaml = picoSdkManifestYaml();
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads")
+                .resolve("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o");
+        Files.createDirectories(existing.getParent());
+        Files.write(existing, new byte[] {1, 2, 3});
+        stubFrameworkBuilderResponse(existing);
+        Response r = svc.buildManifest("", false);
+        assertEquals(1, client.calls.size());
+        assertFalse(r.toJson(), r.toJson().contains("\"skipped\":true"));
+    }
+
+    public void testManifestRebuildsWhenSidecarHashMismatches() throws Exception {
+        String yaml = picoSdkManifestYaml();
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads")
+                .resolve("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o");
+        Files.createDirectories(existing.getParent());
+        Files.write(existing, new byte[] {1, 2, 3});
+        Files.writeString(
+                FrameworkBuild.sidecarPath(existing),
+                "{\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}\n",
+                StandardCharsets.UTF_8);
+        stubFrameworkBuilderResponse(existing);
+        Response r = svc.buildManifest("", false);
+        assertEquals(1, client.calls.size());
+        assertFalse(r.toJson(), r.toJson().contains("\"skipped\":true"));
+    }
+
+    public void testManifestRebuildsWhenSidecarCorrupt() throws Exception {
+        String yaml = picoSdkManifestYaml();
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads")
+                .resolve("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o");
+        Files.createDirectories(existing.getParent());
+        Files.write(existing, new byte[] {1, 2, 3});
+        Files.writeString(FrameworkBuild.sidecarPath(existing), "{not json\n", StandardCharsets.UTF_8);
+        stubFrameworkBuilderResponse(existing);
+        Response r = svc.buildManifest("", false);
+        assertFalse("corrupt sidecar must not crash", r instanceof Response.Err && r.toJson().contains("Json"));
+        assertEquals(1, client.calls.size());
+        assertFalse(r.toJson(), r.toJson().contains("\"skipped\":true"));
+    }
+
+    public void testSourcesManifestSkipsWhenSidecarMatches() throws Exception {
+        String yaml = "references:\n"
+                + "  - name: littlefs\n"
+                + "    repo: https://github.com/littlefs-project/littlefs.git\n"
+                + "    ref: v2.9.3\n"
+                + "    sources: [lfs.c]\n"
+                + "    toolchain: gcc13-arm\n"
+                + "    opt: -Os\n";
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads").resolve("littlefs-v2.9.3-gcc13-arm-Os.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {9, 8, 7});
+        Response r = svc.buildManifest("", false);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertTrue(client.calls.isEmpty());
+        assertTrue(r.toJson(), r.toJson().contains("skipped"));
+    }
+
+    public void testArtifactIsCurrentTreatsMissingSidecarAsStale() throws Exception {
+        Path artifact = tmp.resolve("uploads").resolve("foo.o");
+        Files.createDirectories(artifact.getParent());
+        Files.write(artifact, new byte[] {1});
+        assertFalse(FrameworkBuild.artifactIsCurrent(artifact));
+        writeArtifactWithMatchingSidecar(artifact, new byte[] {1});
+        assertTrue(FrameworkBuild.artifactIsCurrent(artifact));
+        Files.delete(FrameworkBuild.sidecarPath(artifact));
+        assertFalse(FrameworkBuild.artifactIsCurrent(artifact));
+    }
+
+    public void testBuildReferenceDoesNotSkipExistingOutput() throws Exception {
+        Path existing = tmp.resolve("uploads").resolve("littlefs-v2.9.3-gcc13-arm-Os.o");
+        Files.createDirectories(existing.getParent());
+        Files.write(existing, new byte[] {1});
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of("LFS_NO_ASSERT"),
+                List.of(),
+                true,
+                "",
+                false);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertEquals(1, client.calls.size());
+    }
+
+    private static String picoSdkManifestYaml() {
+        return "references:\n"
+                + "  - name: pico-sdk\n"
+                + "    mode: framework\n"
+                + "    framework: pico-sdk\n"
+                + "    repo: https://github.com/raspberrypi/pico-sdk.git\n"
+                + "    ref: 2.1.0\n"
+                + "    libraries: [hardware_i2c]\n"
+                + "    toolchain: gcc13-arm\n"
+                + "    opt: -Os\n"
+                + "    board: pico\n";
+    }
+
+    private void stubFrameworkBuilderResponse(Path artifact) {
+        Map<String, Object> art = new LinkedHashMap<>();
+        art.put("path", artifact.toString());
+        art.put("bytes", 3);
+        art.put("sha256", "abc");
+        art.put("function_count", 3);
+        art.put("defined_functions", List.of("hardware_i2c_init"));
+        art.put("library", "hardware_i2c");
+        Map<String, Object> ok = new LinkedHashMap<>();
+        ok.put("ok", true);
+        ok.put("artifacts", List.of(art));
+        ok.put("function_count", 3);
+        ok.put("commit_sha", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        ok.put("cc_version", "arm-none-eabi-gcc 13.2.1");
+        client.setResponse(ok);
+    }
+
+    private static void writeArtifactWithMatchingSidecar(Path artifact, byte[] data) throws Exception {
+        Files.createDirectories(artifact.getParent());
+        Files.write(artifact, data);
+        String hex = FrameworkBuild.sha256Hex(artifact);
+        Files.writeString(
+                FrameworkBuild.sidecarPath(artifact),
+                "{\"sha256\":\"" + hex + "\"}\n",
+                StandardCharsets.UTF_8);
     }
 
     private static void deleteRecursively(Path dir) throws Exception {

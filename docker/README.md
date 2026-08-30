@@ -79,6 +79,8 @@ mvn clean package -P docker -DskipTests
 | `JAVA_OPTS` | `-Xmx8g -XX:+UseG1GC` | JVM options |
 | `GHIDRA_MCP_AUTH_TOKEN` | required | Bearer token; required for the 0.0.0.0 bind |
 | `GHIDRA_MCP_FILE_ROOT` | `/data` | Samples bind (`SAMPLES_DIR`) |
+| `GHIDRA_MCP_STUBS` | `/opt/ghidra-builder/stubs` | Framework stub projects for `mode=framework` |
+| `GHIDRA_MCP_BUILDER_URL` | `http://ghidra-builder:8092` | One builder, every identity. Internal network only. |
 | `GHIDRA_MCP_BSIM_ROOT` | `/srv/ghidra/bsim` | Confines `file:` BSim URLs. Dedicated volume, not under `/data`. |
 | `GHIDRA_SERVER_HOST` | `BIND_ADDR` | RMI address the headless client dials |
 | `BIND_ADDR` | required | Host IP for RMI publish and `-ip` |
@@ -98,31 +100,40 @@ mvn clean package -P docker -DskipTests
 | `ghidra-bsim` | `/srv/ghidra/bsim` | H2 BSim databases (`file:/srv/ghidra/bsim/<db>`). Writable by uid 1000. Back this up; regenerating a corpus means recompiling everything in it. |
 | `builder-src-cache` | `/src` (builder) | Bare git clones for `build_reference`. Persists so a second build of the same ref does not re-clone. |
 | `docker/references.yaml` | `/data/references.yaml` | Corpus definition. `build_manifest` with no path reads this. |
+| `docker/stubs/` | `/opt/ghidra-builder/stubs` | Framework stub projects (`pico-sdk` shipped). Listed by `mode=framework` validation. |
 
 ## Reference builder
 
 The Ghidra image has no compiler and runs as uid 1000. Reference libraries
-are compiled in sibling `ghidra-builder:gcc10` / `:gcc12` / `:gcc13`
-containers (the tag *is* the compiler; do not use `:latest`). They listen
-on the compose network only — no host ports, no docker.sock in ghidra-mcp.
-`build_reference` POSTs to them; objects land on the shared `/data/uploads`
-mount as uid 1000, and `import_file` loads that path. `SAMPLES_DIR` on the
-host must be writable by uid 1000 — the same constraint as ghidra-mcp.
-`GET /health` is unauthenticated so the image healthcheck does not put
-the auth token on the process command line; `POST /build` still requires
-the token. Images install `libnewlib-arm-none-eabi` explicitly:
-`gcc-arm-none-eabi` only Recommends it, and `--no-install-recommends`
-would leave the cross compiler without `<string.h>`.
+are compiled in one always-on `ghidra-builder` container that holds
+gcc10-arm, gcc12-arm, and gcc13-arm (the identity
+`<compiler><major>-<target>` selects the binary; it is not an image tag).
+It listens on the compose network only — no host ports, no Docker socket
+in any service. `build_reference` POSTs a job and polls; objects land on
+the shared `/data/uploads` mount as uid 1000, and `import_file` loads that
+path. `SAMPLES_DIR` on the host must be writable by uid 1000 — the same
+constraint as ghidra-mcp. There is no auth on the builder: the listener
+is not published off the compose network. `GET /health` is what the
+image healthcheck probes. Each identity is a pinned ARM GNU tarball
+(`docker/builder/toolchains.lock`), copied from a fetch stage so the
+download never sits in a final layer. Distro `gcc-arm-none-eabi` is not
+used. Framework builds also need host `gcc`/`g++` (pico-sdk's
+pioasm is a nested host compile), `cmake`, and `ninja-build`.
+Stubs live in `docker/stubs/<framework>/`
+(shipped: `pico-sdk`) and are copied into the image at
+`/opt/ghidra-builder/stubs`. Adding `stubs/zephyr/` is another directory,
+not a new MCP parameter. `mode=framework` harvests `.o`/`.a` from the
+CMake build tree, never the linked ELF.
 
-```bash
-# from repo root
-docker/build-builders.sh
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
-```
+Portainer (or `docker compose up --build`) starts the builder with the
+rest of the stack. Corpus updates are MCP tools: `build_manifest`,
+`build_reference`, `build_reference_status`. No shell on the Docker host.
 
-`dry_run=true` returns the gcc command line without cloning or compiling.
-The manifest at `docker/references.yaml` is the corpus; the BSim database
-is derived from it.
+`dry_run=true` returns the compiler or cmake command line without cloning
+or compiling. The manifest at `docker/references.yaml` is the corpus;
+the BSim database is derived from it. Each object gets a JSON sidecar
+(`<artifact>.json`) with the resolved commit, compiler `--version`, and
+sha256. `build_manifest` skips a job when that hash still matches.
 
 ## API Endpoints
 

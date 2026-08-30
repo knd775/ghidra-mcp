@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 263,
+  "total_endpoints": 264,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -354,9 +354,10 @@
       "category": "bsim",
       "params": [
         "path",
-        "dry_run"
+        "dry_run",
+        "wait_seconds"
       ],
-      "description": "Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them. A matrix of toolchain x opt is how the corpus covers compiler drift. dry_run returns every command line without cloning or compiling."
+      "description": "Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them. A matrix of toolchain × opt (and board, for framework entries) is how the corpus covers compiler drift. Jobs whose artifact exists and whose sidecar sha256 still matches are skipped; a missing or mismatched sidecar rebuilds. dry_run returns every command line without cloning or compiling. One shared wait_seconds deadline covers the whole matrix; unfinished jobs return a job_id for build_reference_status."
     },
     {
       "path": "/build_reference",
@@ -374,9 +375,24 @@
         "extra_flags",
         "strip_debug",
         "output_name",
-        "dry_run"
+        "dry_run",
+        "mode",
+        "framework",
+        "libraries",
+        "board",
+        "config",
+        "wait_seconds"
       ],
-      "description": "Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through this tool; the shared volume is the handoff. ref must be a tag or SHA (bare branch names are refused). strip_debug keeps .symtab. dry_run returns the gcc command line and output path without cloning or compiling."
+      "description": "Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through this tool; the shared volume is the handoff. ref must be a tag or SHA (bare branch names are refused). strip_debug keeps .symtab. dry_run returns the compiler command line and output path without cloning or compiling. Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode <name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework configures a stub (docker/stubs/<framework>/), builds, and harvests build-tree objects \u2014 never the linked ELF. Each artifact is written with a <artifact>.json sidecar (resolved commit SHA, compiler --version, sha256). Long builds return {status: started, job_id} when they outlive wait_seconds; poll build_reference_status."
+    },
+    {
+      "path": "/build_reference_status",
+      "method": "GET",
+      "category": "bsim",
+      "params": [
+        "job_id"
+      ],
+      "description": "Status and result of a builder job. build_reference and build_manifest return {status: started, job_id} when a compile outlives wait_seconds; poll this until status is done or failed. Blank job_id lists every retained job."
     },
     {
       "path": "/bsim_apply_matches",
@@ -459,7 +475,7 @@
         "program",
         "wait_seconds"
       ],
-      "description": "Query one function or the whole open program against a BSim database. Each match has separate numeric similarity and confidence fields. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity."
+      "description": "Query one function or the whole open program against a BSim database. Filter on confidence, not similarity. Cross-compiler matches legitimately score 0.2-0.4 similarity; confidence indicates whether that overlap is meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 (a starting floor, not a calibration). Each match has separate numeric similarity and confidence, plus the source executable name and architecture. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity. A similarity_threshold above 0.5 silently drops cross-compiler matches and adds a warning. Queries run a helper analyzeHeadless JVM and can take minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/bulk_fuzzy_match",

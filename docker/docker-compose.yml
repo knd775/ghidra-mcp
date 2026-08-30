@@ -48,8 +48,6 @@ services:
     depends_on:
       - ghidra-server
       - builder
-      - builder-gcc12
-      - builder-gcc10
     environment:
       GHIDRA_MCP_PORT: "8089"
       GHIDRA_MCP_BIND_ADDRESS: "0.0.0.0"
@@ -64,8 +62,10 @@ services:
       GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
       GHIDRA_MCP_FILE_ROOT: /data
       GHIDRA_MCP_BSIM_ROOT: /srv/ghidra/bsim
-      # Internal builder control plane (no host ports). toolchain → URL.
-      GHIDRA_MCP_BUILDER_URLS: "gcc13:http://ghidra-builder:8092,gcc12:http://ghidra-builder-gcc12:8092,gcc10:http://ghidra-builder-gcc10:8092"
+      # One builder, every identity. No docker.sock, no host ports.
+      GHIDRA_MCP_BUILDER_URL: "http://ghidra-builder:8092"
+      # Stub listing for mode=framework dry_run (builder image also bakes these in).
+      GHIDRA_MCP_STUBS: /opt/ghidra-builder/stubs
 
       # -Duser.name. Must match the Ghidra Server account.
       GHIDRA_USER: ${GHIDRA_SERVER_USER:?set in .env}
@@ -78,6 +78,7 @@ services:
       # Absolute host path. Relative paths are unreliable in Portainer.
       - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
       - ./references.yaml:/data/references.yaml:ro
+      - ./stubs:/opt/ghidra-builder/stubs:ro
       - ghidra-mcp-home:/home/ghidra
       - ghidra-mcp-projects:/projects
       - ghidra-bsim:/srv/ghidra/bsim
@@ -123,77 +124,25 @@ services:
       # Must include the tunnel hostname or forwarded Host headers are rejected.
       GHIDRA_MCP_ALLOWED_HOSTS: ${GHIDRA_MCP_ALLOWED_HOSTS:?set in .env}
 
-  # Reference-library toolchain. Long-lived, idle, no host ports. ghidra-mcp
-  # POSTs to it on the compose network (not docker exec: that would give this
-  # process the host's container runtime). Source cache
-  # is a named volume so a second build of the same ref does not re-clone.
-  # One container per compiler version — the image tag is the compiler.
+  # One resident builder. Holds gcc10-arm, gcc12-arm, and gcc13-arm.
+  # ghidra-mcp POSTs jobs on the compose network (not docker exec: that
+  # would require docker.sock in the process that parses untrusted binaries).
+  # No host ports, no tunnel, no auth beyond the internal network.
   builder:
-    image: ghidra-builder:gcc13
+    image: ghidra-builder
     build:
       context: ..
       dockerfile: docker/Dockerfile.builder
-      args:
-        BASE_IMAGE: ubuntu:24.04
-        TOOLCHAIN_TAG: gcc13
     pull_policy: missing
     container_name: ghidra-builder
     hostname: ghidra-builder
     restart: unless-stopped
     user: "1000:1000"
     environment:
-      TOOLCHAIN_TAG: gcc13
       BUILDER_PORT: "8092"
-      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
       GHIDRA_MCP_FILE_ROOT: /data
-    volumes:
-      - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
-      - builder-src-cache:/src
-    networks:
-      - ghidra
-
-  builder-gcc12:
-    image: ghidra-builder:gcc12
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.builder
-      args:
-        BASE_IMAGE: debian:bookworm
-        TOOLCHAIN_TAG: gcc12
-    pull_policy: missing
-    container_name: ghidra-builder-gcc12
-    hostname: ghidra-builder-gcc12
-    restart: unless-stopped
-    user: "1000:1000"
-    environment:
-      TOOLCHAIN_TAG: gcc12
-      BUILDER_PORT: "8092"
-      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
-      GHIDRA_MCP_FILE_ROOT: /data
-    volumes:
-      - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
-      - builder-src-cache:/src
-    networks:
-      - ghidra
-
-  builder-gcc10:
-    image: ghidra-builder:gcc10
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.builder
-      args:
-        BASE_IMAGE: ubuntu:22.04
-        TOOLCHAIN_TAG: gcc10
-    pull_policy: missing
-    container_name: ghidra-builder-gcc10
-    hostname: ghidra-builder-gcc10
-    restart: unless-stopped
-    user: "1000:1000"
-    environment:
-      TOOLCHAIN_TAG: gcc10
-      BUILDER_PORT: "8092"
-      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
-      GHIDRA_MCP_FILE_ROOT: /data
+      GHIDRA_MCP_STUBS: /opt/ghidra-builder/stubs
+      GHIDRA_MCP_TOOLCHAINS: /opt/ghidra-builder/toolchains
     volumes:
       - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
       - builder-src-cache:/src

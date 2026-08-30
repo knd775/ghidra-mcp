@@ -1,20 +1,7 @@
 #!/bin/sh
-# Build the three ghidra-builder:<gccN> images. Tags are the compiler; there
-# is no :latest. Run from the repo root or from docker/.
+# Optional local helper: same one-image build Compose / Portainer already
+# run. The operator path is `docker compose up --build`. Corpus updates go
+# through build_manifest / build_reference, not this script.
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-file="$root/docker/Dockerfile.builder"
-
-build_one() {
-    tag=$1
-    base=$2
-    docker build -f "$file" \
-        --build-arg "BASE_IMAGE=$base" \
-        --build-arg "TOOLCHAIN_TAG=$tag" \
-        -t "ghidra-builder:$tag" \
-        "$root"
-}
-
-build_one gcc10 ubuntu:22.04
-build_one gcc12 debian:bookworm
-build_one gcc13 ubuntu:24.04
+docker build -f "$root/docker/Dockerfile.builder" -t ghidra-builder "$root"

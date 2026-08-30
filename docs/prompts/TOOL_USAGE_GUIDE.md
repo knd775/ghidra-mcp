@@ -517,7 +517,7 @@ java -jar GhidraMCPHeadless.jar --bind 0.0.0.0 --port 8089
 
 ---
 
-See `docs/prompts/BSIM.md` for the BSim tools (`build_reference`, `build_manifest`, `bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`, `bsim_list_corpus`). Query returns similarity and confidence as separate numbers; `min_confidence` on apply has no default; `dry_run` defaults to true and does not rename. `build_reference(dry_run=true)` clones nothing and compiles nothing.
+See `docs/prompts/BSIM.md` for the BSim tools (`build_reference`, `build_manifest`, `build_reference_status`, `bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`, `bsim_list_corpus`). Query defaults to `similarity_threshold=0.0` and `confidence_threshold=10.0` — filter on confidence; cross-compiler matches sit at 0.2–0.4 similarity. `min_confidence` on apply has no default; `dry_run` defaults to true and does not rename. `build_reference(dry_run=true)` clones nothing and compiles nothing. Each artifact gets a JSON sidecar; `build_manifest` skips when that sidecar hash still matches. `mode="framework"` harvests per-library objects from a stub CMake build, never the linked ELF. Long compiles return a job id; poll `build_reference_status`.
 
 ---
 

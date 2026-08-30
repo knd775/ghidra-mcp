@@ -6,6 +6,7 @@ import com.xebyte.core.BSimJobs;
 import com.xebyte.core.BSimService;
 import com.xebyte.core.BSimTestCredentials;
 import com.xebyte.core.EndpointDef;
+import com.xebyte.core.Param;
 import com.xebyte.core.ProgramProvider;
 import com.xebyte.core.Response;
 import com.xebyte.core.ThreadingStrategy;
@@ -258,6 +259,34 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("min_confidence"));
         assertFalse("must not invent a default floor", json.contains("\"min_confidence\":0"));
         assertTrue(commands.isEmpty());
+    }
+
+    public void testQueryThresholdDefaultsAreConfidenceFirst() throws Exception {
+        java.lang.reflect.Method query = BSimService.class.getMethod(
+                "query", String.class, String.class, double.class, double.class,
+                int.class, String.class, int.class);
+        Param similarity = paramNamed(query, "similarity_threshold");
+        Param confidence = paramNamed(query, "confidence_threshold");
+        assertEquals("0.0", similarity.defaultValue());
+        assertEquals("10.0", confidence.defaultValue());
+
+        java.lang.reflect.Method apply = BSimService.class.getMethod(
+                "applyMatches", String.class, Double.class, double.class, boolean.class,
+                boolean.class, double.class, int.class, String.class, int.class);
+        Param minConfidence = paramNamed(apply, "min_confidence");
+        assertEquals("apply still has no default floor", Param.NO_DEFAULT, minConfidence.defaultValue());
+    }
+
+    private static Param paramNamed(java.lang.reflect.Method method, String name) {
+        for (java.lang.annotation.Annotation[] anns : method.getParameterAnnotations()) {
+            for (java.lang.annotation.Annotation a : anns) {
+                if (a instanceof Param p && name.equals(p.value())) {
+                    return p;
+                }
+            }
+        }
+        fail("no @Param(\"" + name + "\") on " + method.getName());
+        return null;
     }
 
     public void testQueryRequiresProgram() {

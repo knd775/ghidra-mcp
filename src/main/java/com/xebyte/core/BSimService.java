@@ -307,13 +307,15 @@ public class BSimService {
 
     @McpTool(path = "/bsim_query", method = "POST",
             description = "Query one function or the whole open program against a BSim database. "
-                    + "Each match has separate numeric similarity and confidence fields, plus the "
-                    + "source executable name and architecture. The result is flagged ambiguous "
-                    + "when the top two differently-named hits sit within 0.05 similarity. "
-                    + "Never a bare ranked list. Short generic functions (accessors, thunks) "
-                    + "often have high similarity and low confidence — that split is the point. "
-                    + "Queries run a helper analyzeHeadless JVM and can take minutes: expect a "
-                    + "job_id, then poll bsim_job_status.",
+                    + "Filter on confidence, not similarity. Cross-compiler matches legitimately "
+                    + "score 0.2-0.4 similarity; confidence indicates whether that overlap is "
+                    + "meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 "
+                    + "(a starting floor, not a calibration). Each match has separate numeric "
+                    + "similarity and confidence, plus the source executable name and architecture. "
+                    + "Flagged ambiguous when the top two differently-named hits sit within 0.05 "
+                    + "similarity. A similarity_threshold above 0.5 silently drops cross-compiler "
+                    + "matches and adds a warning. Queries run a helper analyzeHeadless JVM and "
+                    + "can take minutes: expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response query(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -321,11 +323,13 @@ public class BSimService {
             @Param(value = "function", source = ParamSource.BODY, defaultValue = "",
                     description = "Function name or address. Omit to query every function.")
                     String function,
-            @Param(value = "similarity_threshold", source = ParamSource.BODY, defaultValue = "0.7",
-                    description = "Minimum BSim similarity (0-1)") double similarityThreshold,
-            @Param(value = "confidence_threshold", source = ParamSource.BODY, defaultValue = "0.0",
-                    description = "Minimum BSim confidence/significance. 0.0 returns everything "
-                            + "the index considers; raise it to hide generic hits.")
+            @Param(value = "similarity_threshold", source = ParamSource.BODY, defaultValue = "0.0",
+                    description = "Minimum BSim similarity (0-1). Default 0.0: cross-compiler "
+                            + "matches sit at 0.2-0.4. Values above 0.5 typically return nothing "
+                            + "against a real corpus.") double similarityThreshold,
+            @Param(value = "confidence_threshold", source = ParamSource.BODY, defaultValue = "10.0",
+                    description = "Minimum BSim confidence. Default 10.0. Confidence, not "
+                            + "similarity, is the discriminating signal for cross-build matching.")
                     double confidenceThreshold,
             @Param(value = "max_matches", source = ParamSource.BODY, defaultValue = "10",
                     description = "Maximum matches per function") int maxMatches,
@@ -634,7 +638,9 @@ public class BSimService {
             String md5 = program.getExecutableMD5();
             List<BSimMatches.FunctionResult> results = BSimMatches.parseQueryPayload(payload, md5);
             if (function != null && !function.isBlank() && results.size() == 1) {
-                return Response.ok(results.get(0).toMap());
+                Map<String, Object> body = results.get(0).toMap();
+                BSimMatches.attachSimilarityWarning(body, similarity);
+                return Response.ok(body);
             }
             List<Map<String, Object>> rows = new ArrayList<>();
             for (BSimMatches.FunctionResult fr : results) rows.add(fr.toMap());
@@ -642,6 +648,7 @@ public class BSimService {
             body.put("program", program.getName());
             body.put("results", rows);
             body.put("count", rows.size());
+            BSimMatches.attachSimilarityWarning(body, similarity);
             return Response.ok(body);
         } finally {
             deleteRecursively(workDir);

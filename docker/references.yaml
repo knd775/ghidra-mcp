@@ -1,14 +1,19 @@
 # BSim reference corpus. The database is derived from this file and should
 # be rebuildable from scratch: build_manifest → import_file → bsim_ingest.
 #
-# One entry expands through its matrix. littlefs × {gcc10,gcc12,gcc13} ×
-# {-Os,-O2,-O3} is nine objects; that is the drift that made a single GCC 13
-# object match the right functions at 0.27–0.35 similarity. Version barely
-# moved lfs_dir_fetchmatch (1040–1120 bytes across v2.4.2–v2.9.3); compiler
-# version did.
+# One entry expands through its matrix. littlefs × {gcc10-arm,gcc12-arm,
+# gcc13-arm} × {-Os,-O2,-O3} is nine objects; that is the drift that made a
+# single GCC 13 object match the right functions at 0.27–0.35 similarity.
+# Version barely moved lfs_dir_fetchmatch (1040–1120 bytes across
+# v2.4.2–v2.9.3); compiler version did. Family drift (Clang vs GCC) is larger
+# still — add clangN-arm as an axis when that image exists, not a new tool.
 #
 # Names land on disk as <name>-<ref>-<toolchain>-<opt>.o so bsim_list_corpus
-# can still be read in six months. Pin tags or SHAs, never branches.
+# can still be read in six months. toolchain is <compiler><major>-<target>.
+# Framework entries add -<library>[-<board>]. Pin tags or SHAs, never branches.
+#
+# littlefs × 3 toolchains × 3 opt = 9. pico-sdk × 3 toolchains × 2 opt ×
+# 2 boards = 12. build_manifest skips jobs whose outputs already exist.
 
 references:
   - name: littlefs
@@ -19,5 +24,23 @@ references:
     arch_flags: "-mcpu=cortex-m0plus -mthumb"
     strip_debug: true
     matrix:
-      toolchain: [gcc10, gcc12, gcc13]
+      toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]
       opt: [-Os, -O2, -O3]
+
+  - name: pico-sdk
+    mode: framework
+    framework: pico-sdk
+    repo: https://github.com/raspberrypi/pico-sdk.git
+    ref: 2.1.0
+    libraries:
+      - pico_stdlib
+      - hardware_i2c
+      - hardware_spi
+      - hardware_pio
+      - hardware_flash
+      - hardware_dma
+      - pico_multicore
+    matrix:
+      toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]
+      opt: [-Os, -O2]
+      board: [pico, pico_w]

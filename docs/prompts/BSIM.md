@@ -1,6 +1,6 @@
 # BSim cross-build matching
 
-Seven MCP tools wrap Ghidra's `bsim` CLI and the sibling toolchain
+Eight MCP tools wrap Ghidra's `bsim` CLI and the sibling toolchain
 container that feeds it. They do not invent a matching algorithm.
 Byte/opcode hashes fail across GCC versions. The older fuzzy matcher
 produced ranked lists that looked authoritative and were not:
@@ -27,35 +27,67 @@ build_reference(name="littlefs",
                 repo="https://github.com/littlefs-project/littlefs.git",
                 ref="v2.9.3",          # tag or SHA; branches are refused
                 sources=["lfs.c"],
-                toolchain="gcc13",
+                toolchain="gcc13-arm",
                 arch_flags="-mcpu=cortex-m0plus -mthumb",
                 opt="-Os",
                 defines=["LFS_NO_MALLOC", "LFS_NO_ASSERT"])
 ```
 
-That writes `/data/uploads/littlefs-v2.9.3-gcc13-Os.o` as uid 1000.
+That writes `/data/uploads/littlefs-v2.9.3-gcc13-arm-Os.o` as uid 1000.
 `import_file` can load that path with no copy. Then `bsim_ingest`.
+
+Frameworks (Pico SDK, later Zephyr) cannot be a file list: headers are
+generated at configure time. `mode="framework"` builds a stub under
+`docker/stubs/<framework>/` and harvests per-library objects:
+
+```
+build_reference(name="pico-sdk",
+                repo="https://github.com/raspberrypi/pico-sdk.git",
+                ref="2.1.0",
+                mode="framework",
+                framework="pico-sdk",
+                libraries=["hardware_i2c", "pico_stdlib"],
+                board="pico",
+                toolchain="gcc13-arm",
+                opt="-Os")
+```
+
+That writes `pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o` (and one
+file per harvested library, including submodules such as TinyUSB). The
+stub's `main.c` must not call those libraries — that is the test that
+harvesting did not use the `--gc-sections`'d ELF.
 
 A corpus needs a matrix, not nine hand-written calls.
 `docker/references.yaml` is the corpus definition; `build_manifest` expands
-it. littlefs × {gcc10, gcc12, gcc13} × {-Os, -O2, -O3} is nine objects.
-Compiler version is why: every littlefs from v2.4.2 to v2.9.3 produced
-`lfs_dir_fetchmatch` at 1040–1120 bytes under GCC 13.2, while the firmware's
-was 1416. pico-sdk projects are commonly GCC 10–12. The builder image
-tag *is* the compiler (`ghidra-builder:gcc10`, `:gcc12`, `:gcc13`). There
-is no `:latest`. Images install `libnewlib-arm-none-eabi` so a `-c`
-compile has `<string.h>` (`gcc-arm-none-eabi` only Recommends it).
+it. littlefs × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2, -O3} is nine
+objects. pico-sdk is a **framework** entry: one stub CMake project
+(`docker/stubs/pico-sdk/`) × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2}
+× {pico, pico_w} is twelve configure/build jobs, each harvesting several
+per-library objects. Compiler version is why: every littlefs from v2.4.2 to v2.9.3
+produced `lfs_dir_fetchmatch` at 1040–1120 bytes under GCC 13.2, while the
+firmware's was 1416. pico-sdk projects are commonly GCC 10–12. One
+builder image holds gcc10-arm, gcc12-arm, and gcc13-arm; the identity
+`<compiler><major>-<target>` selects the binary. There is no
+`:gcc13-arm` service and no Docker socket. Clang later is a layer in
+the same image and a matrix axis, not a new tool. Pins live in
+`docker/builder/toolchains.lock` (ARM GNU 10.3-2021.10 / 12.2.Rel1 /
+13.2.Rel1), not distro `gcc-arm-none-eabi`.
 
-`dry_run=true` returns the gcc command line and output path. It clones
-nothing and compiles nothing.
+`dry_run=true` returns the gcc or cmake command line and output path. It clones
+nothing and compiles nothing. Each artifact gets a `<artifact>.json` sidecar
+(resolved commit SHA, the compiler's own `--version` line, sha256). `build_manifest`
+skips a job when the artifact exists and that sidecar hash still matches; a
+missing or mismatched sidecar rebuilds. Compiles that outlive `wait_seconds`
+(default 45, max 55) return `{status: started, job_id}`; poll
+`build_reference_status`.
 
-- Ingest **with symbols**. `strip_debug` keeps `.symtab`. A stripped
-  binary adds signature noise and yields no names.
+- Ingest **with symbols**. `strip_debug` keeps `.symtab`. Framework mode never
+  strips. A stripped binary adds signature noise and yields no names.
 - Ingest finished analysis too. Each check-in becomes corpus for the next
   target.
 
 Suggested `listexes` names: `<lib>-<version>-<compiler>-<optlevel>`, e.g.
-`littlefs-v2.9.3-gcc13-Os`.
+`littlefs-v2.9.3-gcc13-arm-Os`.
 
 Priority for this environment: littlefs, Frotz, pico-sdk, newlib, FreeRTOS.
 
@@ -92,27 +124,51 @@ before the CLI runs.
 ### `build_reference`
 
 ```
-build_reference(name, repo, ref, sources, toolchain="gcc13",
-                 arch_flags="-mcpu=cortex-m0plus -mthumb", opt="-Os",
+build_reference(name, repo, ref, sources=[], toolchain="gcc13-arm",
+                 arch_flags="", opt="-Os",
                  defines=[], extra_flags=[], strip_debug=True,
-                 output_name=None, dry_run=False)
+                 output_name=None, dry_run=False,
+                 mode="sources", framework=None, libraries=[],
+                 board=None, config={}, wait_seconds=45)
 ```
 
-Compiles in the `ghidra-builder:<toolchain>` container and writes
-`/data/uploads/<name>-<ref>-<toolchain>-<opt>.o`. Returns path, bytes,
-sha256, defined-function count, and the resolved commit SHA. `ref` must
-be a tag or commit; `main` is refused. A compile failure returns compiler
-stderr. Zero defined functions is a refuse, not a silent empty object.
-`dry_run=true` clones nothing and compiles nothing.
+`mode="sources"` (default) compiles named `.c` files and writes
+`/data/uploads/<name>-<ref>-<toolchain>-<opt>.o`. `mode="framework"`
+ignores `sources`, configures `docker/stubs/<framework>/` against the
+cloned SDK, and harvests **build-tree** `.o`/`.a` files — never the
+linked ELF. Names are
+`<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o`. Returns a list
+of artifacts (path, sha256, function_count, library). `libraries` empty
+is an error. Zero harvested functions is a refuse (usually means the ELF
+was harvested). `strip_debug` is forced false. `toolchain` is
+`<compiler><major>-<target>` (gcc13-arm, clang17-arm). Blank `arch_flags`
+uses the identity default. `ref` must be a tag or commit; `main` is
+refused. Each artifact is written with `<artifact>.json`: resolved
+commit SHA, the compiler's `--version` line, sha256. Framework mode
+writes one sidecar per harvested library (`library`, `board`, `config`).
+`dry_run=true` clones nothing, configures nothing, and compiles
+nothing. A compile that outlives `wait_seconds` returns
+`{status: "started", job_id}` — poll `build_reference_status`.
 
 ### `build_manifest`
 
 ```
-build_manifest(path="", dry_run=False)
+build_manifest(path="", dry_run=False, wait_seconds=45)
 ```
 
 Expands `docker/references.yaml` (or a path under FILE_ROOT). Empty
 `path` uses `/data/references.yaml` then the copy baked into the JAR.
+Jobs whose artifact exists and whose sidecar sha256 still matches are
+skipped. Delete the sidecar to force a rebuild. One shared `wait_seconds`
+covers the matrix; leftovers are tickets.
+
+### `build_reference_status`
+
+```
+build_reference_status(job_id="")
+```
+
+Poll a builder job. Blank `job_id` lists retained jobs.
 
 ### `bsim_create_db`
 
@@ -154,18 +210,31 @@ never by `dry_run`.
 ### `bsim_query`
 
 ```
-bsim_query(db_url, program, function=None, similarity_threshold=0.7,
-           confidence_threshold=0.0, max_matches=10, wait_seconds=45)
+bsim_query(db_url, program, function=None, similarity_threshold=0.0,
+           confidence_threshold=10.0, max_matches=10, wait_seconds=45)
 ```
+
+Filter on confidence, not similarity. Cross-compiler matches
+legitimately score 0.2–0.4 similarity; confidence indicates whether that
+overlap is meaningful. The old default (`similarity_threshold=0.7`)
+returned nothing against a differently-compiled reference. 10.0 is a
+starting floor from one littlefs cross-build, not a calibration.
 
 Every match has `similarity` and `confidence` as separate numbers, plus
 the source executable name and architecture. If the top two
 differently-named hits are within 0.05 similarity, `ambiguous` is true.
+A `similarity_threshold` above 0.5 adds a warning: it will silently
+drop the matches this feature exists to find.
 
 A short generic function (an accessor, a thunk) can still score high
 similarity. It should come back with **low confidence**. That split is
 the whole feature. If it does not, BSim is not solving this problem and
 the tools should not be used to rename anything.
+
+`bsim_apply_matches` still requires an explicit `min_confidence` and
+still queries at `similarity_threshold=0.7` / `min_similarity=0.8`
+unless you pass those. Cross-build apply needs the same 0.0 similarity
+floor as query; do not copy the apply defaults onto query.
 
 ### `bsim_apply_matches`
 

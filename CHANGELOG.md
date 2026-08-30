@@ -22,22 +22,49 @@ only match what is in the corpus, and for embedded targets nothing is
 downloadable. The Ghidra container cannot compile (uid 1000, no compiler),
 and moving object bytes through an agent tool call has already silently
 corrupted a 34 KB file (same length, different sha256). A sibling
-`ghidra-builder:gcc10` / `:gcc12` / `:gcc13` service clones a pinned tag,
+`ghidra-builder` service clones a pinned tag,
 compiles onto the shared `/data` volume, and `import_file` loads that path.
 Compiler version is the design driver: GCC 13.2 littlefs matched the right
 names at 0.27–0.35 similarity because the firmware was built with GCC 10–12;
-`lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. The
-image tag *is* the compiler — there is no `:latest`. Images install
-`libnewlib-arm-none-eabi` explicitly (`gcc-arm-none-eabi` only Recommends
-it; `--no-install-recommends` otherwise drops `<string.h>`). `ref` must
-be a tag or SHA. `dry_run` returns the gcc command line and does not clone.
+`lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. One
+image holds gcc10-arm, gcc12-arm, and gcc13-arm; the identity string
+selects the binary, not a compose service. There is no Docker socket
+anywhere: `ghidra-mcp` POSTs to `http://ghidra-builder:8092/build` and
+gets a job id back; `GET /build/{id}` (MCP: `build_reference_status`)
+retrieves a compile that outlives the ~60s MCP hop. Clang later is a
+layer in the same image and a manifest axis, not a new MCP parameter.
+Each identity is a pinned ARM GNU tarball (`docker/builder/toolchains.lock`:
+gcc10-arm 10.3-2021.10, gcc12-arm 12.2.Rel1, gcc13-arm 13.2.Rel1),
+fetched in a build stage so the archive never lands in the final image.
+Distro `gcc-arm-none-eabi` is not used: the archive moves under you.
+`ref` must
+be a tag or SHA. `dry_run` returns the compiler command line and does not clone.
 Manifest `docker/references.yaml` expands littlefs × three toolchains × three
-opt levels to nine objects. `strip --strip-debug` keeps `.symtab`.
+opt levels to nine objects, and pico-sdk × three toolchains × two opt levels
+× two boards (`pico`, `pico_w`) to twelve framework jobs. `mode=framework`
+configures `docker/stubs/<framework>/`, builds, and harvests per-library
+objects from the CMake build tree — never the linked ELF (`--gc-sections`
+would keep only what the stub's `main.c` referenced). `strip --strip-debug`
+keeps `.symtab`; framework mode never strips.
 
 Every match carries separate numeric `similarity` and `confidence`. The top two
 differently-named hits within 0.05 similarity are `ambiguous` and are never
-applied. `min_confidence` has no default. `dry_run` defaults to true and does
-not call `setName`. `skip_named` defaults to true.
+applied. `bsim_query` defaults to `similarity_threshold=0.0` and
+`confidence_threshold=10.0`: cross-compiler matches sit at 0.2–0.4 similarity,
+and confidence is the discriminating signal (measured: correct littlefs hits at
+31–35, chance matches at 0.17–3.6, a generic `lfs_deinit` at 12.8 just above
+the floor). The previous 0.7 similarity default returned nothing against a
+differently-compiled reference. Passing `similarity_threshold` above 0.5 adds
+a warning. `min_confidence` on apply still has no default. `dry_run` defaults
+to true and does not call `setName`. `skip_named` defaults to true.
+
+Each `build_reference` artifact is written with a JSON sidecar
+(`<artifact>.json`): resolved commit SHA (even when `ref` was a tag), the
+compiler's own `--version` line, sha256 of the object, toolchain, opt,
+defines. Framework mode writes one sidecar per harvested library, with
+`library` and `board`. `build_manifest` skips a job only when the artifact
+exists and that sidecar hash still matches; a missing or mismatched sidecar
+rebuilds rather than trusting the filename.
 
 `bsim_ingest` no longer requires `program=` under
 `GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS` — its target is `source` (a ghidraURL).
