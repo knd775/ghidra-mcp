@@ -44,6 +44,10 @@ docker build -t ghcr.io/knd775/ghidra-mcp-headless:dev -f docker/Dockerfile .
 
 # Python MCP bridge (python:3.12-slim)
 docker build -t ghcr.io/knd775/ghidra-mcp-bridge:dev -f docker/Dockerfile.bridge .
+
+# Reference builder (ARM GNU prefixes + distro gcc-13). First build
+# downloads the pinned tarballs; after that, pull from GHCR.
+docker build -t ghcr.io/knd775/ghidra-mcp-builder:dev -f docker/Dockerfile.builder .
 ```
 
 Or `docker compose -f docker/docker-compose.yml build`.
@@ -53,6 +57,7 @@ Images are also published to GHCR on push to `main`/`dev`/`develop`:
 ```text
 ghcr.io/<owner>/ghidra-mcp-headless
 ghcr.io/<owner>/ghidra-mcp-bridge
+ghcr.io/<owner>/ghidra-mcp-builder
 ```
 
 The bridge must share the headless network namespace.
@@ -139,10 +144,12 @@ Window -> Source Files and Transforms, one rule covers the corpus:
 Clone the repo at the sidecar's commit, or share the builder `/src`
 cache read-only. `source_read` does the lookup through the builder.
 
-Portainer (or `docker compose up --build`) starts the builder with the
-rest of the stack. Corpus updates are MCP tools: `builder_health`,
-`build_manifest`, `build_reference`, `build_reference_status`,
-`source_read`. No shell on the Docker host.
+Portainer (or `docker compose up -d`) pulls `ghidra-mcp-builder` from GHCR
+with the rest of the stack. The compose DNS name is still `ghidra-builder`.
+Rebuild locally only when you are changing the Dockerfile or prefixes.
+Corpus updates are MCP tools: `builder_health`, `build_manifest`,
+`build_reference`, `build_reference_status`, `source_read`. No shell on
+the Docker host.
 
 `dry_run=true` returns the compiler or cmake command line without cloning
 or compiling. `docker/references.yaml` is the ARM corpus (medium_32).

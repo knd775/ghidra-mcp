@@ -60,7 +60,11 @@ class TestBuilderCompose(unittest.TestCase):
         self.assertIn("ghidra", svc["networks"])
         self.assertEqual(svc.get("restart"), "unless-stopped")
         image = svc["image"]
-        self.assertEqual(image, "ghidra-builder")
+        self.assertIn("ghidra-mcp-builder", image)
+        self.assertTrue(image.startswith("ghcr.io/"), image)
+        self.assertIn("${GHIDRA_MCP_VERSION:-dev}", image)
+        self.assertEqual(svc.get("hostname"), "ghidra-builder")
+        self.assertEqual(svc.get("container_name"), "ghidra-builder")
         self.assertNotIn(":gcc", image)
         self.assertNotIn("TOOLCHAIN_TAG", svc.get("environment", {}))
         self.assertEqual(svc["environment"]["GHIDRA_MCP_FILE_ROOT"], "/data")
@@ -71,6 +75,11 @@ class TestBuilderCompose(unittest.TestCase):
         vols = " ".join(str(v) for v in svc["volumes"])
         self.assertIn("SAMPLES_DIR", vols)
         self.assertIn("builder-src-cache:/src", vols)
+
+    def test_local_build_script_tags_the_ghcr_name(self):
+        text = (REPO_ROOT / "docker" / "build-builders.sh").read_text(encoding="utf-8")
+        self.assertIn("ghidra-mcp-builder", text)
+        self.assertNotIn("-t ghidra-builder", text)
 
     def test_no_docker_sock_in_any_service(self):
         for name, svc in self.doc["services"].items():
@@ -105,6 +114,7 @@ class TestBuilderCompose(unittest.TestCase):
 
     def test_dockerfile_packs_three_toolchains_uid_1000(self):
         text = DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn("ghidra-mcp-builder", text)
         self.assertNotIn("ARG TOOLCHAIN_TAG", text)
         self.assertNotIn("ARG BASE_IMAGE", text)
         self.assertNotIn("gcc-arm-none-eabi", text)

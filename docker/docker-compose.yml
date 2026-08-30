@@ -125,13 +125,15 @@ services:
       # Must include the tunnel hostname or forwarded Host headers are rejected.
       GHIDRA_MCP_ALLOWED_HOSTS: ${GHIDRA_MCP_ALLOWED_HOSTS:?set in .env}
 
-  # One resident builder. Holds gcc10-arm, gcc12-arm, gcc13-arm, and
-  # gcc13-x86_64 (distro gcc-13, no 32-bit multilib).
-  # ghidra-mcp POSTs jobs on the compose network (not docker exec: that
-  # would require docker.sock in the process that parses untrusted binaries).
+  # One resident builder, pulled from GHCR as ghidra-mcp-builder (same
+  # owner/tag as headless and bridge). Holds gcc10-arm, gcc12-arm,
+  # gcc13-arm, and gcc13-x86_64 (distro gcc-13, no 32-bit multilib).
+  # Compose DNS name stays ghidra-builder. ghidra-mcp POSTs jobs on the
+  # compose network (not docker exec: that would require docker.sock in
+  # the process that parses untrusted binaries).
   # No host ports, no tunnel, no auth beyond the internal network.
   builder:
-    image: ghidra-builder
+    image: ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-builder:${GHIDRA_MCP_VERSION:-dev}
     build:
       context: ..
       dockerfile: docker/Dockerfile.builder

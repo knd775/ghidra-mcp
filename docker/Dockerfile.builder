@@ -1,19 +1,22 @@
 # syntax=docker/dockerfile:1
 # One resident builder image holding every shipped toolchain identity.
-# The tag is the service, not the compiler: ghidra-builder. Identity
-# (gcc10-arm, gcc12-arm, gcc13-arm, gcc13-x86_64) selects a prefix under
+# Image name is ghidra-mcp-builder (GHCR). Compose DNS name is
+# ghidra-builder. Identity (gcc10-arm, gcc12-arm, gcc13-arm,
+# gcc13-x86_64) selects a prefix under
 # /opt/ghidra-builder/toolchains/<identity>/.
 #
 # Toolchains are pinned ARM GNU releases (docker/builder/toolchains.lock),
 # downloaded from developer.arm.com in fetch stages. Distro packages of
 # the ARM cross compiler track the archive and are not a corpus pin.
-# Official prefixes are relocatable — no pack wrappers, no
+# Official prefixes are relocatable, no pack wrappers, no
 # /etc/alternatives. Multilib newlib is left intact.
 #
-#   docker build -f docker/Dockerfile.builder -t ghidra-builder .
+#   docker build -f docker/Dockerfile.builder \
+#     -t ghcr.io/knd775/ghidra-mcp-builder:dev .
 #
-# Portainer / `docker compose up --build` is the operator path. There is
-# no docker exec, no docker.sock, and no per-toolchain container.
+# ghcr.yml publishes that name on push to main/dev/develop and on version
+# tags. Portainer / `docker compose up -d` pulls it. There is no docker
+# exec, no docker.sock, and no per-toolchain container.
 #
 # pico-sdk firmware is commonly GCC 10–12. Matching littlefs built with
 # GCC 13.2 produced the right names at 0.27–0.35 similarity; the

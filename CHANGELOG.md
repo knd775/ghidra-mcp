@@ -28,7 +28,9 @@ Compiler version is the design driver: GCC 13.2 littlefs matched the right
 names at 0.27–0.35 similarity because the firmware was built with GCC 10–12;
 `lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. One
 image holds gcc10-arm, gcc12-arm, gcc13-arm, and gcc13-x86_64; the identity string
-selects the binary, not a compose service. There is no Docker socket
+selects the binary, not a compose service. The image is
+`ghcr.io/<owner>/ghidra-mcp-builder` (same owner and tag as headless and
+bridge). Compose DNS stays `ghidra-builder`. There is no Docker socket
 anywhere: `ghidra-mcp` POSTs to `http://ghidra-builder:8092/build` and
 gets a job id back; `GET /build/{id}` (MCP: `build_reference_status`)
 retrieves a compile that outlives the ~60s MCP hop. Clang later is a
@@ -218,10 +220,11 @@ fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
 ### Docker
 
 `docker/Dockerfile.bridge` builds the Python MCP bridge on `python:3.12-slim`.
-`.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless` and
-`ghidra-mcp-bridge` to GHCR on push to `main`/`dev`/`develop` and on version
-tags. Compose is Ghidra Server + headless + bridge (shared netns, loopback
-`GHIDRA_MCP_URL`) + a Cloudflare Tunnel. Env for that file is
+`.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless`,
+`ghidra-mcp-bridge`, and `ghidra-mcp-builder` to GHCR on push to
+`main`/`dev`/`develop` and on version tags. Compose is Ghidra Server +
+headless + bridge (shared netns, loopback `GHIDRA_MCP_URL`) + builder
+(compose DNS `ghidra-builder`) + a Cloudflare Tunnel. Env for that file is
 `docker/.env.template`. 8089/8081 are published on loopback only. There is
 no Traefik.
 
