@@ -29,10 +29,15 @@ public final class ReferenceManifest {
     public static List<ReferenceBuild.Spec> load(Path path, List<String> knownToolchains)
             throws IOException {
         String text = Files.readString(path, StandardCharsets.UTF_8);
-        return parse(text, knownToolchains);
+        return parse(text, knownToolchains, null);
     }
 
     public static List<ReferenceBuild.Spec> parse(String text, List<String> knownToolchains) {
+        return parse(text, knownToolchains, null);
+    }
+
+    public static List<ReferenceBuild.Spec> parse(
+            String text, List<String> knownToolchains, List<String> knownFrameworks) {
         Object root = looksLikeJson(text) ? parseJson(text) : MiniYaml.parse(text);
         if (!(root instanceof Map<?, ?> map)) {
             throw new IllegalArgumentException("manifest root must be a mapping with 'references:'");
@@ -46,13 +51,18 @@ public final class ReferenceManifest {
             if (!(item instanceof Map<?, ?> entry)) {
                 throw new IllegalArgumentException("each references: item must be a mapping");
             }
-            jobs.addAll(expandEntry(asStringMap(entry), knownToolchains));
+            jobs.addAll(expandEntry(asStringMap(entry), knownToolchains, knownFrameworks));
         }
         return jobs;
     }
 
     @SuppressWarnings("unchecked")
     static List<ReferenceBuild.Spec> expandEntry(Map<String, Object> entry, List<String> knownToolchains) {
+        return expandEntry(entry, knownToolchains, null);
+    }
+
+    static List<ReferenceBuild.Spec> expandEntry(
+            Map<String, Object> entry, List<String> knownToolchains, List<String> knownFrameworks) {
         String name = string(entry, "name");
         String repo = string(entry, "repo");
         String ref = string(entry, "ref");
@@ -77,7 +87,7 @@ public final class ReferenceManifest {
             return List.of(parseEntry(
                     name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
                     stripDebug, outputName, knownToolchains,
-                    mode, framework, libraries, board, cmakeConfig));
+                    mode, framework, libraries, board, cmakeConfig, knownFrameworks));
         }
 
         // Fill missing axes from the entry-level defaults so a matrix of only
@@ -100,7 +110,7 @@ public final class ReferenceManifest {
             jobs.add(parseEntry(
                     name, repo, ref, sources, toolchain, arch, opt, defines, extra,
                     stripDebug, outputName, knownToolchains,
-                    mode, framework, libraries, cellBoard, cmakeConfig));
+                    mode, framework, libraries, cellBoard, cmakeConfig, knownFrameworks));
         }
         return jobs;
     }
@@ -109,12 +119,13 @@ public final class ReferenceManifest {
             String name, String repo, String ref, Object sources, String toolchain,
             String archFlags, String opt, Object defines, Object extra,
             boolean stripDebug, String outputName, List<String> knownToolchains,
-            String mode, String framework, Object libraries, String board, Object cmakeConfig) {
+            String mode, String framework, Object libraries, String board, Object cmakeConfig,
+            List<String> knownFrameworks) {
         if (FrameworkBuild.MODE_FRAMEWORK.equals(FrameworkBuild.requireMode(mode))) {
             return ReferenceBuild.parse(
                     name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
                     stripDebug, outputName, knownToolchains,
-                    mode, framework, libraries, board, cmakeConfig);
+                    mode, framework, libraries, board, cmakeConfig, knownFrameworks);
         }
         return ReferenceBuild.parse(
                 name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,

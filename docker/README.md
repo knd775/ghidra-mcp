@@ -114,7 +114,7 @@ the shared `/data/uploads` mount as uid 1000, and `import_file` loads that
 path. `SAMPLES_DIR` on the host must be writable by uid 1000 — the same
 constraint as ghidra-mcp. There is no auth on the builder: the listener
 is not published off the compose network. `GET /health` is what the
-image healthcheck probes. Each identity is a pinned ARM GNU tarball
+image healthcheck probes, and what MCP `builder_health` returns. Each identity is a pinned ARM GNU tarball
 (`docker/builder/toolchains.lock`), copied from a fetch stage so the
 download never sits in a final layer. Distro `gcc-arm-none-eabi` is not
 used. Framework builds also need host `gcc`/`g++` (pico-sdk's
@@ -126,8 +126,9 @@ not a new MCP parameter. `mode=framework` harvests `.o`/`.a` from the
 CMake build tree, never the linked ELF.
 
 Portainer (or `docker compose up --build`) starts the builder with the
-rest of the stack. Corpus updates are MCP tools: `build_manifest`,
-`build_reference`, `build_reference_status`. No shell on the Docker host.
+rest of the stack. Corpus updates are MCP tools: `builder_health`,
+`build_manifest`, `build_reference`, `build_reference_status`. No shell
+on the Docker host.
 
 `dry_run=true` returns the compiler or cmake command line without cloning
 or compiling. The manifest at `docker/references.yaml` is the corpus;

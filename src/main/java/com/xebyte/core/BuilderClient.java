@@ -28,6 +28,12 @@ public interface BuilderClient {
 
     Map<String, Object> jobStatus(String toolchain, URI url, String jobId) throws IOException;
 
+    /**
+     * Packed identities and stubs. This is what can be built; Java does not
+     * keep a parallel list.
+     */
+    Map<String, Object> health(URI url) throws IOException;
+
     final class Http implements BuilderClient {
         private static final Duration HOP = Duration.ofSeconds(15);
 
@@ -63,6 +69,16 @@ public interface BuilderClient {
             String path = (jobId == null || jobId.isBlank())
                     ? "/builds"
                     : "/build/" + jobId;
+            return get(toolchain, url, path);
+        }
+
+        @Override
+        public Map<String, Object> health(URI url) throws IOException {
+            return get("health", url, "/health");
+        }
+
+        private static Map<String, Object> get(String toolchain, URI url, String path)
+                throws IOException {
             URI target = url.resolve(path);
             HttpURLConnection conn = (HttpURLConnection) target.toURL().openConnection();
             try {
@@ -114,8 +130,11 @@ public interface BuilderClient {
     final class Recording implements BuilderClient {
         public final List<Map<String, Object>> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
         public final List<String> statusCalls = new java.util.concurrent.CopyOnWriteArrayList<>();
+        public final List<URI> healthCalls = new java.util.concurrent.CopyOnWriteArrayList<>();
         private Map<String, Object> response = Map.of("ok", true);
         private Map<String, Object> statusResponse;
+        private Map<String, Object> healthResponse = defaultHealth();
+        private IOException healthError;
 
         public void setResponse(Map<String, Object> response) {
             this.response = response;
@@ -123,6 +142,24 @@ public interface BuilderClient {
 
         public void setStatusResponse(Map<String, Object> statusResponse) {
             this.statusResponse = statusResponse;
+        }
+
+        public void setHealthResponse(Map<String, Object> healthResponse) {
+            this.healthResponse = healthResponse;
+            this.healthError = null;
+        }
+
+        public void setHealthError(IOException healthError) {
+            this.healthError = healthError;
+        }
+
+        public static Map<String, Object> defaultHealth() {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("ok", true);
+            body.put("identities", List.copyOf(ReferenceBuild.DEFAULT_TOOLCHAINS));
+            body.put("stubs", List.of("pico-sdk"));
+            body.put("uid", 1000);
+            return body;
         }
 
         @Override
@@ -153,6 +190,13 @@ public interface BuilderClient {
             queued.put("job_id", jobId);
             queued.put("status", "queued");
             return queued;
+        }
+
+        @Override
+        public Map<String, Object> health(URI url) throws IOException {
+            healthCalls.add(url);
+            if (healthError != null) throw healthError;
+            return new LinkedHashMap<>(healthResponse);
         }
     }
 }

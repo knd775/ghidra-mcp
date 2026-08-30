@@ -23,7 +23,8 @@ import java.util.Map;
  */
 @McpToolGroup(value = "bsim",
         description = "Cross-build function matching via Ghidra BSim (CLI wrapper). "
-                + "build_reference compiles pinned source into the shared volume for ingest.")
+                + "build_reference compiles pinned source into the shared volume for ingest. "
+                + "builder_health lists what the container can compile.")
 public class ReferenceBuildService {
 
     private static final String DEFAULT_MANIFEST_RESOURCE = "/reference/references.yaml";
@@ -68,7 +69,7 @@ public class ReferenceBuildService {
             @Param(value = "toolchain", source = ParamSource.BODY, defaultValue = "gcc13-arm",
                     description = "Full identity <compiler><major>-<target> (gcc13-arm, "
                             + "clang17-arm). Selects which binary the builder invokes. "
-                            + "Unknown names list the installed ones.")
+                            + "Unknown names list identities from builder_health.")
                     String toolchain,
             @Param(value = "arch_flags", source = ParamSource.BODY,
                     defaultValue = "",
@@ -95,7 +96,8 @@ public class ReferenceBuildService {
                     description = "sources (named .c files) or framework (stub project + harvest). Default sources.")
                     String mode,
             @Param(value = "framework", source = ParamSource.BODY, defaultValue = "",
-                    description = "mode=framework: stub name, e.g. pico-sdk. Unknown names list installed stubs.")
+                    description = "mode=framework: stub name, e.g. pico-sdk. Unknown names "
+                            + "list stubs from builder_health.")
                     String framework,
             @Param(value = "libraries", source = ParamSource.BODY, defaultValue = "",
                     description = "mode=framework: CMake targets to link, JSON array. Empty is an error.")
@@ -111,13 +113,16 @@ public class ReferenceBuildService {
                             + "build_reference_status with the returned job_id.")
                     int waitSeconds) {
         try {
+            ReferenceBuild.Inventory inv = requireInventory();
             ReferenceBuild.Spec spec = ReferenceBuild.parse(
                     name, repo, ref, sources, toolchain, archFlags, opt, defines, extraFlags,
-                    stripDebug, outputName, config.knownToolchains(),
-                    mode, framework, libraries, board, frameworkConfig);
+                    stripDebug, outputName, inv.identities(),
+                    mode, framework, libraries, board, frameworkConfig, inv.stubs());
             return runSpec(spec, dryRun, false, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
+        } catch (IOException e) {
+            return Response.err(e.getMessage(), "builder_unreachable");
         } catch (Exception e) {
             return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
@@ -169,7 +174,14 @@ public class ReferenceBuildService {
                     int waitSeconds) {
         try {
             String yaml = readManifest(path);
-            List<ReferenceBuild.Spec> jobs = ReferenceManifest.parse(yaml, config.knownToolchains());
+            ReferenceBuild.Inventory inv;
+            try {
+                inv = requireInventory();
+            } catch (IOException e) {
+                return Response.err(e.getMessage(), "builder_unreachable");
+            }
+            List<ReferenceBuild.Spec> jobs = ReferenceManifest.parse(
+                    yaml, inv.identities(), inv.stubs());
             List<Object> results = new ArrayList<>();
             List<Pending> pending = new ArrayList<>();
             int failed = 0;
@@ -224,6 +236,32 @@ public class ReferenceBuildService {
     /** Overload used by offline tests. */
     public Response buildManifest(String path, boolean dryRun) {
         return buildManifest(path, dryRun, ReferenceBuild.DEFAULT_WAIT_SECONDS);
+    }
+
+    @McpTool(path = "/builder_health", method = "GET",
+            description = "What the ghidra-builder container can compile right now: packed "
+                    + "toolchain identities, ARM GNU releases, and framework stubs. Proxies "
+                    + "the builder's GET /health. build_reference and build_manifest refuse "
+                    + "unknown names using this same list, not a Java constant.",
+            category = "bsim")
+    public Response builderHealth() {
+        URI url = firstBuilderUrl();
+        if (url == null) {
+            return Response.err("no builder URL configured", "builder_unreachable");
+        }
+        try {
+            Map<String, Object> body = client.health(url);
+            Object http = body.get("_http_status");
+            if (http instanceof Number n && n.intValue() >= 400) {
+                return Response.err(String.valueOf(body.getOrDefault("error",
+                        "builder /health HTTP " + n)), "builder_unreachable");
+            }
+            Map<String, Object> out = new LinkedHashMap<>(body);
+            out.remove("_http_status");
+            return Response.ok(out);
+        } catch (IOException e) {
+            return Response.err(e.getMessage(), "builder_unreachable");
+        }
     }
 
     @McpTool(path = "/build_reference_status", method = "GET",
@@ -646,7 +684,28 @@ public class ReferenceBuildService {
 
     private URI firstBuilderUrl() {
         if (config.toolchainUrls() == null || config.toolchainUrls().isEmpty()) return null;
+        URI shared = config.sharedBuilderUrl();
+        if (shared != null) return shared;
         return config.toolchainUrls().values().iterator().next();
+    }
+
+    private ReferenceBuild.Inventory requireInventory() throws IOException {
+        URI url = firstBuilderUrl();
+        if (url == null) {
+            throw new IOException("no builder URL configured. Start the ghidra-builder service "
+                    + "on the compose network.");
+        }
+        Map<String, Object> body = client.health(url);
+        Object http = body.get("_http_status");
+        if (http instanceof Number n && n.intValue() >= 400) {
+            throw new IOException(String.valueOf(body.getOrDefault("error",
+                    "builder /health HTTP " + n)));
+        }
+        ReferenceBuild.Inventory inv = ReferenceBuild.Inventory.fromHealth(body);
+        if (inv.identities().isEmpty()) {
+            throw new IOException("builder /health listed no identities");
+        }
+        return inv;
     }
 
     private record Pending(ReferenceBuild.Spec spec, String jobId, int index) {}

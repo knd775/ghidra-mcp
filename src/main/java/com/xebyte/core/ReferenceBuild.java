@@ -44,7 +44,12 @@ public final class ReferenceBuild {
     /** Builder substitutes the snapshot directory for this token at compile. */
     public static final String SNAPSHOT_PLACEHOLDER = "<snapshot>";
 
-    /** Identities the compose file ships. Unknown names list these. */
+    /**
+     * Identities the compose file ships, used as {@link BuilderConfig} map keys
+     * when {@code GHIDRA_MCP_BUILDER_URL} is a single host. Validation and
+     * {@code builder_health} read the container's {@code GET /health}, not this
+     * list.
+     */
     public static final List<String> DEFAULT_TOOLCHAINS =
             List.of("gcc10-arm", "gcc12-arm", "gcc13-arm");
 
@@ -286,6 +291,31 @@ public final class ReferenceBuild {
             String board,
             Object configRaw
     ) {
+        return parse(name, repo, ref, sourcesRaw, toolchain, archFlags, opt, definesRaw,
+                extraFlagsRaw, stripDebug, outputName, knownToolchains,
+                mode, framework, librariesRaw, board, configRaw, null);
+    }
+
+    public static Spec parse(
+            String name,
+            String repo,
+            String ref,
+            Object sourcesRaw,
+            String toolchain,
+            String archFlags,
+            String opt,
+            Object definesRaw,
+            Object extraFlagsRaw,
+            boolean stripDebug,
+            String outputName,
+            List<String> knownToolchains,
+            String mode,
+            String framework,
+            Object librariesRaw,
+            String board,
+            Object configRaw,
+            List<String> knownFrameworks
+    ) {
         String resolvedMode = FrameworkBuild.requireMode(mode);
         if (FrameworkBuild.MODE_SOURCES.equals(resolvedMode)) {
             Spec base = parse(name, repo, ref, sourcesRaw, toolchain, archFlags, opt, definesRaw,
@@ -298,7 +328,7 @@ public final class ReferenceBuild {
         String n = requireName(name);
         String r = requireRepo(repo);
         String pinned = requireRef(ref);
-        String fw = FrameworkBuild.requireFramework(framework, resolvedMode);
+        String fw = FrameworkBuild.requireFramework(framework, resolvedMode, knownFrameworks);
         List<String> libraries = FrameworkBuild.requireLibraries(librariesRaw, resolvedMode);
         String b = FrameworkBuild.requireBoard(board);
         Map<String, String> config = FrameworkBuild.stringMap(configRaw);
@@ -567,13 +597,57 @@ public final class ReferenceBuild {
             return List.copyOf(toolchainUrls.keySet());
         }
 
+        /**
+         * One builder holds every identity. Map keys are how compose used to
+         * name per-GCC URLs, not a gate: an identity the container just grew
+         * uses the shared URL. Distinct URLs (legacy {@code BUILDER_URLS})
+         * still require an exact key.
+         */
         public URI urlFor(String toolchain) {
             URI uri = toolchainUrls.get(toolchain);
-            if (uri == null) {
-                throw new IllegalArgumentException(
-                        "unknown toolchain '" + toolchain + "'; available: " + knownToolchains());
-            }
-            return uri;
+            if (uri != null) return uri;
+            URI shared = sharedBuilderUrl();
+            if (shared != null) return shared;
+            throw new IllegalArgumentException(
+                    "unknown toolchain '" + toolchain + "'; available: " + knownToolchains());
         }
+
+        URI sharedBuilderUrl() {
+            URI first = null;
+            for (URI u : toolchainUrls.values()) {
+                if (u == null) continue;
+                if (first == null) {
+                    first = u;
+                } else if (!first.equals(u)) {
+                    return null;
+                }
+            }
+            return first;
+        }
+    }
+
+    /**
+     * {@code GET /health} from the builder. {@code stubs} is null when the
+     * field was omitted (older image); callers then scan local stub dirs.
+     */
+    public record Inventory(List<String> identities, List<String> stubs) {
+        public static Inventory fromHealth(Map<String, Object> body) {
+            List<String> identities = stringNames(body == null ? null : body.get("identities"));
+            List<String> stubs = (body != null && body.containsKey("stubs"))
+                    ? stringNames(body.get("stubs"))
+                    : null;
+            return new Inventory(List.copyOf(identities), stubs);
+        }
+    }
+
+    static List<String> stringNames(Object raw) {
+        if (!(raw instanceof List<?> list)) return List.of();
+        List<String> out = new ArrayList<>();
+        for (Object o : list) {
+            if (o == null) continue;
+            String s = String.valueOf(o).trim();
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
     }
 }

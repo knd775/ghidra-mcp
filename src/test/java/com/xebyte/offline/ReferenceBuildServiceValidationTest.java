@@ -144,6 +144,59 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("gcc12-arm"));
         assertTrue(json, json.contains("gcc13-arm"));
         assertTrue(client.calls.isEmpty());
+        assertEquals("unknown toolchain still asks the container", 1, client.healthCalls.size());
+    }
+
+    public void testHealthIdentitiesWinOverJavaDefaults() {
+        Map<String, Object> health = new LinkedHashMap<>();
+        health.put("ok", true);
+        health.put("identities", List.of("gcc13-arm"));
+        health.put("stubs", List.of("pico-sdk"));
+        client.setHealthResponse(health);
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc10-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("gcc10-arm"));
+        assertTrue(json, json.contains("gcc13-arm"));
+        assertFalse("Java's DEFAULT_TOOLCHAINS must not pad the error", json.contains("gcc12-arm"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testIdentityOnlyOnContainerIsAccepted() {
+        Map<String, Object> health = new LinkedHashMap<>();
+        health.put("ok", true);
+        health.put("identities", List.of("gcc13-arm", "gcc14-arm"));
+        health.put("stubs", List.of("pico-sdk"));
+        client.setHealthResponse(health);
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc14-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                false);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertEquals(1, client.calls.size());
+        assertEquals("gcc14-arm", client.calls.get(0).get("toolchain"));
+        assertEquals("http://ghidra-builder:8092", client.calls.get(0).get("url"));
     }
 
     public void testBareGcc13IsNotAnIdentity() {
@@ -386,6 +439,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         Response r = svc.buildManifest("", true);
         assertFalse(r.toJson(), r instanceof Response.Err);
         assertTrue(client.calls.isEmpty());
+        assertEquals("one GET /health for the whole matrix", 1, client.healthCalls.size());
         String json = r.toJson();
         assertTrue(json, json.contains("\"count\":21") || json.contains("\"count\": 21"));
         assertTrue(json, json.contains("would_execute"));
@@ -468,6 +522,70 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(listed.toJson(), listed.toJson().contains("jobs") || listed.toJson().contains("count"));
     }
 
+    public void testBuilderHealthReturnsContainerPayload() {
+        Map<String, Object> health = new LinkedHashMap<>();
+        health.put("ok", true);
+        health.put("identities", List.of("gcc10-arm", "gcc13-arm"));
+        health.put("stubs", List.of("pico-sdk"));
+        health.put("releases", Map.of("gcc13-arm", "13.2.Rel1"));
+        health.put("uid", 1000);
+        health.put("_http_status", 200);
+        client.setHealthResponse(health);
+        Response r = svc.builderHealth();
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("gcc10-arm"));
+        assertTrue(json, json.contains("pico-sdk"));
+        assertTrue(json, json.contains("13.2.Rel1"));
+        assertFalse("internal hop status is not part of the tool contract", json.contains("_http_status"));
+        assertEquals(1, client.healthCalls.size());
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testBuilderHealthUnreachable() {
+        client.setHealthError(new java.io.IOException("connection refused"));
+        Response r = svc.builderHealth();
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("connection refused"));
+        assertTrue(r.toJson(), r.toJson().contains("builder_unreachable"));
+    }
+
+    public void testDryRunDoesNotSubmitWhenBuilderUnreachable() {
+        client.setHealthError(new java.io.IOException("connection refused"));
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true);
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("builder_unreachable"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testUrlForFallsBackToSharedBuilder() {
+        ReferenceBuild.BuilderConfig cfg = new ReferenceBuild.BuilderConfig(
+                ReferenceBuild.defaultToolchainUrls(), tmp, "", java.time.Duration.ofSeconds(5));
+        assertEquals(URI.create("http://ghidra-builder:8092"), cfg.urlFor("gcc14-arm"));
+        Map<String, URI> split = ReferenceBuild.parseToolchainUrls(
+                "gcc13-arm:http://ghidra-builder:8092,gcc12-arm:http://other-builder:8092");
+        ReferenceBuild.BuilderConfig two = new ReferenceBuild.BuilderConfig(
+                split, tmp, "", java.time.Duration.ofSeconds(5));
+        try {
+            two.urlFor("gcc14-arm");
+            fail("distinct builder URLs must not guess");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("gcc13-arm"));
+        }
+    }
+
     public void testRejectsFileRepo() {
         try {
             ReferenceBuild.requireRepo("file:///tmp/littlefs");
@@ -529,6 +647,39 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         String json = r.toJson();
         assertTrue(json, json.contains("unknown framework"));
         assertTrue(json, json.contains("pico-sdk"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testHealthStubsWinOverLocalScan() {
+        Map<String, Object> health = new LinkedHashMap<>();
+        health.put("ok", true);
+        health.put("identities", List.of("gcc13-arm"));
+        health.put("stubs", List.of("nrf-sdk"));
+        client.setHealthResponse(health);
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                true,
+                "",
+                true,
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("unknown framework"));
+        assertTrue(json, json.contains("nrf-sdk"));
+        assertFalse("local docker/stubs/pico-sdk must not pad the error",
+                json.contains("available: [pico-sdk]") || json.contains("available:[pico-sdk]"));
         assertTrue(client.calls.isEmpty());
     }
 

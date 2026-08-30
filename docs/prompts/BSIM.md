@@ -1,6 +1,6 @@
 # BSim cross-build matching
 
-Eight MCP tools wrap Ghidra's `bsim` CLI and the sibling toolchain
+The BSim MCP tools wrap Ghidra's `bsim` CLI and the sibling toolchain
 container that feeds it. They do not invent a matching algorithm.
 Byte/opcode hashes fail across GCC versions. The older fuzzy matcher
 produced ranked lists that looked authoritative and were not:
@@ -74,12 +74,19 @@ the same image and a matrix axis, not a new tool. Pins live in
 13.2.Rel1), not distro `gcc-arm-none-eabi`.
 
 `dry_run=true` returns the gcc or cmake command line and output path. It clones
-nothing and compiles nothing. Each artifact gets a `<artifact>.json` sidecar
+nothing and compiles nothing. It does ask the builder `GET /health` so the
+command line is for an identity the container actually has. Each artifact gets a `<artifact>.json` sidecar
 (resolved commit SHA, the compiler's own `--version` line, sha256). `build_manifest`
 skips a job when the artifact exists and that sidecar hash still matches; a
 missing or mismatched sidecar rebuilds. Compiles that outlive `wait_seconds`
 (default 45, max 55) return `{status: started, job_id}`; poll
 `build_reference_status`.
+
+Ask the container what it can compile before picking `toolchain` or `framework`:
+
+```
+builder_health()
+```
 
 - Ingest **with symbols**. `strip_debug` keeps `.symtab`. Framework mode never
   strips. A stripped binary adds signature noise and yields no names.
@@ -121,6 +128,17 @@ before the CLI runs.
 
 ## Tools
 
+### `builder_health`
+
+```
+builder_health()
+```
+
+Packed identities, ARM GNU releases, and framework stubs from the builder
+container (`GET /health`). This is what can be built. `build_reference` and
+`build_manifest` refuse unknown names using this same list, not a Java
+constant.
+
 ### `build_reference`
 
 ```
@@ -147,8 +165,10 @@ refused. Each artifact is written with `<artifact>.json`: resolved
 commit SHA, the compiler's `--version` line, sha256. Framework mode
 writes one sidecar per harvested library (`library`, `board`, `config`).
 `dry_run=true` clones nothing, configures nothing, and compiles
-nothing. A compile that outlives `wait_seconds` returns
-`{status: "started", job_id}` — poll `build_reference_status`.
+nothing. It does call `builder_health` (GET /health) so an unknown
+identity fails before a fake command line. A compile that outlives
+`wait_seconds` returns `{status: "started", job_id}` — poll
+`build_reference_status`.
 
 ### `build_manifest`
 

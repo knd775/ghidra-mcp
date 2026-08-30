@@ -17,8 +17,8 @@ import java.util.regex.Pattern;
  *
  * <p>The major number selects which packed prefix the builder invokes:
  * {@code gcc10-arm} and {@code gcc13-arm} are different binaries in one
- * container. The installed set is what {@code GET /health} lists; this class
- * only answers "what would this identity run".
+ * container. {@code builder_health} (and {@code GET /health} on the builder)
+ * lists the installed set; this class only answers "what would this identity run".
  */
 public record ToolchainIdentity(
         String id,

@@ -47,9 +47,10 @@ public final class FrameworkBuild {
     }
 
     /**
-     * Installed stub names: {@code GHIDRA_MCP_STUBS}, {@code docker/stubs},
+     * Local stub names: {@code GHIDRA_MCP_STUBS}, {@code docker/stubs},
      * {@code /opt/ghidra-builder/stubs}, then {@link #DEFAULT_FRAMEWORKS}.
-     * Adding {@code stubs/zephyr/} shows up here with no Java change.
+     * Used when {@code GET /health} omitted {@code stubs}. The builder is
+     * the inventory; this scan is the fallback for unit tests and older images.
      */
     public static List<String> listFrameworks() {
         Set<String> names = new LinkedHashSet<>();
@@ -78,21 +79,30 @@ public final class FrameworkBuild {
     }
 
     public static String requireFramework(String framework, String mode) {
+        return requireFramework(framework, mode, null);
+    }
+
+    /**
+     * @param available {@code GET /health} stubs, or {@code null} to scan local
+     *                  stub dirs. Non-null (including empty) is the container's
+     *                  list and wins over {@link #listFrameworks()}.
+     */
+    public static String requireFramework(String framework, String mode, List<String> available) {
         if (!MODE_FRAMEWORK.equals(mode)) {
             return framework == null ? "" : framework.trim();
         }
         String f = framework == null ? "" : framework.trim();
-        List<String> available = listFrameworks();
+        List<String> installed = available != null ? available : listFrameworks();
         if (f.isEmpty()) {
             throw new IllegalArgumentException(
-                    "framework is required in mode=framework; available: " + available);
+                    "framework is required in mode=framework; available: " + installed);
         }
         if (f.contains("..") || f.indexOf('/') >= 0 || f.indexOf('\\') >= 0) {
             throw new IllegalArgumentException("framework must be a directory name, not a path: " + f);
         }
-        if (!available.contains(f)) {
+        if (!installed.contains(f)) {
             throw new IllegalArgumentException(
-                    "unknown framework '" + f + "'; available: " + available);
+                    "unknown framework '" + f + "'; available: " + installed);
         }
         return f;
     }

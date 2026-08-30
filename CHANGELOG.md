@@ -66,6 +66,13 @@ defines. Framework mode writes one sidecar per harvested library, with
 exists and that sidecar hash still matches; a missing or mismatched sidecar
 rebuilds rather than trusting the filename.
 
+`builder_health` is `GET /health` on the builder, exposed as an MCP tool.
+Identities, ARM GNU releases, and framework stubs come from the container,
+not from `DEFAULT_TOOLCHAINS` in Java. `build_reference` and `build_manifest`
+refuse unknown names using that same payload. `dry_run` still does not
+`POST /build` (no clone, no compile); it does ask `/health`, because that is
+how it knows whether `gcc13-arm` is actually packed.
+
 `bsim_ingest` no longer requires `program=` under
 `GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS` — its target is `source` (a ghidraURL).
 A `ghidra://` source without `GHIDRA_SERVER_PASSWORD` is refused by name, not

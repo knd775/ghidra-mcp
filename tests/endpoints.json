@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 264,
+  "total_endpoints": 265,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -393,6 +393,13 @@
         "job_id"
       ],
       "description": "Status and result of a builder job. build_reference and build_manifest return {status: started, job_id} when a compile outlives wait_seconds; poll this until status is done or failed. Blank job_id lists every retained job."
+    },
+    {
+      "path": "/builder_health",
+      "method": "GET",
+      "category": "bsim",
+      "params": [],
+      "description": "What the ghidra-builder container can compile right now: packed toolchain identities, ARM GNU releases, and framework stubs. Proxies the builder's GET /health. build_reference and build_manifest refuse unknown names using this same list, not a Java constant."
     },
     {
       "path": "/bsim_apply_matches",
