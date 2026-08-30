@@ -72,12 +72,13 @@ public class ServerManager {
             MalwareSecurityService malwareSecurityService = new MalwareSecurityService(programProvider, ts);
             ProgramScriptService programScriptService = new ProgramScriptService(programProvider, ts);
             BSimService bsimService = new BSimService(programProvider, ts);
+            ReferenceBuildService referenceBuildService = new ReferenceBuildService();
 
             AnnotationScanner scanner = new AnnotationScanner(programProvider,
                 listingService, functionService, commentService, symbolLabelService,
                 xrefCallGraphService, dataTypeService, analysisService,
                 documentationHashService, malwareSecurityService, programScriptService,
-                bsimService);
+                bsimService, referenceBuildService);
 
             startServer(scanner, guiEndpoints);
         }

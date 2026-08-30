@@ -22,6 +22,13 @@ public final class BSimMatches {
     /** Similarity gap below which two differently-named hits are ambiguous. */
     public static final double AMBIGUOUS_SIMILARITY_DELTA = 0.05;
 
+    /**
+     * Callers who still pass the old 0.7 similarity default silently get
+     * nothing against a cross-compiler corpus. Warn above this, not at it:
+     * 0.5 is already optimistic for GCC 10 vs 13.
+     */
+    public static final double CROSS_BUILD_SIMILARITY_WARN = 0.5;
+
     public enum ApplyAction {
         APPLY,
         SKIP_AMBIGUOUS,
@@ -95,6 +102,20 @@ public final class BSimMatches {
     }
 
     private BSimMatches() {}
+
+    public static String similarityThresholdWarning(double similarity) {
+        if (similarity <= CROSS_BUILD_SIMILARITY_WARN) return null;
+        return "similarity_threshold " + similarity
+                + " will drop cross-compiler matches (typically 0.2-0.4); "
+                + "filter on confidence_threshold";
+    }
+
+    public static void attachSimilarityWarning(Map<String, Object> body, double similarity) {
+        if (body == null) return;
+        String warning = similarityThresholdWarning(similarity);
+        if (warning == null) return;
+        body.put("warnings", List.of(warning));
+    }
 
     /**
      * Drop hits from the same executable MD5 as the query program (self-matches

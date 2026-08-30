@@ -208,6 +208,24 @@ public class BSimCliParserTest extends TestCase {
                 src.contains("\\\"score\\\":") || src.contains("\"score\":"));
     }
 
+    public void testSimilarityThresholdWarningFiresAboveHalf() {
+        assertNull(BSimMatches.similarityThresholdWarning(0.0));
+        assertNull(BSimMatches.similarityThresholdWarning(0.5));
+        String warn = BSimMatches.similarityThresholdWarning(0.7);
+        assertNotNull(warn);
+        assertTrue(warn, warn.contains("0.7"));
+        assertTrue(warn, warn.contains("confidence"));
+        Map<String, Object> body = new LinkedHashMap<>();
+        BSimMatches.attachSimilarityWarning(body, 0.0);
+        assertFalse(body.containsKey("warnings"));
+        BSimMatches.attachSimilarityWarning(body, 0.7);
+        assertTrue(body.containsKey("warnings"));
+        @SuppressWarnings("unchecked")
+        List<String> warnings = (List<String>) body.get("warnings");
+        assertEquals(1, warnings.size());
+        assertEquals(warn, warnings.get(0));
+    }
+
     private static BSimMatches.Hit hit(String name, double sim, double conf) {
         return hit(name, sim, conf, "ref.o");
     }

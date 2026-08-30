@@ -274,6 +274,8 @@ replay_pid*
 *.lock
 # ...but the uv dependency lockfile is intentionally committed.
 !uv.lock
+# ARM GNU pins for ghidra-builder. Not a Ghidra project lockfile.
+!docker/builder/toolchains.lock
 
 # Ghidra analysis files
 *.gzf
@@ -353,6 +355,8 @@ lib/*.jar
 *.rej
 .merge_file_*
 *.txt
+# Framework stubs are source. The blanket *.txt above would drop them.
+!**/CMakeLists.txt
 
 # Archive files
 *.7z

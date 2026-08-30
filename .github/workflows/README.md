@@ -8,7 +8,7 @@ workflows for GhidraMCP.
 | Workflow | Trigger | Runner | Purpose |
 |----------|---------|--------|---------|
 | `tests.yml` | Push, pull request, and `workflow_dispatch` to `main`/`develop` | GitHub-hosted Ubuntu | Merge-gating Maven build, Python 3.12 unit tests, and docs checks. Same-repo PRs also rewrite README API Reference and "N MCP tools" counts onto the PR branch (`sync-generated-docs` job) so main never lands stale. |
-| `ghcr.yml` | Push to `main`/`dev`/`develop` and version tags; PRs that touch the bridge image; manual dispatch | GitHub-hosted Ubuntu | Build and push `ghidra-mcp-headless` and `ghidra-mcp-bridge` to GHCR. Pull requests build the bridge image only and do not push. |
+| `ghcr.yml` | Push to `main`/`dev`/`develop` and version tags; PRs that touch the bridge image; manual dispatch | GitHub-hosted Ubuntu | Build and push `ghidra-mcp-headless`, `ghidra-mcp-bridge`, and `ghidra-mcp-builder` to GHCR. Pull requests build the bridge image only and do not push. Headless and builder skip PRs (Ghidra download / ARM GNU tarballs). |
 | `build.yml` | Project build triggers | GitHub-hosted | Build-focused CI path. |
 | `release-regression.yml` | Manual, reusable workflow call, PR label | Self-hosted Windows | Live Ghidra deploy and benchmark regression. |
 | `release.yml` | Version tags or manual dispatch | GitHub-hosted, optional self-hosted regression | Stable release artifact creation. |

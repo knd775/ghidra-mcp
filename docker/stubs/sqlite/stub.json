@@ -1,0 +1,8 @@
+{
+  "name": "sqlite",
+  "generator": "make",
+  "out_of_tree": false,
+  "configure": ["./configure", "--disable-shared", "--enable-static"],
+  "make": ["make", "-j"],
+  "harvest": [{"path": ".libs/libsqlite3.a", "library": "sqlite3"}]
+}

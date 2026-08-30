@@ -1,0 +1,8 @@
+{
+  "name": "openssl",
+  "generator": "make",
+  "out_of_tree": false,
+  "configure": ["./Configure", "linux-x86_64", "no-shared", "no-tests", "{opt}"],
+  "make": ["make", "-j", "build_libs"],
+  "harvest": [{"path": "libcrypto.a", "library": "libcrypto"}]
+}

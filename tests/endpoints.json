@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 261,
+  "total_endpoints": 267,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -174,7 +174,7 @@
         "compact",
         "program"
       ],
-      "description": "Score a global variable's documentation completeness on a budgeted 0-100 scale \u00e2\u20ac\u201d the data-address analog of analyze_function_completeness. Six axes: meaningful name, explanatory plate comment, real type, formatted bytes (core, drive effective_score + DOC_DRAFT) plus enum/equate and struct membership (advanced, forgiven in effective_score). A global with no real type (no defined data, or an undefined* type) is hard-capped at 79 and can never band COMPLETE_80 or above, no matter how good its name and comment are \u00e2\u20ac\u201d apply a type with set_global first. Returns raw score, effective_score, COMPLETE_<band>, per-axis breakdown, and which axes are still missing."
+      "description": "Score a global variable's documentation completeness on a budgeted 0-100 scale â€” the data-address analog of analyze_function_completeness. Six axes: meaningful name, explanatory plate comment, real type, formatted bytes (core, drive effective_score + DOC_DRAFT) plus enum/equate and struct membership (advanced, forgiven in effective_score). A global with no real type (no defined data, or an undefined* type) is hard-capped at 79 and can never band COMPLETE_80 or above, no matter how good its name and comment are â€” apply a type with set_global first. Returns raw score, effective_score, COMPLETE_<band>, per-axis breakdown, and which axes are still missing."
     },
     {
       "path": "/analyze_struct_field_usage",
@@ -258,7 +258,7 @@
         "output_dir",
         "output_name"
       ],
-      "description": "Archive the currently open project to a Ghidra-native .gar file. The result can be restored into any Ghidra GUI via File \u00e2\u2020\u2019 Restore Project, or back into a headless instance via /restore_project. Captures the entire project (all programs, folders, settings, version-control metadata) \u00e2\u20ac\u201d unlike /export_program which ships a single program as .gzf. Output is written to `output_dir/output_name` (defaults: /data/exports and `<project>.gar`). Refuses to overwrite an existing file. Callers should /save_all_programs first to flush pending in-memory edits."
+      "description": "Archive the currently open project to a Ghidra-native .gar file. The result can be restored into any Ghidra GUI via File â†’ Restore Project, or back into a headless instance via /restore_project. Captures the entire project (all programs, folders, settings, version-control metadata) â€” unlike /export_program which ships a single program as .gzf. Output is written to `output_dir/output_name` (defaults: /data/exports and `<project>.gar`). Refuses to overwrite an existing file. Callers should /save_all_programs first to flush pending in-memory edits."
     },
     {
       "path": "/audit_global",
@@ -278,7 +278,7 @@
         "address",
         "program"
       ],
-      "description": "Audit every global variable referenced from within a function in one call. Walks the function's instructions, collects unique data references, and returns the per-global audit (same shape as audit_global) plus a summary of how many are fully documented vs have issues. The killer per-function pre-flight tool \u00e2\u20ac\u201d start every doc pass with this when the function has global xrefs."
+      "description": "Audit every global variable referenced from within a function in one call. Walks the function's instructions, collects unique data references, and returns the per-global audit (same shape as audit_global) plus a summary of how many are fully documented vs have issues. The killer per-function pre-flight tool â€” start every doc pass with this when the function has global xrefs."
     },
     {
       "path": "/batch_apply_documentation",
@@ -417,6 +417,13 @@
       "description": "List executables in a BSim database (bsim listexes / getexecount)."
     },
     {
+      "path": "/bsim_list_databases",
+      "method": "GET",
+      "category": "bsim",
+      "params": [],
+      "description": "List H2 BSim databases under GHIDRA_MCP_BSIM_ROOT and the known config templates. Templates (medium_32, medium_64, ...) are fixed at createdatabase time. Sidecars written by bsim_create_db report which template each file: database used. Does not spawn the bsim CLI."
+    },
+    {
       "path": "/bsim_query",
       "method": "POST",
       "category": "bsim",
@@ -429,7 +436,60 @@
         "program",
         "wait_seconds"
       ],
-      "description": "Query one function or the whole open program against a BSim database. Each match has separate numeric similarity and confidence fields. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity."
+      "description": "Query one function or the whole open program against a BSim database. Filter on confidence, not similarity. Cross-compiler matches legitimately score 0.2-0.4 similarity; confidence indicates whether that overlap is meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 (a starting floor, not a calibration). Each match has separate numeric similarity and confidence, plus the source executable name and architecture. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity. A similarity_threshold above 0.5 silently drops cross-compiler matches and adds a warning. Queries run a helper analyzeHeadless JVM and can take minutes: expect a job_id, then poll bsim_job_status."
+    },
+    {
+      "path": "/build_manifest",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "path",
+        "dry_run",
+        "wait_seconds"
+      ],
+      "description": "Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them. A matrix of toolchain × opt (and board, for framework entries) is how the corpus covers compiler drift. Jobs whose artifact exists and whose sidecar sha256 still matches are skipped; a missing or mismatched sidecar rebuilds. dry_run returns every command line without cloning or compiling. One shared wait_seconds deadline covers the whole matrix; unfinished jobs return a job_id for build_reference_status."
+    },
+    {
+      "path": "/build_reference",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "name",
+        "repo",
+        "ref",
+        "sources",
+        "toolchain",
+        "arch_flags",
+        "opt",
+        "defines",
+        "extra_flags",
+        "strip_debug",
+        "output_name",
+        "dry_run",
+        "mode",
+        "framework",
+        "libraries",
+        "board",
+        "config",
+        "wait_seconds"
+      ],
+      "description": "Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through this tool; the shared volume is the handoff. ref must be a tag or SHA (bare branch names are refused). Compiled with -g; strip_debug=true runs strip --strip-debug (keeps .symtab) when corpus disk is tight. dry_run returns the compiler command line and output path without cloning or compiling. Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode <name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework configures a stub (docker/stubs/<framework>/), builds, and harvests build-tree objects, never the linked ELF. Each artifact is written with a <artifact>.json sidecar (resolved commit SHA, compiler --version, sha256). Long builds return {status: started, job_id} when they outlive wait_seconds; poll build_reference_status."
+    },
+    {
+      "path": "/build_reference_status",
+      "method": "GET",
+      "category": "bsim",
+      "params": [
+        "job_id"
+      ],
+      "description": "Status and result of a builder job. build_reference and build_manifest return {status: started, job_id} when a compile outlives wait_seconds; poll this until status is done or failed. Blank job_id lists every retained job."
+    },
+    {
+      "path": "/builder_health",
+      "method": "GET",
+      "category": "bsim",
+      "params": [],
+      "description": "What the ghidra-builder container can compile right now: packed toolchain identities, ARM GNU releases, and framework stubs. Proxies the builder's GET /health. build_reference and build_manifest refuse unknown names using this same list, not a Java constant."
     },
     {
       "path": "/bulk_fuzzy_match",
@@ -483,7 +543,7 @@
         "end_address",
         "program"
       ],
-      "description": "Run Ghidra's GUI 'Clear Flow and Repair' action on a seed range: clears instruction flow reachable from the seed, then repairs function bodies and re-disassembles retained flow (ClearFlowAndRepairCmd with clear_data=false, clear_labels=false, repair=true). Use to rebuild regions whose flow was created under wrong assumptions, e.g. a function truncated while a callee was incorrectly marked non-returning. The command follows control flow BEYOND the seed range; the reported observations are seed-local only and do not describe everything the command changed. The flow traversal is not cancellable \u00e2\u20ac\u201d a very large connected flow can hold the write lock (GUI: the Swing thread) until it completes. Ghidra treats a seed with exactly one candidate flow start (an instruction that is neither a function entry nor reached by fallthrough from inside the seed) as the flow being intentionally removed and does not reseed that start during repair; consequently, applying this action to otherwise healthy flow can clear code, matching the GUI action's behavior. The response's seed_range.end_address_exclusive is null when the seed ends at its address space's maximum address, since that boundary has no representable exclusive successor. Results are reachability-dependent and the command is not idempotent: some damaged regions may require more than one application to rebuild, while applying it again to healthy flow can clear code \u00e2\u20ac\u201d inspect the before/after observations and resulting disassembly after every call."
+      "description": "Run Ghidra's GUI 'Clear Flow and Repair' action on a seed range: clears instruction flow reachable from the seed, then repairs function bodies and re-disassembles retained flow (ClearFlowAndRepairCmd with clear_data=false, clear_labels=false, repair=true). Use to rebuild regions whose flow was created under wrong assumptions, e.g. a function truncated while a callee was incorrectly marked non-returning. The command follows control flow BEYOND the seed range; the reported observations are seed-local only and do not describe everything the command changed. The flow traversal is not cancellable â€” a very large connected flow can hold the write lock (GUI: the Swing thread) until it completes. Ghidra treats a seed with exactly one candidate flow start (an instruction that is neither a function entry nor reached by fallthrough from inside the seed) as the flow being intentionally removed and does not reseed that start during repair; consequently, applying this action to otherwise healthy flow can clear code, matching the GUI action's behavior. The response's seed_range.end_address_exclusive is null when the seed ends at its address space's maximum address, since that boundary has no representable exclusive successor. Results are reachability-dependent and the command is not idempotent: some damaged regions may require more than one application to rebuild, while applying it again to healthy flow can clear code â€” inspect the before/after observations and resulting disassembly after every call."
     },
     {
       "path": "/clear_function_comments",
@@ -1890,7 +1950,7 @@
       "params": [
         "program"
       ],
-      "description": "List program option groups (e.g. 'Program Information', 'Analyzers', 'Decompiler'). Each group holds typed key\u00e2\u2020\u2019value settings; use get_program_options to read a group's entries."
+      "description": "List program option groups (e.g. 'Program Information', 'Analyzers', 'Decompiler'). Each group holds typed keyâ†’value settings; use get_program_options to read a group's entries."
     },
     {
       "path": "/list_project_files",
@@ -1931,7 +1991,7 @@
       "params": [
         "program"
       ],
-      "description": "List user-defined property maps \u00e2\u20ac\u201d typed per-address key\u00e2\u2020\u2019value stores. Each map reports its name, value type (int|long|string|object|void), and the number of addresses holding a value."
+      "description": "List user-defined property maps â€” typed per-address keyâ†’value stores. Each map reports its name, value type (int|long|string|object|void), and the number of addresses holding a value."
     },
     {
       "path": "/list_scripts",
@@ -2170,7 +2230,7 @@
         "assignments",
         "program"
       ],
-      "description": "Detach one or more tags from a function. Does not delete the program-wide tag definition \u00e2\u20ac\u201d use delete_function_tag for that."
+      "description": "Detach one or more tags from a function. Does not delete the program-wide tag definition â€” use delete_function_tag for that."
     },
     {
       "path": "/remove_program_option",
@@ -2204,7 +2264,7 @@
         "operand_index",
         "program"
       ],
-      "description": "Remove memory cross-reference(s) from one address to another \u00e2\u20ac\u201d the inverse of add_memory_reference. Removes every reference from_address -> to_address regardless of operand by default; pass operand_index >= 0 to remove only the reference on that operand. Removes both user-defined and analyzer-inferred references and reports each removed reference's source_type. Accepts space-prefixed addresses (mem:1000)."
+      "description": "Remove memory cross-reference(s) from one address to another â€” the inverse of add_memory_reference. Removes every reference from_address -> to_address regardless of operand by default; pass operand_index >= 0 to remove only the reference on that operand. Removes both user-defined and analyzer-inferred references and reports each removed reference's source_type. Accepts space-prefixed addresses (mem:1000)."
     },
     {
       "path": "/remove_struct_field",
@@ -2570,12 +2630,12 @@
       "method": "POST",
       "category": "server",
       "params": [
-        "repo",
         "path",
         "comment",
-        "keepCheckedOut",
         "keep_checked_out",
-        "dry_run"
+        "repo",
+        "dry_run",
+        "keepCheckedOut"
       ],
       "description": "Add a DomainFile in the open shared project to version control via DomainFile.addToVersionControl. dry_run previews without adding."
     },
@@ -2671,7 +2731,7 @@
         "calling_convention",
         "program"
       ],
-      "description": "Set function prototype (return type, param types, calling convention). NOTE: the function name in the prototype string does NOT rename the function \u00e2\u20ac\u201d call rename_function separately if needed."
+      "description": "Set function prototype (return type, param types, calling convention). NOTE: the function name in the prototype string does NOT rename the function â€” call rename_function separately if needed."
     },
     {
       "path": "/set_function_tag_comment",
@@ -2709,7 +2769,7 @@
         "strict_mode",
         "allow_evict"
       ],
-      "description": "Atomically apply name + type + plate-comment + array length to a global variable. Single-transaction; rejects on validation failure with no partial write. Replaces the 4-tool chain (apply_data_type \u00e2\u2020\u2019 rename_data \u00e2\u2020\u2019 batch_set_comments \u00e2\u2020\u2019 create_label)."
+      "description": "Atomically apply name + type + plate-comment + array length to a global variable. Single-transaction; rejects on validation failure with no partial write. Replaces the 4-tool chain (apply_data_type â†’ rename_data â†’ batch_set_comments â†’ create_label)."
     },
     {
       "path": "/set_image_base",
@@ -2780,6 +2840,20 @@
         "program"
       ],
       "description": "Set types and names for multiple variables atomically. Types are applied first, then renames, in a single transaction. Hungarian prefix validation is enforced: the new name's prefix must match the type. On programs with multiple address spaces, prefix addresses with the space name."
+    },
+    {
+      "path": "/source_read",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "artifact",
+        "function",
+        "path",
+        "start_line",
+        "end_line",
+        "context"
+      ],
+      "description": "Read a span of pinned reference source from the builder cache. artifact names the corpus object (sidecar supplies repo and commit). function= resolves file and line range from that object's DWARF; path= reads a repo-relative file. Confined to the source cache. Response is numbered lines, capped; a missing commit names the cache."
     },
     {
       "path": "/suggest_field_names",

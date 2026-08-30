@@ -1,0 +1,7 @@
+{
+  "name": "pico-sdk",
+  "generator": "cmake",
+  "sdk_cache_var": "GHIDRA_SDK_PATH",
+  "board_cache_var": "GHIDRA_BOARD",
+  "libraries_cache_var": "GHIDRA_LIBRARIES"
+}

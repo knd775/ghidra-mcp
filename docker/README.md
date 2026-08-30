@@ -44,6 +44,10 @@ docker build -t ghcr.io/knd775/ghidra-mcp-headless:dev -f docker/Dockerfile .
 
 # Python MCP bridge (python:3.12-slim)
 docker build -t ghcr.io/knd775/ghidra-mcp-bridge:dev -f docker/Dockerfile.bridge .
+
+# Reference builder (ARM GNU prefixes + distro gcc-13). First build
+# downloads the pinned tarballs; after that, pull from GHCR.
+docker build -t ghcr.io/knd775/ghidra-mcp-builder:dev -f docker/Dockerfile.builder .
 ```
 
 Or `docker compose -f docker/docker-compose.yml build`.
@@ -53,6 +57,7 @@ Images are also published to GHCR on push to `main`/`dev`/`develop`:
 ```text
 ghcr.io/<owner>/ghidra-mcp-headless
 ghcr.io/<owner>/ghidra-mcp-bridge
+ghcr.io/<owner>/ghidra-mcp-builder
 ```
 
 The bridge must share the headless network namespace.
@@ -79,6 +84,8 @@ mvn clean package -P docker -DskipTests
 | `JAVA_OPTS` | `-Xmx8g -XX:+UseG1GC` | JVM options |
 | `GHIDRA_MCP_AUTH_TOKEN` | required | Bearer token; required for the 0.0.0.0 bind |
 | `GHIDRA_MCP_FILE_ROOT` | `/data` | Samples bind (`SAMPLES_DIR`) |
+| `GHIDRA_MCP_STUBS` | `/opt/ghidra-builder/stubs` | Framework stub projects for `mode=framework` |
+| `GHIDRA_MCP_BUILDER_URL` | `http://ghidra-builder:8092` | One builder, every identity. Internal network only. |
 | `GHIDRA_MCP_BSIM_ROOT` | `/srv/ghidra/bsim` | Confines `file:` BSim URLs. Dedicated volume, not under `/data`. |
 | `GHIDRA_SERVER_HOST` | `BIND_ADDR` | RMI address the headless client dials |
 | `BIND_ADDR` | required | Host IP for RMI publish and `-ip` |
@@ -96,6 +103,63 @@ mvn clean package -P docker -DskipTests
 | `ghidra-mcp-home` | `/home/ghidra` | `$HOME/.ghidra` settings |
 | `ghidra-mcp-projects` | `/projects` | Local (non-repo) project data |
 | `ghidra-bsim` | `/srv/ghidra/bsim` | H2 BSim databases (`file:/srv/ghidra/bsim/<db>`). Writable by uid 1000. Back this up; regenerating a corpus means recompiling everything in it. |
+| `builder-src-cache` | `/src` (builder) | Bare git clones for `build_reference`. Persists so a second build of the same ref does not re-clone. |
+| `docker/references.yaml` | `/data/references.yaml` | Embedded ARM corpus. `build_manifest` with no path reads this. |
+| `docker/references.userland.yaml` | `/data/references.userland.yaml` | x86-64 userland corpus. `build_manifest(path="references.userland.yaml")`. |
+| `docker/stubs/` | `/opt/ghidra-builder/stubs` | Framework stub projects (`pico-sdk` shipped). Listed by `mode=framework` validation. |
+
+## Reference builder
+
+The Ghidra image has no compiler and runs as uid 1000. Reference libraries
+are compiled in one always-on `ghidra-builder` container that holds
+gcc10-arm, gcc12-arm, gcc13-arm, and gcc13-x86_64 (the identity
+`<compiler><major>-<target>` selects the binary; it is not an image tag).
+It listens on the compose network only — no host ports, no Docker socket
+in any service. `build_reference` POSTs a job and polls; objects land on
+the shared `/data/uploads` mount as uid 1000, and `import_file` loads that
+path. `SAMPLES_DIR` on the host must be writable by uid 1000 — the same
+constraint as ghidra-mcp. There is no auth on the builder: the listener
+is not published off the compose network. `GET /health` is what the
+image healthcheck probes, and what MCP `builder_health` returns. ARM
+identities are pinned GNU tarballs (`docker/builder/toolchains.lock`),
+copied from a fetch stage so the download never sits in a final layer.
+`gcc13-x86_64` is distro gcc-13 on a Debian trixie runtime (tens of MB,
+not another ARM prefix). Distro `gcc-arm-none-eabi` is not used.
+Framework builds also need host `gcc`/`g++` (pico-sdk's pioasm is a
+nested host compile), `cmake`, and `ninja-build`. Stubs live in
+`docker/stubs/<framework>/` (shipped: `pico-sdk`, `musl`, `glibc`,
+`openssl`, `libsodium`, `sqlite`) and are copied into the image at
+`/opt/ghidra-builder/stubs`. Adding `stubs/zephyr/` is another directory,
+not a new MCP parameter. `mode=framework` harvests `.o`/`.a` from the
+build tree, never the linked ELF.
+
+Artifacts are compiled with `-g`. DWARF paths are rewritten to
+`/ref/<name>/...` (sidecar field `debug_path_prefix`). In Ghidra,
+Window -> Source Files and Transforms, one rule covers the corpus:
+
+```
+/ref/  ->  <local checkout root>/
+```
+
+Clone the repo at the sidecar's commit, or share the builder `/src`
+cache read-only. `source_read` does the lookup through the builder.
+
+Portainer (or `docker compose up -d`) pulls `ghidra-mcp-builder` from GHCR
+with the rest of the stack. The compose DNS name is still `ghidra-builder`.
+Rebuild locally only when you are changing the Dockerfile or prefixes.
+Corpus updates are MCP tools: `builder_health`, `build_manifest`,
+`build_reference`, `build_reference_status`, `source_read`. No shell on
+the Docker host.
+
+`dry_run=true` returns the compiler or cmake command line without cloning
+or compiling. `docker/references.yaml` is the ARM corpus (medium_32).
+`docker/references.userland.yaml` is x86-64 libc and static libs
+(medium_64, `file:/srv/ghidra/bsim/userland`). Leave
+`file:/srv/ghidra/bsim/re` as the existing ARM database; do not ingest
+x86-64 into it. Each object gets a JSON sidecar (`<artifact>.json`) with
+the resolved commit, compiler `--version`, sha256, and
+`debug_path_prefix`. `build_manifest` skips a job when that hash still
+matches.
 
 ## API Endpoints
 

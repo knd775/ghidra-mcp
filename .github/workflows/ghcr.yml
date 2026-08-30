@@ -119,3 +119,49 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha,scope=headless
         cache-to: type=gha,mode=max,scope=headless
+
+  builder:
+    name: Builder image
+    # Fetches pinned ARM GNU tarballs from developer.arm.com. Same rule as
+    # headless: build when we are going to push, not on documentation PRs.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set image name
+      run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/ghidra-mcp-builder" >> "$GITHUB_ENV"
+
+    - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - id: meta
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+      with:
+        images: ${{ env.IMAGE }}
+        tags: |
+          type=ref,event=branch
+          type=sha
+          type=semver,pattern={{version}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+      with:
+        context: .
+        file: docker/Dockerfile.builder
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=builder
+        cache-to: type=gha,mode=max,scope=builder

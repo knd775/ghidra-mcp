@@ -93,11 +93,13 @@ public class BSimService {
 
     @McpTool(path = "/bsim_create_db", method = "POST",
             description = "Create a BSim database via `bsim createdatabase`. Default template "
-                    + "medium_32 (32-bit ARM firmware). Call-graph data is recorded unless "
-                    + "callgraph=false. H2 file: URLs need a writable parent directory; "
-                    + "PostgreSQL when more than one writer is needed. The database is empty "
-                    + "until bsim_ingest; a query against an empty corpus returns nothing useful. "
-                    + "Returns a job_id instead of a result when the CLI outlives wait_seconds.",
+                    + "medium_32 (32-bit ARM firmware). Use medium_64 for x86-64 userland "
+                    + "(32-bit and 64-bit cannot share a database). Call-graph data is recorded "
+                    + "unless callgraph=false. H2 file: URLs need a writable parent directory; "
+                    + "PostgreSQL when more than one writer is needed. Writes a "
+                    + "<name>.ghidra-mcp.json sidecar with the template so bsim_list_databases "
+                    + "can report it. The database is empty until bsim_ingest. Returns a job_id "
+                    + "instead of a result when the CLI outlives wait_seconds.",
             category = "bsim")
     public Response createDb(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -143,6 +145,7 @@ public class BSimService {
                 if (!r.ok()) {
                     return cliError("createdatabase failed", r);
                 }
+                BSimUrls.writeDatabaseSidecar(url, template);
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("status", "success");
                 body.put("db_url", url);
@@ -157,6 +160,30 @@ public class BSimService {
         } catch (Exception e) {
             return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    // ========================================================================
+    // bsim_list_databases
+    // ========================================================================
+
+    @McpTool(path = "/bsim_list_databases", method = "GET",
+            description = "List H2 BSim databases under GHIDRA_MCP_BSIM_ROOT and the known "
+                    + "config templates. Templates (medium_32, medium_64, ...) are fixed at "
+                    + "createdatabase time. Sidecars written by bsim_create_db report which "
+                    + "template each file: database used. Does not spawn the bsim CLI.",
+            category = "bsim")
+    public Response listDatabases() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", "success");
+        body.put("config_templates", List.copyOf(BSimUrls.CONFIG_TEMPLATE_ORDER));
+        String root = BSimUrls.bsimRootEnv();
+        body.put("bsim_root", root);
+        List<Map<String, Object>> databases = (root == null || root.isBlank())
+                ? List.of()
+                : BSimUrls.listFileDatabases(Path.of(root));
+        body.put("databases", databases);
+        body.put("count", databases.size());
+        return Response.ok(body);
     }
 
     // ========================================================================
@@ -307,13 +334,15 @@ public class BSimService {
 
     @McpTool(path = "/bsim_query", method = "POST",
             description = "Query one function or the whole open program against a BSim database. "
-                    + "Each match has separate numeric similarity and confidence fields, plus the "
-                    + "source executable name and architecture. The result is flagged ambiguous "
-                    + "when the top two differently-named hits sit within 0.05 similarity. "
-                    + "Never a bare ranked list. Short generic functions (accessors, thunks) "
-                    + "often have high similarity and low confidence — that split is the point. "
-                    + "Queries run a helper analyzeHeadless JVM and can take minutes: expect a "
-                    + "job_id, then poll bsim_job_status.",
+                    + "Filter on confidence, not similarity. Cross-compiler matches legitimately "
+                    + "score 0.2-0.4 similarity; confidence indicates whether that overlap is "
+                    + "meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 "
+                    + "(a starting floor, not a calibration). Each match has separate numeric "
+                    + "similarity and confidence, plus the source executable name and architecture. "
+                    + "Flagged ambiguous when the top two differently-named hits sit within 0.05 "
+                    + "similarity. A similarity_threshold above 0.5 silently drops cross-compiler "
+                    + "matches and adds a warning. Queries run a helper analyzeHeadless JVM and "
+                    + "can take minutes: expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response query(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -321,11 +350,13 @@ public class BSimService {
             @Param(value = "function", source = ParamSource.BODY, defaultValue = "",
                     description = "Function name or address. Omit to query every function.")
                     String function,
-            @Param(value = "similarity_threshold", source = ParamSource.BODY, defaultValue = "0.7",
-                    description = "Minimum BSim similarity (0-1)") double similarityThreshold,
-            @Param(value = "confidence_threshold", source = ParamSource.BODY, defaultValue = "0.0",
-                    description = "Minimum BSim confidence/significance. 0.0 returns everything "
-                            + "the index considers; raise it to hide generic hits.")
+            @Param(value = "similarity_threshold", source = ParamSource.BODY, defaultValue = "0.0",
+                    description = "Minimum BSim similarity (0-1). Default 0.0: cross-compiler "
+                            + "matches sit at 0.2-0.4. Values above 0.5 typically return nothing "
+                            + "against a real corpus.") double similarityThreshold,
+            @Param(value = "confidence_threshold", source = ParamSource.BODY, defaultValue = "10.0",
+                    description = "Minimum BSim confidence. Default 10.0. Confidence, not "
+                            + "similarity, is the discriminating signal for cross-build matching.")
                     double confidenceThreshold,
             @Param(value = "max_matches", source = ParamSource.BODY, defaultValue = "10",
                     description = "Maximum matches per function") int maxMatches,
@@ -633,8 +664,21 @@ public class BSimService {
             }
             String md5 = program.getExecutableMD5();
             List<BSimMatches.FunctionResult> results = BSimMatches.parseQueryPayload(payload, md5);
+            List<String> warnings = new ArrayList<>();
+            String simWarn = BSimMatches.similarityThresholdWarning(similarity);
+            if (simWarn != null) warnings.add(simWarn);
+            try {
+                int bits = program.getLanguage().getLanguageDescription().getSize();
+                String sizeWarn = BSimUrls.pointerSizeQueryWarning(
+                        bits, BSimUrls.readSidecarTemplate(dbUrl));
+                if (sizeWarn != null) warnings.add(sizeWarn);
+            } catch (Exception ignored) {
+                // Language metadata missing on a stub program is not a query failure.
+            }
             if (function != null && !function.isBlank() && results.size() == 1) {
-                return Response.ok(results.get(0).toMap());
+                Map<String, Object> body = results.get(0).toMap();
+                if (!warnings.isEmpty()) body.put("warnings", warnings);
+                return Response.ok(body);
             }
             List<Map<String, Object>> rows = new ArrayList<>();
             for (BSimMatches.FunctionResult fr : results) rows.add(fr.toMap());
@@ -642,6 +686,7 @@ public class BSimService {
             body.put("program", program.getName());
             body.put("results", rows);
             body.put("count", rows.size());
+            if (!warnings.isEmpty()) body.put("warnings", warnings);
             return Response.ok(body);
         } finally {
             deleteRecursively(workDir);

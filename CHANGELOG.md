@@ -17,10 +17,71 @@ Query has no CLI command, so `bsim_query` runs `BSim_McpQuery.java` in a helper
 `analyzeHeadless` JVM and reads JSON back. `bsim_apply_matches` uses those
 scores and renames in the open program.
 
+**Reference corpus builds (`build_reference`, `build_manifest`).** BSim can
+only match what is in the corpus, and for embedded targets nothing is
+downloadable. The Ghidra container cannot compile (uid 1000, no compiler),
+and moving object bytes through an agent tool call has already silently
+corrupted a 34 KB file (same length, different sha256). A sibling
+`ghidra-builder` service clones a pinned tag,
+compiles onto the shared `/data` volume, and `import_file` loads that path.
+Compiler version is the design driver: GCC 13.2 littlefs matched the right
+names at 0.27–0.35 similarity because the firmware was built with GCC 10–12;
+`lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. One
+image holds gcc10-arm, gcc12-arm, gcc13-arm, and gcc13-x86_64; the identity string
+selects the binary, not a compose service. The image is
+`ghcr.io/<owner>/ghidra-mcp-builder` (same owner and tag as headless and
+bridge). Compose DNS stays `ghidra-builder`. There is no Docker socket
+anywhere: `ghidra-mcp` POSTs to `http://ghidra-builder:8092/build` and
+gets a job id back; `GET /build/{id}` (MCP: `build_reference_status`)
+retrieves a compile that outlives the ~60s MCP hop. Clang later is a
+layer in the same image and a manifest axis, not a new MCP parameter.
+Each identity is a pinned ARM GNU tarball (`docker/builder/toolchains.lock`:
+gcc10-arm 10.3-2021.10, gcc12-arm 12.2.Rel1, gcc13-arm 13.2.Rel1),
+fetched in a build stage so the archive never lands in the final image.
+`gcc13-x86_64` is Debian trixie's `gcc-13`, not a second ARM tarball: a
+native compiler has no multilib newlib, and 32-bit x86 is not installed.
+Distro `gcc-arm-none-eabi` is not used: the archive moves under you.
+`ref` must
+be a tag or SHA. `dry_run` returns the compiler command line and does not clone.
+Manifest `docker/references.yaml` expands littlefs × three toolchains × three
+opt levels to nine objects, and pico-sdk × three toolchains × two opt levels
+× two boards (`pico`, `pico_w`) to twelve framework jobs. `mode=framework`
+configures `docker/stubs/<framework>/`, builds, and harvests per-library
+objects from the CMake build tree — never the linked ELF (`--gc-sections`
+would keep only what the stub's `main.c` referenced). Compile keeps DWARF
+(`-g`; `strip_debug` defaults false). Recorded paths use `/ref/<name>/...`
+via `-fdebug-prefix-map`; sidecars include `debug_path_prefix`. x86-64
+userland (musl, glibc, zlib, OpenSSL, libsodium, SQLite) lives in
+`docker/references.userland.yaml` and ingests into a separate `medium_64`
+database (`file:/srv/ghidra/bsim/userland`). `bsim_list_databases` lists
+H2 databases and templates. `source_read` returns a numbered span from
+the builder source cache, resolved by function (DWARF) or path.
+
 Every match carries separate numeric `similarity` and `confidence`. The top two
 differently-named hits within 0.05 similarity are `ambiguous` and are never
-applied. `min_confidence` has no default. `dry_run` defaults to true and does
-not call `setName`. `skip_named` defaults to true.
+applied. `bsim_query` defaults to `similarity_threshold=0.0` and
+`confidence_threshold=10.0`: cross-compiler matches sit at 0.2–0.4 similarity,
+and confidence is the discriminating signal (measured: correct littlefs hits at
+31–35, chance matches at 0.17–3.6, a generic `lfs_deinit` at 12.8 just above
+the floor). The previous 0.7 similarity default returned nothing against a
+differently-compiled reference. Passing `similarity_threshold` above 0.5 adds
+a warning. `min_confidence` on apply still has no default. `dry_run` defaults
+to true and does not call `setName`. `skip_named` defaults to true.
+
+Each `build_reference` artifact is written with a JSON sidecar
+(`<artifact>.json`): resolved commit SHA (even when `ref` was a tag), the
+compiler's own `--version` line, sha256 of the object, toolchain, opt,
+defines. Framework mode writes one sidecar per harvested library, with
+`library` and `board`. `build_manifest` skips a job only when the artifact
+exists and that sidecar hash still matches; a missing or mismatched sidecar
+rebuilds rather than trusting the filename.
+
+`builder_health` is `GET /health` on the builder, exposed as an MCP tool.
+Identities, ARM GNU releases, and framework stubs come from the container,
+not from `DEFAULT_TOOLCHAINS` in Java. `build_reference` and `build_manifest`
+refuse unknown names using that same payload. `dry_run` still does not
+`POST /build` (no clone, no compile); it does ask `/health`, because that is
+how it knows whether `gcc13-arm` is actually packed.
 
 `bsim_ingest` no longer requires `program=` under
 `GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS` — its target is `source` (a ghidraURL).
@@ -159,10 +220,11 @@ fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
 ### Docker
 
 `docker/Dockerfile.bridge` builds the Python MCP bridge on `python:3.12-slim`.
-`.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless` and
-`ghidra-mcp-bridge` to GHCR on push to `main`/`dev`/`develop` and on version
-tags. Compose is Ghidra Server + headless + bridge (shared netns, loopback
-`GHIDRA_MCP_URL`) + a Cloudflare Tunnel. Env for that file is
+`.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless`,
+`ghidra-mcp-bridge`, and `ghidra-mcp-builder` to GHCR on push to
+`main`/`dev`/`develop` and on version tags. Compose is Ghidra Server +
+headless + bridge (shared netns, loopback `GHIDRA_MCP_URL`) + builder
+(compose DNS `ghidra-builder`) + a Cloudflare Tunnel. Env for that file is
 `docker/.env.template`. 8089/8081 are published on loopback only. There is
 no Traefik.
 

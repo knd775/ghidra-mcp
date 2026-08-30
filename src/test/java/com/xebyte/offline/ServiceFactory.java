@@ -12,6 +12,7 @@ import com.xebyte.core.MalwareSecurityService;
 import com.xebyte.core.ProgramProvider;
 import com.xebyte.core.EmulationService;
 import com.xebyte.core.BSimService;
+import com.xebyte.core.ReferenceBuildService;
 import com.xebyte.core.ProgramScriptService;
 import com.xebyte.core.SymbolLabelService;
 import com.xebyte.core.ThreadingStrategy;
@@ -52,6 +53,7 @@ public final class ServiceFactory {
         ProgramScriptService programScriptService = new ProgramScriptService(provider, ts);
         EmulationService emulationService = new EmulationService(provider, ts);
         BSimService bsimService = new BSimService(provider, ts);
+        ReferenceBuildService referenceBuildService = new ReferenceBuildService();
 
         HeadlessManagementService headlessManagementService =
             new HeadlessManagementService(new HeadlessProgramProvider(), new GhidraServerManager());
@@ -73,6 +75,7 @@ public final class ServiceFactory {
             programScriptService,
             emulationService,
             bsimService,
+            referenceBuildService,
             headlessManagementService,
             debuggerService,
         };

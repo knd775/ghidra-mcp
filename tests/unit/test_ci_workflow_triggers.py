@@ -157,22 +157,29 @@ def test_python_unit_job_is_ubuntu_312_only():
     assert "pester-tests" not in _load("tests.yml")["jobs"]
 
 
-def test_ghcr_workflow_publishes_headless_and_bridge():
-    """GHCR publish must cover both images this stack actually runs."""
+def test_ghcr_workflow_publishes_headless_bridge_and_builder():
+    """GHCR publish must cover every image this stack actually runs."""
     path = WORKFLOWS / "ghcr.yml"
     assert path.is_file(), "ghcr.yml is missing"
     doc = _load("ghcr.yml")
     jobs = doc["jobs"]
     assert "bridge" in jobs
     assert "headless" in jobs
+    assert "builder" in jobs
     text = path.read_text(encoding="utf-8")
     assert "ghidra-mcp-bridge" in text
     assert "ghidra-mcp-headless" in text
+    assert "ghidra-mcp-builder" in text
     assert "docker/Dockerfile.bridge" in text
+    assert "docker/Dockerfile.builder" in text
     assert "packages: write" in text
     headless = jobs["headless"]
     assert "pull_request" in str(headless.get("if", "")), (
         "the headless image downloads Ghidra; it must not build on every PR"
+    )
+    builder = jobs["builder"]
+    assert "pull_request" in str(builder.get("if", "")), (
+        "the builder image fetches ARM GNU tarballs; it must not build on every PR"
     )
 
 
@@ -190,3 +197,14 @@ def test_bridge_dockerfile_is_python_312_and_loopback_oriented():
     assert "traefik" not in compose.lower()
     assert "13100:13100" in compose
     assert "GHIDRA_MCP_FILE_ROOT: /data" in compose
+    assert "ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-builder:${GHIDRA_MCP_VERSION:-dev}" in compose
+    assert "hostname: ghidra-builder" in compose
+    assert "ghidra-builder:gcc13-arm" not in compose
+    assert "builder-src-cache:/src" in compose
+    assert "user: \"1000:1000\"" in compose
+    assert "GHIDRA_MCP_BUILDER_URL:" in compose
+    assert "GHIDRA_MCP_BUILDER_URLS" not in compose
+    assert not any(
+        line.strip().startswith("- ") and "docker.sock" in line
+        for line in compose.splitlines()
+    )

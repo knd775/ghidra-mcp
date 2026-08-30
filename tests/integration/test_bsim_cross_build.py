@@ -90,17 +90,18 @@ def _db_url(fixture_dir: Path) -> str:
 
 def test_distinctive_function_is_top_hit_with_confidence(http_client, fixture_dir):
     spec = json.loads((fixture_dir / "distinctive.json").read_text(encoding="utf-8"))
-    data = _post(
-        http_client,
-        "/bsim_query",
-        {
-            "db_url": _db_url(fixture_dir),
-            "function": spec["function"],
-            "similarity_threshold": spec.get("similarity_threshold", 0.7),
-            "confidence_threshold": 0.0,
-            "max_matches": 10,
-        },
-    )
+    body = {
+        "db_url": _db_url(fixture_dir),
+        "function": spec["function"],
+        "max_matches": 10,
+    }
+    # Omit thresholds so the server defaults (similarity 0.0, confidence 10.0)
+    # have to surface this cross-build match. Passing 0.7 hid it.
+    if "similarity_threshold" in spec:
+        body["similarity_threshold"] = spec["similarity_threshold"]
+    if "confidence_threshold" in spec:
+        body["confidence_threshold"] = spec["confidence_threshold"]
+    data = _post(http_client, "/bsim_query", body)
     matches = data.get("matches") or []
     assert matches, data
     top = matches[0]
@@ -108,6 +109,27 @@ def test_distinctive_function_is_top_hit_with_confidence(http_client, fixture_di
     assert top["name"] == spec["expected_name"], top
     assert top["confidence"] >= spec.get("min_confidence", 20), top
     assert data.get("ambiguous") is False, data
+
+
+def test_old_similarity_default_returns_nothing(http_client, fixture_dir):
+    spec = json.loads((fixture_dir / "distinctive.json").read_text(encoding="utf-8"))
+    data = _post(
+        http_client,
+        "/bsim_query",
+        {
+            "db_url": _db_url(fixture_dir),
+            "function": spec["function"],
+            "similarity_threshold": 0.7,
+            "max_matches": 10,
+        },
+    )
+    matches = data.get("matches") or []
+    assert not matches, (
+        "similarity_threshold=0.7 must still drop the cross-build hit that "
+        "the new default surfaces: " + json.dumps(data)
+    )
+    warnings = data.get("warnings") or []
+    assert warnings, data
 
 
 def test_generic_helper_low_confidence(http_client, fixture_dir):

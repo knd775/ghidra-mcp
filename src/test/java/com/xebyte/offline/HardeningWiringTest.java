@@ -188,6 +188,32 @@ public class HardeningWiringTest extends TestCase {
                 src.contains("getent passwd 1000"));
         assertTrue("Dockerfile must still create ghidra as uid 1000",
                 src.contains("useradd --uid 1000 --gid 1000"));
+        String builder = Files.readString(Paths.get("docker", "Dockerfile.builder"));
+        assertTrue("builder image must free uid 1000",
+                builder.contains("getent passwd 1000"));
+        assertTrue("builder must run as uid 1000 so uploads are readable by ghidra-mcp",
+                builder.contains("useradd --uid 1000 --gid 1000"));
+        assertTrue("one image holds every identity prefix",
+                builder.contains("/opt/ghidra-builder/toolchains/gcc13-arm"));
+        assertTrue("gcc10-arm is packed into the same image",
+                builder.contains("/opt/ghidra-builder/toolchains/gcc10-arm"));
+        assertTrue("native x86-64 is packed as gcc13-x86_64",
+                builder.contains("/opt/ghidra-builder/toolchains/gcc13-x86_64"));
+        assertFalse("must not apt-install gcc-multilib",
+                builder.contains("install gcc-multilib")
+                        || builder.matches("(?m)^\\s*gcc-multilib\\s*$"));
+        assertTrue("image build asserts gcc-multilib is absent",
+                builder.contains("dpkg -l gcc-multilib"));
+        assertFalse("identity is not an image tag / build-arg",
+                builder.contains("ARG TOOLCHAIN_TAG"));
+        assertTrue("HEALTHCHECK must probe /health",
+                builder.contains("/health"));
+        assertFalse("HEALTHCHECK must not put the auth token on the command line",
+                builder.contains("Bearer"));
+        assertTrue("toolchains are pinned ARM tarballs, not distro packages",
+                builder.contains("developer.arm.com"));
+        assertFalse("distro gcc-arm-none-eabi is not a corpus pin",
+                builder.contains("libnewlib-arm-none-eabi"));
     }
 
     /**

@@ -1,0 +1,9 @@
+{
+  "name": "libsodium",
+  "generator": "make",
+  "out_of_tree": false,
+  "prepare": ["./autogen.sh"],
+  "configure": ["./configure", "--enable-static", "--disable-shared"],
+  "make": ["make", "-j"],
+  "harvest": [{"path": "src/libsodium/.libs/libsodium.a", "library": "libsodium"}]
+}

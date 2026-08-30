@@ -47,6 +47,7 @@ services:
     restart: unless-stopped
     depends_on:
       - ghidra-server
+      - builder
     environment:
       GHIDRA_MCP_PORT: "8089"
       GHIDRA_MCP_BIND_ADDRESS: "0.0.0.0"
@@ -61,6 +62,10 @@ services:
       GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:?set in .env}
       GHIDRA_MCP_FILE_ROOT: /data
       GHIDRA_MCP_BSIM_ROOT: /srv/ghidra/bsim
+      # One builder, every identity. No docker.sock, no host ports.
+      GHIDRA_MCP_BUILDER_URL: "http://ghidra-builder:8092"
+      # Stub listing for mode=framework dry_run (builder image also bakes these in).
+      GHIDRA_MCP_STUBS: /opt/ghidra-builder/stubs
 
       # -Duser.name. Must match the Ghidra Server account.
       GHIDRA_USER: ${GHIDRA_SERVER_USER:?set in .env}
@@ -72,6 +77,9 @@ services:
     volumes:
       # Absolute host path. Relative paths are unreliable in Portainer.
       - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
+      - ./references.yaml:/data/references.yaml:ro
+      - ./references.userland.yaml:/data/references.userland.yaml:ro
+      - ./stubs:/opt/ghidra-builder/stubs:ro
       - ghidra-mcp-home:/home/ghidra
       - ghidra-mcp-projects:/projects
       - ghidra-bsim:/srv/ghidra/bsim
@@ -117,6 +125,34 @@ services:
       # Must include the tunnel hostname or forwarded Host headers are rejected.
       GHIDRA_MCP_ALLOWED_HOSTS: ${GHIDRA_MCP_ALLOWED_HOSTS:?set in .env}
 
+  # One resident builder, pulled from GHCR as ghidra-mcp-builder (same
+  # owner/tag as headless and bridge). Holds gcc10-arm, gcc12-arm,
+  # gcc13-arm, and gcc13-x86_64 (distro gcc-13, no 32-bit multilib).
+  # Compose DNS name stays ghidra-builder. ghidra-mcp POSTs jobs on the
+  # compose network (not docker exec: that would require docker.sock in
+  # the process that parses untrusted binaries).
+  # No host ports, no tunnel, no auth beyond the internal network.
+  builder:
+    image: ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-builder:${GHIDRA_MCP_VERSION:-dev}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.builder
+    pull_policy: missing
+    container_name: ghidra-builder
+    hostname: ghidra-builder
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      BUILDER_PORT: "8092"
+      GHIDRA_MCP_FILE_ROOT: /data
+      GHIDRA_MCP_STUBS: /opt/ghidra-builder/stubs
+      GHIDRA_MCP_TOOLCHAINS: /opt/ghidra-builder/toolchains
+    volumes:
+      - ${SAMPLES_DIR:?set in .env to an absolute host path}:/data
+      - builder-src-cache:/src
+    networks:
+      - ghidra
+
   # Dashboard tunnel: HTTP origin http://ghidra-mcp:8081 (bridge shares
   # that namespace). Register https://<hostname>/mcp in Zero Trust AI
   # controls and put an Access policy on the origin. The tunnel does not
@@ -138,6 +174,7 @@ volumes:
   ghidra-mcp-home:
   ghidra-mcp-projects:
   ghidra-bsim:
+  builder-src-cache:
 
 networks:
   ghidra:
