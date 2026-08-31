@@ -283,10 +283,10 @@ class TestBuilderCompose(unittest.TestCase):
 
     def test_manifest_includes_pico_sdk_framework_matrix(self):
         doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(len(doc["references"]), 2)
+        self.assertEqual(len(doc["references"]), 3)
         self.assertEqual(doc["database"], "postgresql://ghidra-bsim:5432/bsim")
         self.assertEqual(doc["config_template"], "medium_nosize")
-        pico = doc["references"][1]
+        pico = next(entry for entry in doc["references"] if entry["name"] == "pico-sdk")
         self.assertEqual(pico["name"], "pico-sdk")
         self.assertEqual(pico["mode"], "framework")
         self.assertEqual(pico["framework"], "pico-sdk")
@@ -319,7 +319,7 @@ class TestBuilderCompose(unittest.TestCase):
             ["musl", "musl", "glibc", "glibc", "zlib", "openssl", "libsodium", "sqlite"],
         )
         embedded = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(len(embedded["references"]), 2)
+        self.assertEqual(len(embedded["references"]), 3)
         self.assertEqual(doc["database"], embedded["database"])
 
 

@@ -34,8 +34,9 @@ config_template: medium_nosize
 # strip_debug defaults to false; set it only if corpus disk is the constraint.
 # Sidecars record debug_path_prefix.
 #
-# littlefs × 3 toolchains × 3 opt = 9. pico-sdk × 3 toolchains × 2 opt ×
-# 2 boards = 12. build_manifest skips jobs whose outputs already exist.
+# Each littlefs configuration × 3 toolchains × 3 opt = 9, for 18 littlefs
+# objects total. pico-sdk × 3 toolchains × 2 opt × 2 boards = 12.
+# build_manifest skips jobs whose outputs already exist.
 # x86-64 userland lives in docker/references.userland.yaml (same
 # database, different build matrix).
 
@@ -45,6 +46,20 @@ references:
     ref: v2.9.3
     sources: [lfs.c]
     defines: [LFS_NO_MALLOC, LFS_NO_ASSERT]
+    arch_flags: "-mcpu=cortex-m0plus -mthumb"
+    matrix:
+      toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]
+      opt: [-Os, -O2, -O3]
+
+  # Keep the no-assert build above because deployed firmware uses both
+  # configurations. This second identity retains LFS_ERROR strings and
+  # assertions so corroboration can compare the strongest source-level
+  # evidence instead of constants alone.
+  - name: littlefs-logging
+    repo: https://github.com/littlefs-project/littlefs.git
+    ref: v2.9.3
+    sources: [lfs.c]
+    defines: [LFS_NO_MALLOC]
     arch_flags: "-mcpu=cortex-m0plus -mthumb"
     matrix:
       toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]

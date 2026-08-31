@@ -301,6 +301,72 @@ public class CorroborationTest extends TestCase {
         assertFalse(json, json.contains("\"score\""));
     }
 
+    public void testCorroborateMatchDistinguishesMissingFunction() throws Exception {
+        FunctionRow query = row("FUN_1", List.of("0x1"), List.of(), List.of());
+        List<FunctionRow> extracted = List.of(
+                row("aa".repeat(16), "littlefs.o", "lfs_bd_read",
+                        List.of(), List.of(), List.of(), false),
+                row("aa".repeat(16), "littlefs.o", "lfs_dir_get",
+                        List.of(), List.of(), List.of(), false));
+        store.upsert("aa".repeat(16), "littlefs.o", extracted);
+        BSimService svc = serviceWith(programNamed("fw.elf"), (p, n) -> query, p -> List.of(query));
+
+        Response r = svc.corroborateMatch("fw.elf", "FUN_1",
+                "postgresql://ghidra-bsim:5432/embedded",
+                "littlefs.o", "lfs_bd_cmp", "auto");
+
+        assertFalse(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("function_not_found"));
+        assertFalse(json, json.contains("not_extracted"));
+        assertTrue(json, json.contains("\"extracted_function_count\":2"));
+    }
+
+    public void testApplyMatchesReportsAndSkipsDuplicateNamesByDefault() throws Exception {
+        String resultJson = duplicateApplyPayload(40.63, 36.88);
+        BSimService svc = queryService(row("FUN_1", List.of(), List.of(), List.of()), resultJson);
+
+        Response r = svc.applyMatches("postgresql://ghidra-bsim:5432/embedded",
+                15.0, 0.15, false, false, 0.0, 10, "",
+                "", "", "", "", 8, false, "none", 5.0, 45);
+
+        assertFalse(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("\"conflicting\":2"));
+        assertTrue(json, json.contains("\"groups\":1"));
+        assertTrue(json, json.contains("\"name\":\"lfs_bd_read\""));
+        assertTrue(json, json.contains("FUN_100068b0"));
+        assertTrue(json, json.contains("FUN_10006cd8"));
+        assertTrue(json, json.contains("\"renamed\":[]"));
+    }
+
+    public void testApplyMatchesBestRequiresMarginAndNeverResolvesTie() throws Exception {
+        BSimService marginSvc = queryService(
+                row("FUN_1", List.of(), List.of(), List.of()),
+                duplicateApplyPayload(60.48, 55.58));
+        Response resolved = marginSvc.applyMatches(
+                "postgresql://ghidra-bsim:5432/embedded",
+                15.0, 0.15, false, true, 0.0, 10, "",
+                "", "", "", "", 8, false, "best", 4.0, 45);
+        String resolvedJson = resolved.toJson();
+        assertTrue(resolvedJson, resolvedJson.contains("\"resolved_best\":1"));
+        assertTrue(resolvedJson, resolvedJson.contains("\"would_rename\":[{"));
+        assertTrue(resolvedJson, resolvedJson.contains("FUN_100068b0"));
+        assertTrue(resolvedJson, resolvedJson.contains("\"conflicting\":1"));
+
+        BSimService tiedSvc = queryService(
+                row("FUN_1", List.of(), List.of(), List.of()),
+                duplicateApplyPayload(41.11, 41.11));
+        Response tied = tiedSvc.applyMatches(
+                "postgresql://ghidra-bsim:5432/embedded",
+                15.0, 0.15, false, true, 0.0, 10, "",
+                "", "", "", "", 8, false, "best", 0.0, 45);
+        String tiedJson = tied.toJson();
+        assertTrue(tiedJson, tiedJson.contains("\"skipped_insufficient_margin\":1"));
+        assertTrue(tiedJson, tiedJson.contains("\"would_rename\":[]"));
+        assertTrue(tiedJson, tiedJson.contains("\"conflicting\":2"));
+    }
+
     public void testCorroborateMatchFileUrlIsNoEvidence() {
         FunctionRow query = row("FUN_1", List.of("0x1"), List.of(), List.of());
         BSimService svc = serviceWith(programNamed("fw.elf"), (p, n) -> query, p -> List.of(query));
@@ -433,6 +499,16 @@ public class CorroborationTest extends TestCase {
     private static FunctionRow row(String function, List<String> constants,
                                    List<String> strings, List<String> callees) {
         return new FunctionRow("", "", function, constants, strings, callees, false);
+    }
+
+    private static String duplicateApplyPayload(double firstConfidence, double secondConfidence) {
+        return "{\"program\":\"fw.elf\",\"results\":["
+                + "{\"function\":\"FUN_100068b0\","
+                + "\"matches\":[{\"name\":\"lfs_bd_read\",\"similarity\":0.4,"
+                + "\"confidence\":" + firstConfidence + ",\"executable\":\"littlefs.o\"}]},"
+                + "{\"function\":\"FUN_10006cd8\","
+                + "\"matches\":[{\"name\":\"lfs_bd_read\",\"similarity\":0.4,"
+                + "\"confidence\":" + secondConfidence + ",\"executable\":\"littlefs.o\"}]}]}";
     }
 
     private static FunctionRow row(String md5, String exe, String function,

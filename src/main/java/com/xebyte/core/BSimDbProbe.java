@@ -34,8 +34,13 @@ public final class BSimDbProbe {
     /** BSim's own metadata table, created by {@code bsim createdatabase}. */
     private static final String BSIM_TABLE = "keyvaluetable";
 
-    /** BSim's executable table; its row count is the corpus size. */
-    private static final String EXE_TABLE = "exetable";
+    /**
+     * Match Ghidra's {@code getexecount} default. BSim stores synthetic library
+     * records in {@code exetable} with this MD5 prefix, but {@code listexes}
+     * and {@code getexecount} omit them unless {@code includeFakes} is true.
+     */
+    static final String EXECUTABLE_COUNT_SQL = "SELECT COUNT(*) FROM exetable "
+            + "WHERE md5 NOT ILIKE 'bbbbbbbbaaaaaaaa%'";
 
     private BSimDbProbe() {}
 
@@ -80,7 +85,7 @@ public final class BSimDbProbe {
                         "database exists but has no BSim tables; run bsim_create_db");
             }
             state(out, true, "ok", null);
-            Integer exes = count(c, "SELECT COUNT(*) FROM " + EXE_TABLE);
+            Integer exes = count(c, EXECUTABLE_COUNT_SQL);
             if (exes != null) out.put("executables", exes);
             if (hasTable(c, "functions", "corroboration")) {
                 Integer rows = count(c, "SELECT COUNT(*) FROM corroboration.functions");

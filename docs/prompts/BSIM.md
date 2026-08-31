@@ -61,8 +61,11 @@ harvesting did not use the `--gc-sections`'d ELF.
 
 A corpus needs a matrix, not nine hand-written calls.
 `docker/references.yaml` is the corpus definition; `build_manifest` expands
-it. littlefs × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2, -O3} is nine
-objects. pico-sdk is a **framework** entry: one stub CMake project
+it. Each of the `littlefs` and `littlefs-logging` configurations expands over
+{gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2, -O3}, for eighteen objects.
+The logging variant keeps assertions and `LFS_ERROR` strings by omitting
+`LFS_NO_ASSERT`; the original no-assert build remains in the corpus.
+pico-sdk is a **framework** entry: one stub CMake project
 (`docker/stubs/pico-sdk/`) × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2}
 × {pico, pico_w} is twelve configure/build jobs, each harvesting several
 per-library objects. Compiler version is why: every littlefs from v2.4.2 to v2.9.3
@@ -395,8 +398,11 @@ basename match reports both originals — firmware `__FILE__` paths and
 `-fdebug-prefix-map` `/ref/…` paths are the same file. Format strings
 match exactly.
 
-A lookup miss (executable ingested before this feature, or a leftover
-H2 `file:` URL) is `status: no_evidence`, not an error.
+A lookup miss is `status: no_evidence`, not an error. If the executable has
+no rows, the reason is `not_extracted`. If it has rows but lacks the requested
+function, the reason is `function_not_found` and `extracted_function_count`
+shows how much data was checked. A leftover H2 `file:` URL reports
+`unsupported_backend`.
 
 ### `bsim_apply_matches`
 
@@ -405,7 +411,8 @@ bsim_apply_matches(db_url, program, min_confidence=<required>,
                    min_similarity=0.8, skip_named=True, dry_run=True,
                    similarity_threshold=0.0, arch=None, executable=None,
                    compiler=None, exclude_md5=None, min_feature_count=8,
-                   apply_unidentifiable=False, wait_seconds=45)
+                   apply_unidentifiable=False, resolve_conflicts="none",
+                   conflict_min_confidence_margin=5.0, wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
@@ -415,6 +422,15 @@ is the default and does not call `setName`. `skip_named=True` will not
 overwrite an analyst's name. An `ambiguous` result is never applied,
 whatever the scores. Unidentifiable functions are skipped and counted
 unless `apply_unidentifiable=true`.
+
+The apply decision is global. Proposed renames are grouped by target name
+after all thresholds and filters. A duplicate group is listed in `conflicts`,
+and its withheld functions contribute to `counts.conflicting`. The default
+`resolve_conflicts="none"` applies none of them. `resolve_conflicts="best"`
+applies only the highest-confidence candidate when its lead over second place
+meets `conflict_min_confidence_margin`. Exact ties are always skipped. A name
+that already belongs to another function is also a conflict and is never
+resolved by `best`.
 
 Applied names are the BSim hit names as-is (C linkage, not PascalCase).
 `lfs_bd_read` is the right name here.

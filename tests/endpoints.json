@@ -367,9 +367,11 @@
         "exclude_md5",
         "min_feature_count",
         "apply_unidentifiable",
+        "resolve_conflicts",
+        "conflict_min_confidence_margin",
         "wait_seconds"
       ],
-      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default — there is no universally safe value. dry_run defaults to true and does not write. skip_named defaults to true (never overwrite an analyst name). Ambiguous matches are never applied. Functions flagged unidentifiable (too few LSH features) are skipped unless apply_unidentifiable=true. Optional arch / executable / compiler / exclude_md5 are the same server-side filters as bsim_query. Applied names are the BSim hit names as-is (C linkage, not PascalCase). Runs a full-program BSim query first, which takes minutes: expect a job_id, then poll bsim_job_status."
+      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default — there is no universally safe value. dry_run defaults to true and does not write. skip_named defaults to true (never overwrite an analyst name). Ambiguous matches are never applied. Duplicate proposed names are conflicts and none are applied by default. resolve_conflicts=best may select the highest-confidence candidate only when it clears conflict_min_confidence_margin. Functions flagged unidentifiable (too few LSH features) are skipped unless apply_unidentifiable=true. Optional arch / executable / compiler / exclude_md5 are the same server-side filters as bsim_query. Applied names are the BSim hit names as-is (C linkage, not PascalCase). Runs a full-program BSim query first, which takes minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/bsim_create_db",

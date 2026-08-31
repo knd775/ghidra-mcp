@@ -557,7 +557,7 @@ public class BSimServiceValidationTest extends TestCase {
 
     public void testApplyRequiresMinConfidence() {
         Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, true, 0.7, 10, "",
-                "", "", "", "", 8, false, WAIT);
+                "", "", "", "", 8, false, "none", 5.0, WAIT);
         assertTrue(r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("min_confidence"));
@@ -585,13 +585,17 @@ public class BSimServiceValidationTest extends TestCase {
                 "applyMatches", String.class, Double.class, double.class, boolean.class,
                 boolean.class, double.class, int.class, String.class,
                 String.class, String.class, String.class, String.class, int.class,
-                boolean.class, int.class);
+                boolean.class, String.class, double.class, int.class);
         Param minConfidence = paramNamed(apply, "min_confidence");
         assertEquals("apply still has no default floor", Param.NO_DEFAULT, minConfidence.defaultValue());
         Param applySim = paramNamed(apply, "similarity_threshold");
         assertEquals("0.0", applySim.defaultValue());
         Param applyUnident = paramNamed(apply, "apply_unidentifiable");
         assertEquals("false", applyUnident.defaultValue());
+        Param resolveConflicts = paramNamed(apply, "resolve_conflicts");
+        assertEquals("none", resolveConflicts.defaultValue());
+        Param conflictMargin = paramNamed(apply, "conflict_min_confidence_margin");
+        assertEquals("5.0", conflictMargin.defaultValue());
     }
 
     private static Param paramNamed(java.lang.reflect.Method method, String name) {
@@ -623,7 +627,7 @@ public class BSimServiceValidationTest extends TestCase {
     public void testDryRunDefaultDoesNotNeedAProgramWhenConfidenceMissing() {
         // The confidence check must run before any write or query.
         Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, 0.7, 10, "",
-                "", "", "", "", 8, false, WAIT);
+                "", "", "", "", 8, false, "none", 5.0, WAIT);
         assertTrue(r instanceof Response.Err);
         assertTrue(commands.isEmpty());
     }
