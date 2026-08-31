@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -283,8 +284,7 @@ public class AnnotationScannerOfflineTest extends TestCase {
      * <p>A later incident (bsim_create_db, import_program, terminate_checkout) showed
      * the rollback wrapper is not enough: side effects outside a Program transaction
      * still commit. Tools that do not declare {@code dry_run} must not be invoked at
-     * all. Tools that declare it are responsible for previewing, with a listing
-     * rollback as a safety net when a Program is available.
+     * all. Tools that declare it are responsible for a read-only preview.
      */
     public void testDryRunWithoutDeclaredParamDoesNotInvoke() throws Exception {
         DryRunWriteFixture fixture = new DryRunWriteFixture();
@@ -317,7 +317,7 @@ public class AnnotationScannerOfflineTest extends TestCase {
         assertTrue(json, json.contains("/test_dry_run_write"));
     }
 
-    public void testDeclaredDryRunIsInvokedAndRolledBack() throws Exception {
+    public void testDeclaredDryRunIsInvokedWithoutOpeningTransaction() throws Exception {
         DeclaredDryRunFixture fixture = new DeclaredDryRunFixture();
         Program program = mock(Program.class);
         when(program.startTransaction(org.mockito.ArgumentMatchers.anyString())).thenReturn(42);
@@ -339,7 +339,35 @@ public class AnnotationScannerOfflineTest extends TestCase {
         endpoint.handler().handle(query, body);
 
         assertTrue("Declared dry_run must invoke so the method can preview", fixture.invoked);
-        verify(program).endTransaction(anyInt(), eq(false));
+        verify(program, never()).startTransaction(org.mockito.ArgumentMatchers.anyString());
+        verify(program, never()).endTransaction(anyInt(), anyBoolean());
+    }
+
+    public void testFailedDeclaredDryRunLeavesNoTransactionForRetry() throws Exception {
+        FailOnceDeclaredDryRunFixture fixture = new FailOnceDeclaredDryRunFixture();
+        Program program = mock(Program.class);
+        ProgramProvider provider = mock(ProgramProvider.class);
+        when(provider.getProgram("Test.dll")).thenReturn(program);
+
+        AnnotationScanner fixtureScanner = new AnnotationScanner(provider, new Object[] { fixture });
+        EndpointDef endpoint = null;
+        for (EndpointDef ep : fixtureScanner.getEndpoints()) {
+            if ("/test_fail_once_declared_dry_run".equals(ep.path())) endpoint = ep;
+        }
+        assertNotNull(endpoint);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("program", "Test.dll");
+        body.put("dry_run", Boolean.TRUE);
+        Response first = endpoint.handler().handle(Collections.emptyMap(), body);
+        Response second = endpoint.handler().handle(Collections.emptyMap(), body);
+
+        assertTrue(first instanceof Response.Err);
+        assertFalse("retry must reach the endpoint after the first failure",
+                second instanceof Response.Err);
+        assertEquals(2, fixture.calls);
+        verify(program, never()).startTransaction(org.mockito.ArgumentMatchers.anyString());
+        verify(program, never()).endTransaction(anyInt(), anyBoolean());
     }
 
     public void testControlWithoutDryRunStillInvokes() throws Exception {
@@ -466,6 +494,21 @@ public class AnnotationScannerOfflineTest extends TestCase {
                 @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "true")
                         boolean dryRun) {
             invoked = true;
+            return Response.ok(java.util.Map.of("dry_run", dryRun, "status", "preview"));
+        }
+    }
+
+    static class FailOnceDeclaredDryRunFixture {
+        int calls;
+
+        @McpTool(path = "/test_fail_once_declared_dry_run", method = "POST",
+                 description = "Fixture: first dry-run fails and the retry must remain usable")
+        public Response write(
+                @Param(value = "program", defaultValue = "") String program,
+                @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "true")
+                        boolean dryRun) {
+            calls++;
+            if (calls == 1) throw new IllegalStateException("planned failure");
             return Response.ok(java.util.Map.of("dry_run", dryRun, "status", "preview"));
         }
     }

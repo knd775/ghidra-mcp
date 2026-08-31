@@ -195,25 +195,43 @@ public class BSimService {
     @McpTool(path = "/bsim_list_databases", method = "GET",
             description = "List BSim databases: allowlisted postgresql:// URLs "
                     + "(GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under "
-                    + "GHIDRA_MCP_BSIM_ROOT. Templates (medium_nosize, medium_32, ...) are fixed at "
-                    + "createdatabase time. Sidecars written by bsim_create_db, or "
-                    + "GHIDRA_MCP_BSIM_TEMPLATES, report which template each database used. "
-                    + "Does not spawn the bsim CLI.",
+                    + "GHIDRA_MCP_BSIM_ROOT. Every row separates configuration from state. "
+                    + "configured=true means only that the URL is allowlisted; present says "
+                    + "whether the database is actually there, and probe explains it (ok, "
+                    + "no_database, no_bsim_schema, auth_failed, unreachable, no_credential, "
+                    + "not_probed). A live database also reports executables and "
+                    + "corroboration_functions. config_template is CONFIGURATION, not a read "
+                    + "of the database: config_template_source says whether it came from a "
+                    + "bsim_create_db sidecar, GHIDRA_MCP_BSIM_TEMPLATES, or nowhere. Templates "
+                    + "are fixed inside the database at createdatabase time. Never spawns the "
+                    + "bsim CLI; probing is a short read-only JDBC connect (probe=false skips "
+                    + "it and leaves present unreported). present is omitted whenever it is "
+                    + "unknown, so read probe rather than treating a missing present as false.",
             category = "bsim")
-    public Response listDatabases() {
+    public Response listDatabases(
+            @Param(value = "probe", defaultValue = "true",
+                    description = "Contact each allowlisted network database to report whether "
+                            + "it exists. false leaves present unreported and probe=not_probed.")
+                    boolean probe,
+            @Param(value = "probe_timeout_seconds", defaultValue = "3",
+                    description = "Per-database connect/read budget in seconds (1-15). Several "
+                            + "URLs are probed in one call, so keep it short.")
+                    int probeTimeoutSeconds) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", "success");
         body.put("config_templates", List.copyOf(BSimUrls.CONFIG_TEMPLATE_ORDER));
         String root = BSimUrls.bsimRootEnv();
         body.put("bsim_root", root);
         body.put("bsim_urls", BSimUrls.bsimAllowlistEnv());
-        List<Map<String, Object>> databases = new ArrayList<>();
-        databases.addAll(BSimUrls.listAllowlistedDatabases());
+        int timeout = Math.max(1, Math.min(15, probeTimeoutSeconds));
+        List<Map<String, Object>> databases =
+                new ArrayList<>(BSimUrls.listAllowlistedDatabases(probe, timeout));
         if (root != null && !root.isBlank()) {
             databases.addAll(BSimUrls.listFileDatabases(Path.of(root)));
         }
         body.put("databases", databases);
         body.put("count", databases.size());
+        body.put("probed", probe);
         return Response.ok(body);
     }
 
@@ -263,6 +281,8 @@ public class BSimService {
             }
             String credErr = BSimUrls.missingServerCredential(source);
             if (credErr != null) return Response.err(credErr);
+            String userErr = BSimUrls.ambiguousIngestUser(url, source);
+            if (userErr != null) return Response.err(userErr);
             Program program = resolveProgramIfOpen(source, programName);
             // Fail unresolvable sources synchronously and specifically —
             // classify throws IllegalArgumentException with the remedy. The
@@ -272,6 +292,10 @@ public class BSimService {
             if (directUrl != null) {
                 credErr = BSimUrls.missingServerCredential(directUrl);
                 if (credErr != null) return Response.err(credErr);
+                // A repo path becomes ghidra:// on this hop, so the two
+                // identities can only merge here — recheck after resolution.
+                userErr = BSimUrls.ambiguousIngestUser(url, directUrl);
+                if (userErr != null) return Response.err(userErr);
             }
 
             Map<String, Object> request = new LinkedHashMap<>();
@@ -483,6 +507,9 @@ public class BSimService {
                     + "floor. min_confidence has no default — there is no universally safe value. "
                     + "dry_run defaults to true and does not write. skip_named defaults to true "
                     + "(never overwrite an analyst name). Ambiguous matches are never applied. "
+                    + "Duplicate proposed names are conflicts and none are applied by default. "
+                    + "resolve_conflicts=best may select the highest-confidence candidate only "
+                    + "when it clears conflict_min_confidence_margin. "
                     + "Functions flagged unidentifiable (too few LSH features) are skipped unless "
                     + "apply_unidentifiable=true. Optional arch / executable / compiler / "
                     + "exclude_md5 are the same server-side filters as bsim_query. Applied names "
@@ -533,6 +560,15 @@ public class BSimService {
                             + "flagged unidentifiable. Default false — that is where a "
                             + "degenerate match bulk-renames into a shared repository.")
                     boolean applyUnidentifiable,
+            @Param(value = "resolve_conflicts", source = ParamSource.BODY, defaultValue = "none",
+                    description = "none | best. none skips every candidate in a duplicate-name "
+                            + "group. best keeps only the confidence leader when its margin is met.")
+                    String resolveConflicts,
+            @Param(value = "conflict_min_confidence_margin", source = ParamSource.BODY,
+                    defaultValue = "5.0",
+                    description = "Minimum confidence lead required by resolve_conflicts=best. "
+                            + "Exact ties are always skipped, even when this is 0.")
+                    double conflictMinConfidenceMargin,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         if (minConfidence == null) {
@@ -542,6 +578,15 @@ public class BSimService {
                             + "distinctive functions in this corpus.");
         }
         try {
+            String conflictMode = resolveConflicts == null
+                    ? "none" : resolveConflicts.trim().toLowerCase(Locale.ROOT);
+            if (!"none".equals(conflictMode) && !"best".equals(conflictMode)) {
+                return Response.err("resolve_conflicts must be none or best; got: "
+                        + resolveConflicts);
+            }
+            if (conflictMinConfidenceMargin < 0.0) {
+                return Response.err("conflict_min_confidence_margin must be >= 0");
+            }
             String url = BSimUrls.requireBsimUrl(dbUrl);
             String pgCred = BSimUrls.missingPostgresCredential(url);
             if (pgCred != null) return Response.err(pgCred);
@@ -554,11 +599,14 @@ public class BSimService {
             request.put("program", program.getName());
             request.put("dry_run", dryRun);
             request.put("min_confidence", minConfidence);
+            request.put("resolve_conflicts", conflictMode);
+            request.put("conflict_min_confidence_margin", conflictMinConfidenceMargin);
             BSimJobs.Job job = jobs.submit("bsim_apply_matches", request,
                     () -> runApplyMatches(url, program, minConfidence, minSimilarity,
                             skipNamed, dryRun, querySimilarity, maxMatches,
                             arch, executable, compiler, excludeMd5,
-                            minFeatureCount, applyUnidentifiable));
+                            minFeatureCount, applyUnidentifiable, conflictMode,
+                            conflictMinConfidenceMargin));
             return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -573,7 +621,8 @@ public class BSimService {
                                      double querySimilarity, int maxMatches,
                                      String arch, String executable, String compiler,
                                      String excludeMd5, int minFeatureCount,
-                                     boolean applyUnidentifiable) throws Exception {
+                                     boolean applyUnidentifiable, String resolveConflicts,
+                                     double conflictMinConfidenceMargin) throws Exception {
         QuerySpec spec = new QuerySpec("", querySimilarity, 0.0, maxMatches,
                 arch, executable, compiler, excludeMd5, minFeatureCount, 0);
         Response queried = runQuery(url, program, spec);
@@ -585,21 +634,38 @@ public class BSimService {
         List<Map<String, Object>> renamed = new ArrayList<>();
         List<Map<String, Object>> wouldRename = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
-        int unidentifiableSkipped = 0;
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        counts.put("queried", results.size());
+        counts.put("renamed", 0);
+        counts.put("would_rename", 0);
+        counts.put("already_named", 0);
+        counts.put("unidentifiable", 0);
+        counts.put("below_similarity", 0);
+        counts.put("below_confidence", 0);
+        counts.put("ambiguous", 0);
+        counts.put("conflicting", 0);
+        counts.put("no_matches", 0);
+        counts.put("self_match", 0);
+        counts.put("function_not_found", 0);
+        counts.put("rename_failed", 0);
+
+        List<ApplyCandidate> candidates = new ArrayList<>();
 
         for (BSimMatches.FunctionResult fr : results) {
-            Function func = resolveApplyTarget(program, fr);
+            // Conflict grouping needs no Listing lookup. Resolve here only
+            // when the current name is part of the decision, then defer any
+            // remaining lookup until a candidate has survived grouping.
+            Function func = skipNamed ? resolveApplyTarget(program, fr) : null;
             String currentName = func != null ? func.getName() : fr.function;
             BSimMatches.ApplyAction action = BSimMatches.decide(
                     fr, currentName, skipNamed, minSimilarity, minConfidence, applyUnidentifiable);
             if (action != BSimMatches.ApplyAction.APPLY) {
-                if (action == BSimMatches.ApplyAction.SKIP_UNIDENTIFIABLE) {
-                    unidentifiableSkipped++;
-                }
+                String reason = BSimMatches.reason(action);
+                counts.computeIfPresent(reason, (key, value) -> value + 1);
                 Map<String, Object> skip = new LinkedHashMap<>();
                 skip.put("function", fr.function);
                 if (fr.address != null) skip.put("address", fr.address);
-                skip.put("reason", BSimMatches.reason(action));
+                skip.put("reason", reason);
                 if (!fr.identifiable) skip.put("identifiable", false);
                 BSimMatches.Hit best = fr.best();
                 if (best != null) {
@@ -610,36 +676,92 @@ public class BSimService {
                 skipped.add(skip);
                 continue;
             }
-            BSimMatches.Hit best = fr.best();
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("function", fr.function);
-            if (fr.address != null) row.put("address", fr.address);
-            row.put("new_name", best.name);
-            row.put("similarity", best.similarity);
-            row.put("confidence", best.confidence);
-            row.put("executable", best.executable);
-            if (dryRun) {
-                wouldRename.add(row);
+            candidates.add(new ApplyCandidate(fr, func, fr.best()));
+        }
+
+        Map<String, List<ApplyCandidate>> byName = new LinkedHashMap<>();
+        for (ApplyCandidate candidate : candidates) {
+            byName.computeIfAbsent(candidate.hit.name, ignored -> new ArrayList<>())
+                    .add(candidate);
+        }
+        Map<String, List<Function>> existingByName = existingFunctionsByName(program, byName);
+
+        List<Map<String, Object>> conflicts = new ArrayList<>();
+        int resolvedConflictGroups = 0;
+        int disabledConflictGroups = 0;
+        int insufficientMarginGroups = 0;
+        int existingNameGroups = 0;
+        for (Map.Entry<String, List<ApplyCandidate>> entry : byName.entrySet()) {
+            List<ApplyCandidate> group = entry.getValue();
+            List<Function> existing = existingByName.getOrDefault(entry.getKey(), List.of());
+            if (group.size() == 1 && existing.isEmpty()) {
+                applyCandidate(program, group.get(0), dryRun, renamed, wouldRename,
+                        skipped, counts);
                 continue;
             }
-            if (func == null) {
-                row.put("reason", "function_not_found");
-                skipped.add(row);
-                continue;
+
+            group.sort((a, b) -> {
+                int confidence = Double.compare(b.hit.confidence, a.hit.confidence);
+                if (confidence != 0) return confidence;
+                int similarity = Double.compare(b.hit.similarity, a.hit.similarity);
+                if (similarity != 0) return similarity;
+                return a.result.function.compareTo(b.result.function);
+            });
+            ApplyCandidate leader = group.get(0);
+            double margin = group.size() > 1
+                    ? leader.hit.confidence - group.get(1).hit.confidence : 0.0;
+            boolean resolved = existing.isEmpty() && "best".equals(resolveConflicts)
+                    && margin > 0.0 && margin >= conflictMinConfidenceMargin;
+
+            Map<String, Object> conflict = new LinkedHashMap<>();
+            conflict.put("name", entry.getKey());
+            conflict.put("confidence_margin", margin);
+            conflict.put("required_margin", conflictMinConfidenceMargin);
+            List<Map<String, Object>> conflictCandidates = new ArrayList<>();
+            for (ApplyCandidate candidate : group) {
+                conflictCandidates.add(candidate.conflictMap());
             }
-            try {
-                final Function target = func;
-                final String newName = best.name;
-                threadingStrategy.executeWrite(program, "BSim apply " + newName, () -> {
-                    target.setName(newName, SourceType.USER_DEFINED);
-                    return null;
-                });
-                renamed.add(row);
-            } catch (Exception e) {
-                row.put("reason", "rename_failed");
-                row.put("error", e.getMessage());
-                skipped.add(row);
+            conflict.put("candidates", conflictCandidates);
+            if (!existing.isEmpty()) {
+                List<Map<String, Object>> existingFunctions = new ArrayList<>();
+                for (Function function : existing) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("function", function.getName());
+                    if (function.getEntryPoint() != null) {
+                        row.put("address", function.getEntryPoint().toString());
+                    }
+                    existingFunctions.add(row);
+                }
+                conflict.put("existing_functions", existingFunctions);
             }
+
+            if (resolved) {
+                resolvedConflictGroups++;
+                conflict.put("resolution", "best");
+                conflict.put("selected_function", leader.result.function);
+                applyCandidate(program, leader, dryRun, renamed, wouldRename, skipped, counts);
+                for (int i = 1; i < group.size(); i++) {
+                    skipConflict(group.get(i), "best_not_selected", margin,
+                            skipped, counts);
+                }
+            } else {
+                String resolution;
+                if (!existing.isEmpty()) {
+                    existingNameGroups++;
+                    resolution = "name_already_exists";
+                } else if ("best".equals(resolveConflicts)) {
+                    insufficientMarginGroups++;
+                    resolution = "insufficient_margin";
+                } else {
+                    disabledConflictGroups++;
+                    resolution = "disabled";
+                }
+                conflict.put("resolution", resolution);
+                for (ApplyCandidate candidate : group) {
+                    skipConflict(candidate, resolution, margin, skipped, counts);
+                }
+            }
+            conflicts.add(conflict);
         }
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -648,11 +770,103 @@ public class BSimService {
         body.put("min_confidence", minConfidence);
         body.put("min_similarity", minSimilarity);
         body.put("skip_named", skipNamed);
-        body.put("unidentifiable_skipped", unidentifiableSkipped);
+        body.put("resolve_conflicts", resolveConflicts);
+        body.put("conflict_min_confidence_margin", conflictMinConfidenceMargin);
+        body.put("counts", counts);
+        Map<String, Object> conflictSummary = new LinkedHashMap<>();
+        conflictSummary.put("groups", conflicts.size());
+        conflictSummary.put("resolved_best", resolvedConflictGroups);
+        conflictSummary.put("skipped_disabled", disabledConflictGroups);
+        conflictSummary.put("skipped_insufficient_margin", insufficientMarginGroups);
+        conflictSummary.put("skipped_existing_name", existingNameGroups);
+        body.put("conflict_summary", conflictSummary);
+        body.put("conflicts", conflicts);
+        body.put("unidentifiable_skipped", counts.get("unidentifiable"));
         body.put("renamed", renamed);
         body.put("would_rename", wouldRename);
         body.put("skipped", skipped);
         return Response.ok(body);
+    }
+
+    private record ApplyCandidate(BSimMatches.FunctionResult result, Function function,
+                                  BSimMatches.Hit hit) {
+        Map<String, Object> row() {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("function", result.function);
+            if (result.address != null && !result.address.isEmpty()) {
+                row.put("address", result.address);
+            }
+            row.put("new_name", hit.name);
+            row.put("similarity", hit.similarity);
+            row.put("confidence", hit.confidence);
+            row.put("executable", hit.executable);
+            return row;
+        }
+
+        Map<String, Object> conflictMap() {
+            Map<String, Object> row = row();
+            row.remove("new_name");
+            return row;
+        }
+    }
+
+    private static Map<String, List<Function>> existingFunctionsByName(
+            Program program, Map<String, List<ApplyCandidate>> proposed) {
+        Map<String, List<Function>> existing = new LinkedHashMap<>();
+        if (program == null || proposed.isEmpty()) return existing;
+        for (Function function : program.getFunctionManager().getFunctions(true)) {
+            String name = function.getName();
+            if (proposed.containsKey(name)) {
+                existing.computeIfAbsent(name, ignored -> new ArrayList<>()).add(function);
+            }
+        }
+        return existing;
+    }
+
+    private void applyCandidate(Program program, ApplyCandidate candidate, boolean dryRun,
+                                List<Map<String, Object>> renamed,
+                                List<Map<String, Object>> wouldRename,
+                                List<Map<String, Object>> skipped,
+                                Map<String, Integer> counts) {
+        Map<String, Object> row = candidate.row();
+        if (dryRun) {
+            wouldRename.add(row);
+            counts.computeIfPresent("would_rename", (key, value) -> value + 1);
+            return;
+        }
+        Function target = candidate.function != null
+                ? candidate.function : resolveApplyTarget(program, candidate.result);
+        if (target == null) {
+            row.put("reason", "function_not_found");
+            skipped.add(row);
+            counts.computeIfPresent("function_not_found", (key, value) -> value + 1);
+            return;
+        }
+        try {
+            final Function renameTarget = target;
+            threadingStrategy.executeWrite(program, "BSim apply " + candidate.hit.name, () -> {
+                renameTarget.setName(candidate.hit.name, SourceType.USER_DEFINED);
+                return null;
+            });
+            renamed.add(row);
+            counts.computeIfPresent("renamed", (key, value) -> value + 1);
+        } catch (Exception e) {
+            row.put("reason", "rename_failed");
+            row.put("error", e.getMessage());
+            skipped.add(row);
+            counts.computeIfPresent("rename_failed", (key, value) -> value + 1);
+        }
+    }
+
+    private static void skipConflict(ApplyCandidate candidate, String resolution, double margin,
+                                     List<Map<String, Object>> skipped,
+                                     Map<String, Integer> counts) {
+        Map<String, Object> row = candidate.row();
+        row.put("reason", "conflicting");
+        row.put("conflict_resolution", resolution);
+        row.put("confidence_margin", margin);
+        skipped.add(row);
+        counts.computeIfPresent("conflicting", (key, value) -> value + 1);
     }
 
     // ========================================================================
@@ -793,18 +1007,28 @@ public class BSimService {
                                 + "this db_url is not postgresql://")));
             }
             CorroborationEvidence.FunctionRow refRow;
+            int extractedFunctionCount;
             try {
                 refRow = store.lookup(refExecutable.trim(), refFunction.trim());
+                extractedFunctionCount = refRow == null
+                        ? store.executableFunctionCount(refExecutable.trim()) : -1;
             } catch (Exception e) {
                 return Response.err("corroboration lookup failed: "
                         + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
             }
             if (refRow == null) {
-                return Response.ok(CorroborationEvidence.noEvidence(
+                boolean executableWasExtracted = extractedFunctionCount > 0;
+                Map<String, Object> miss = CorroborationEvidence.noEvidence(
                         queryRow.functionName(), refFunction.trim(),
-                        "not_extracted",
-                        List.of("No corroboration data for this executable; "
-                                + "it was ingested before extraction existed")));
+                        executableWasExtracted ? "function_not_found" : "not_extracted",
+                        executableWasExtracted
+                                ? List.of("The executable has corroboration data, but function '"
+                                        + refFunction.trim() + "' is not among its "
+                                        + extractedFunctionCount + " extracted functions")
+                                : List.of("No corroboration data for this executable; "
+                                        + "it was ingested before extraction existed"));
+                miss.put("extracted_function_count", extractedFunctionCount);
+                return Response.ok(miss);
             }
             Map<String, Object> body = CorroborationEvidence.compare(queryRow, refRow, store, norm);
             return Response.ok(body);
@@ -1104,7 +1328,8 @@ public class BSimService {
     }
 
     private Response cliError(String prefix, BSimCli.Result r) {
-        String extracted = BSimCliParser.extractError(r.output);
+        String extracted = BSimCliParser.databaseAuthError(r.output);
+        if (extracted == null) extracted = BSimCliParser.extractError(r.output);
         String detail = extracted != null ? extracted : tail(r.output, 1200);
         String msg = prefix + " (exit " + r.exitCode + ")";
         if (detail != null && !detail.isBlank()) msg = msg + ": " + detail;
@@ -1349,6 +1574,14 @@ public class BSimService {
                     args.add("-connect");
                     args.add(user);
                 }
+                // -p is what makes analyzeHeadless pass allowPasswordPrompt=true
+                // to HeadlessClientAuthenticator. Without it the authenticator
+                // logs "Headless client not configured to supply required
+                // password" and hands back its BADPASSWORD sentinel, so the
+                // password we do write to stdin is never read and this extract
+                // can never authenticate against a repository. -connect alone
+                // only names the user.
+                args.add("-p");
             }
             args.add("-scriptPath");
             args.add(scriptDir.toAbsolutePath().toString());
@@ -1424,10 +1657,20 @@ public class BSimService {
                     } else {
                         CorroborationEvidence.FunctionRow refRow = store.lookup(refExe, refName);
                         if (refRow == null) {
+                            int extractedFunctionCount = store.executableFunctionCount(refExe);
+                            boolean executableWasExtracted = extractedFunctionCount > 0;
                             evidence = CorroborationEvidence.noEvidence(
-                                    queryRow.functionName(), refName, "not_extracted",
-                                    List.of("No corroboration data for this executable; "
-                                            + "it was ingested before extraction existed"));
+                                    queryRow.functionName(), refName,
+                                    executableWasExtracted
+                                            ? "function_not_found" : "not_extracted",
+                                    executableWasExtracted
+                                            ? List.of("The executable has corroboration data, but "
+                                                    + "function '" + refName + "' is not among its "
+                                                    + extractedFunctionCount
+                                                    + " extracted functions")
+                                            : List.of("No corroboration data for this executable; "
+                                                    + "it was ingested before extraction existed"));
+                            evidence.put("extracted_function_count", extractedFunctionCount);
                         } else {
                             evidence = CorroborationEvidence.compare(queryRow, refRow, store,
                                     CorroborationEvidence.StringNorm.AUTO);

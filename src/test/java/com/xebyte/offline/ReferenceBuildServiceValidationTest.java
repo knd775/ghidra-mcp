@@ -420,15 +420,21 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue("docker/references.yaml must exist", Files.isRegularFile(manifest));
         List<ReferenceBuild.Spec> jobs = ReferenceManifest.load(
                 manifest, List.of("gcc10-arm", "gcc12-arm", "gcc13-arm"));
-        assertEquals(21, jobs.size());
+        assertEquals(30, jobs.size());
         List<ReferenceBuild.Spec> littlefs = jobs.stream()
                 .filter(s -> "littlefs".equals(s.name())).toList();
+        List<ReferenceBuild.Spec> littlefsLogging = jobs.stream()
+                .filter(s -> "littlefs-logging".equals(s.name())).toList();
         List<ReferenceBuild.Spec> pico = jobs.stream()
                 .filter(s -> "pico-sdk".equals(s.name())).toList();
         assertEquals(9, littlefs.size());
+        assertEquals(9, littlefsLogging.size());
         assertEquals(12, pico.size());
         assertEquals("littlefs-v2.9.3-gcc10-arm-Os.o", littlefs.get(0).resolvedOutputName());
         assertEquals("littlefs-v2.9.3-gcc13-arm-O3.o", littlefs.get(8).resolvedOutputName());
+        assertEquals("littlefs-logging-v2.9.3-gcc10-arm-Os.o",
+                littlefsLogging.get(0).resolvedOutputName());
+        assertEquals(List.of("LFS_NO_MALLOC"), littlefsLogging.get(0).defines());
         assertTrue(pico.get(0).isFramework());
         assertEquals("pico-sdk-pico_stdlib-2.1.0-gcc10-arm-Os-pico.o",
                 pico.get(0).artifactName("pico_stdlib"));
@@ -488,7 +494,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(client.calls.isEmpty());
         assertEquals("one GET /health for the whole matrix", 1, client.healthCalls.size());
         String json = r.toJson();
-        assertTrue(json, json.contains("\"count\":21") || json.contains("\"count\": 21"));
+        assertTrue(json, json.contains("\"count\":30") || json.contains("\"count\": 30"));
         assertTrue(json, json.contains("would_execute"));
     }
 

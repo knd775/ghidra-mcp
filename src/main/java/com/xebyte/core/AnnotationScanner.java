@@ -8,8 +8,6 @@ import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import ghidra.program.model.listing.Program;
-
 /**
  * Discovers {@link McpTool}-annotated methods on service instances via reflection
  * and generates {@link EndpointDef} records for HTTP registration plus JSON schemas
@@ -38,8 +36,6 @@ public class AnnotationScanner {
 
     private final List<EndpointDef> endpoints = new ArrayList<>();
     private final List<ToolDescriptor> descriptors = new ArrayList<>();
-    private final ProgramProvider programProvider;
-
     /**
      * Scan the given service instances for {@link McpTool}-annotated methods.
      *
@@ -52,11 +48,11 @@ public class AnnotationScanner {
     /**
      * Scan the given service instances for {@link McpTool}-annotated methods.
      *
-     * @param programProvider provider for resolving programs (enables dry-run support)
+     * @param programProvider retained for constructor compatibility; endpoints that declare
+     *                        dry-run own their preview behavior
      * @param services        service objects to scan
      */
     public AnnotationScanner(ProgramProvider programProvider, Object... services) {
-        this.programProvider = programProvider;
         for (Object service : services) {
             scanService(service);
         }
@@ -171,25 +167,16 @@ public class AnnotationScanner {
                 }
 
                 // Dry-run: never fall through to an unguarded invoke. Transaction
-                // rollback only covers Ghidra listing writes; CLI / filesystem /
-                // server-admin side effects (bsim_create_db, import_program,
-                // terminate_checkout) survive it. Methods that declare their own
-                // dry_run param are responsible for previewing and are invoked
-                // (with a listing rollback as a safety net when a Program is
-                // available). Everything else short-circuits here.
+                // rollback only covers Ghidra listing writes; CLI, filesystem, and
+                // server-admin side effects survive it. Methods that declare their
+                // own dry_run param own the preview and must avoid starting a write
+                // transaction. Everything else short-circuits here.
+                //
+                // A transaction around a declared dry run does unnecessary work and
+                // deadlocks endpoints such as bsim_apply_matches. Its background worker
+                // must query the program before the endpoint decides whether to rename.
                 if (isWrite && isDryRunRequested(query, body)) {
                     if (hasParam(bindings, "dry_run")) {
-                        Program program = (programProvider != null && hasParam(bindings, "program"))
-                                ? resolveProgramForDryRun(bindings, query, body) : null;
-                        if (program != null) {
-                            int tx = program.startTransaction("[DRY RUN] " + tool.path());
-                            try {
-                                Response result = (Response) method.invoke(service, args);
-                                return wrapDryRunResponse(result);
-                            } finally {
-                                program.endTransaction(tx, false);
-                            }
-                        }
                         return (Response) method.invoke(service, args);
                     }
                     return dryRunPreview(tool, bindings, args);
@@ -222,29 +209,6 @@ public class AnnotationScanner {
         return false;
     }
 
-    /**
-     * Resolve the Program for dry-run wrapping by finding the "program" param binding.
-     */
-    private Program resolveProgramForDryRun(ParamBinding[] bindings, Map<String, String> query,
-            Map<String, Object> body) {
-        // Look for a @Param(value = "program") binding
-        for (ParamBinding binding : bindings) {
-            if (binding != null && "program".equals(binding.param.value())) {
-                String programName = query.get("program");
-                if (programName == null || programName.isBlank()) {
-                    Object raw = body != null ? body.get("program") : null;
-                    if (raw != null) programName = String.valueOf(raw);
-                }
-                if (programName != null && !programName.isBlank()) {
-                    return programProvider.getProgram(programName);
-                }
-                break;
-            }
-        }
-        // Fall back to current program
-        return programProvider.getCurrentProgram();
-    }
-
     private static boolean hasParam(ParamBinding[] bindings, String name) {
         if (bindings == null) return false;
         for (ParamBinding binding : bindings) {
@@ -274,18 +238,6 @@ public class AnnotationScanner {
         }
         body.put("params", params);
         return Response.ok(body);
-    }
-
-    /**
-     * Wrap a response to indicate it was a dry-run (no changes were committed).
-     */
-    private static Response wrapDryRunResponse(Response response) {
-        String json = response.toJson();
-        if (json.startsWith("{")) {
-            // Inject dry_run flag into the JSON object
-            return Response.text("{\"dry_run\":true," + json.substring(1));
-        }
-        return Response.text("{\"dry_run\":true,\"result\":" + json + "}");
     }
 
     // ==================================================================

@@ -61,8 +61,11 @@ harvesting did not use the `--gc-sections`'d ELF.
 
 A corpus needs a matrix, not nine hand-written calls.
 `docker/references.yaml` is the corpus definition; `build_manifest` expands
-it. littlefs × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2, -O3} is nine
-objects. pico-sdk is a **framework** entry: one stub CMake project
+it. Each of the `littlefs` and `littlefs-logging` configurations expands over
+{gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2, -O3}, for eighteen objects.
+The logging variant keeps assertions and `LFS_ERROR` strings by omitting
+`LFS_NO_ASSERT`; the original no-assert build remains in the corpus.
+pico-sdk is a **framework** entry: one stub CMake project
 (`docker/stubs/pico-sdk/`) × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2}
 × {pico, pico_w} is twelve configure/build jobs, each harvesting several
 per-library objects. Compiler version is why: every littlefs from v2.4.2 to v2.9.3
@@ -242,14 +245,41 @@ will otherwise accept it and silently degrade results.
 ### `bsim_list_databases`
 
 ```
-bsim_list_databases()
+bsim_list_databases(probe=True, probe_timeout_seconds=3)
 ```
 
 Lists allowlisted `postgresql://` URLs (`GHIDRA_MCP_BSIM_URLS`) and any
 leftover H2 files under `GHIDRA_MCP_BSIM_ROOT`, plus the known config
-templates. Does not spawn the bsim CLI. Querying a sized template
-(`medium_32` / `medium_64`) against the wrong pointer size returns a
-warning, not a confusing error. `medium_nosize` does not.
+templates. Never spawns the bsim CLI.
+
+**Every row separates what is configured from what exists.** The allowlist
+says what may be contacted; it is not an inventory. `configured: true` means
+only "this URL is allowlisted". `present` is the observed answer and `probe`
+says how it was reached:
+
+| `probe` | meaning |
+| --- | --- |
+| `ok` | the database exists and has BSim's tables; row also carries `executables` and `corroboration_functions` |
+| `no_bsim_schema` | the database exists but `bsim createdatabase` never ran in it |
+| `no_database` | the server is up and says this database does not exist |
+| `auth_failed` / `unreachable` / `no_credential` / `driver_missing` | presence unknown, for the stated reason |
+| `unsupported` | non-`postgresql://` backend; no driver here to probe with |
+| `not_probed` | `probe=false` |
+
+`present` is **omitted whenever it is unknown**, so read `probe` rather than
+treating a missing `present` as `false`. `probe=false` skips the JDBC connect
+entirely.
+
+`config_template` is configuration too — nothing reads the template back out
+of a database, so `config_template_source` says whether it came from a
+`bsim_create_db` sidecar (`sidecar`), `GHIDRA_MCP_BSIM_TEMPLATES` (`env`), or
+nowhere (`unknown`). This tool is what an operator reaches for when something
+is already wrong, and before this it would list two databases that had never
+been created, at a template neither of them had.
+
+Querying a sized template (`medium_32` / `medium_64`) against the wrong
+pointer size returns a warning, not a confusing error. `medium_nosize` does
+not.
 
 ### `bsim_ingest`
 
@@ -266,7 +296,24 @@ blank failure. When the credential is present the server passes
 `--user` and feeds the password to the child on stdin — the spawned JVM
 is stock Ghidra, which never reads this extension's environment
 variables, and its `HeadlessClientAuthenticator` falls back to a stdin
-prompt when there is no console. An invalid `source` is refused
+prompt when there is no console.
+
+**Ingesting a `ghidra://` source into PostgreSQL puts two secrets on one
+pipe, and the order is fixed: BSim database first, Ghidra Server second.**
+`generatesigs --bsim <url> --commit` runs `BulkSignatures.signatureRepo`,
+which pulls the vector configuration out of the database before
+`SignatureRepository.process` ever contacts the repository. Feeding the
+Ghidra Server password first hands it to PostgreSQL and the CLI dies with
+`Password for bsim:ERROR Could not authenticate with database` — while
+`bsim_create_db` and `bsim_list_corpus` keep working on the same URL,
+because a database-only command has just one prompt to feed, and H2 keeps
+working too, because a `file:` database never prompts at all.
+
+The same collision exists for the *username*: `--user` is applied to the BSim
+database as well whenever the BSim URL carries no user of its own, so a
+`postgresql://` `db_url` plus a `ghidra://` source with `GHIDRA_MCP_BSIM_USER`
+unset is refused up front rather than logging into PostgreSQL as the Ghidra
+Server account. Set `GHIDRA_MCP_BSIM_USER` to the database role. An invalid `source` is refused
 synchronously with the remedy. A program with no functions is refused. A
 pointer-size mismatch against a sized template (`medium_32` / `medium_64`
 / `large_32`) is refused — the CLI would otherwise accept it and degrade
@@ -351,8 +398,11 @@ basename match reports both originals — firmware `__FILE__` paths and
 `-fdebug-prefix-map` `/ref/…` paths are the same file. Format strings
 match exactly.
 
-A lookup miss (executable ingested before this feature, or a leftover
-H2 `file:` URL) is `status: no_evidence`, not an error.
+A lookup miss is `status: no_evidence`, not an error. If the executable has
+no rows, the reason is `not_extracted`. If it has rows but lacks the requested
+function, the reason is `function_not_found` and `extracted_function_count`
+shows how much data was checked. A leftover H2 `file:` URL reports
+`unsupported_backend`.
 
 ### `bsim_apply_matches`
 
@@ -361,7 +411,8 @@ bsim_apply_matches(db_url, program, min_confidence=<required>,
                    min_similarity=0.8, skip_named=True, dry_run=True,
                    similarity_threshold=0.0, arch=None, executable=None,
                    compiler=None, exclude_md5=None, min_feature_count=8,
-                   apply_unidentifiable=False, wait_seconds=45)
+                   apply_unidentifiable=False, resolve_conflicts="none",
+                   conflict_min_confidence_margin=5.0, wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
@@ -371,6 +422,15 @@ is the default and does not call `setName`. `skip_named=True` will not
 overwrite an analyst's name. An `ambiguous` result is never applied,
 whatever the scores. Unidentifiable functions are skipped and counted
 unless `apply_unidentifiable=true`.
+
+The apply decision is global. Proposed renames are grouped by target name
+after all thresholds and filters. A duplicate group is listed in `conflicts`,
+and its withheld functions contribute to `counts.conflicting`. The default
+`resolve_conflicts="none"` applies none of them. `resolve_conflicts="best"`
+applies only the highest-confidence candidate when its lead over second place
+meets `conflict_min_confidence_margin`. Exact ties are always skipped. A name
+that already belongs to another function is also a conflict and is never
+resolved by `best`.
 
 Applied names are the BSim hit names as-is (C linkage, not PascalCase).
 `lfs_bd_read` is the right name here.

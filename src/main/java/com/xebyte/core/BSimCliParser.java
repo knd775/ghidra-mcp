@@ -115,6 +115,8 @@ public final class BSimCliParser {
      */
     public static String rewriteIngestError(String output) {
         if (output == null) return null;
+        String auth = databaseAuthError(output);
+        if (auth != null) return auth;
         if (output.contains("already ingested from a different repository")
                 || output.contains("program already ingested")) {
             return "BSim refused this ingest because an executable with the same MD5 is "
@@ -128,6 +130,31 @@ public final class BSimCliParser {
                     + "new database.";
         }
         return extractError(output);
+    }
+
+    /**
+     * Explain {@code Could not authenticate with database}, which the CLI
+     * reports identically whether no password reached the prompt or the wrong
+     * one did. The wrong one is the interesting case: {@code generatesigs}
+     * against a {@code ghidra://} source has two console prompts reading one
+     * pipe, and it opens the <em>database</em> connection first (to pull the
+     * vector configuration) — so a payload ordered Ghidra-Server-first fed the
+     * repository password to PostgreSQL and failed exactly here. See
+     * {@link BSimCli#stdinForBsimArgs}.
+     *
+     * @return an explanation, or {@code null} when this is not that failure
+     */
+    public static String databaseAuthError(String output) {
+        if (output == null) return null;
+        if (!output.contains("Could not authenticate with database")) return null;
+        return "BSim could not authenticate with the database. The spawned CLI reads "
+                + "its password from a console prompt on stdin, so this means the "
+                + "prompt got nothing or got the wrong secret. Check "
+                + "GHIDRA_MCP_BSIM_PASSWORD (the BSim database login, NOT the Ghidra "
+                + "Server login) and GHIDRA_MCP_BSIM_USER against the database's own "
+                + "role. On an ingest that also reads a ghidra:// source, two prompts "
+                + "share one pipe and the database is prompted first; a payload in the "
+                + "other order fails with this exact message.";
     }
 
     static String stripLogPrefix(String line) {

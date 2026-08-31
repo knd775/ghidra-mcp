@@ -25,6 +25,16 @@ BACKUP = REPO_ROOT / "docker" / "bsim" / "backup.sh"
 SMOKE = REPO_ROOT / "docker" / "bsim" / "smoke-lshvector.sh"
 MIGRATION = REPO_ROOT / "docker" / "bsim" / "MIGRATION.md"
 ENV_TEMPLATE = REPO_ROOT / "docker" / ".env.template"
+DB_PROBE = (
+    REPO_ROOT
+    / "src"
+    / "main"
+    / "java"
+    / "com"
+    / "xebyte"
+    / "core"
+    / "BSimDbProbe.java"
+)
 PINNED_COMMIT = "c0f584bf229fffba61b36431f3ce30c0c3e4e682"
 PINNED_TAG = "Ghidra_12.1.2_build"
 PINNED_GHIDRA = "12.1.2"
@@ -78,6 +88,10 @@ class TestBsimPostgresCompose(unittest.TestCase):
         self.assertIn("ghidra-bsim", mcp["depends_on"])
         builder = services["builder"]
         self.assertNotIn("ghidra-db", builder.get("networks") or [])
+
+    def test_database_probe_excludes_bsim_synthetic_library_records(self):
+        source = DB_PROBE.read_text(encoding="utf-8")
+        self.assertIn("md5 NOT ILIKE 'bbbbbbbbaaaaaaaa%'", source)
 
     def test_mcp_allowlist_and_credentials(self):
         env = self.doc["services"]["ghidra-mcp"]["environment"]
@@ -272,6 +286,11 @@ class TestBsimPostgresImage(unittest.TestCase):
         self.assertEqual(userland["database"], "postgresql://ghidra-bsim:5432/bsim")
         self.assertEqual(userland["config_template"], "medium_nosize")
         self.assertEqual(arm["database"], userland["database"])
+        littlefs = {entry["name"]: entry for entry in arm["references"]}
+        self.assertEqual(
+            littlefs["littlefs"]["defines"], ["LFS_NO_MALLOC", "LFS_NO_ASSERT"]
+        )
+        self.assertEqual(littlefs["littlefs-logging"]["defines"], ["LFS_NO_MALLOC"])
 
     def test_local_build_script_tags_ghcr_name(self):
         path = REPO_ROOT / "docker" / "build-bsim.sh"
