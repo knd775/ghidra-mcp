@@ -197,13 +197,16 @@ Corpus updates are MCP tools: `builder_health`, `build_manifest`,
 `build_reference`, `build_reference_status`, `source_read`. No shell on
 the Docker host.
 
-`dry_run=true` returns the compiler or cmake command line without cloning
-or compiling. `docker/references.yaml` is the ARM corpus.
+`dry_run=true` returns the compiler or cmake command line (and `prepare`,
+when set) without cloning or compiling. `docker/references.yaml` is the
+ARM corpus, including Frotz 2.54 as a sources entry whose `prepare`
+generates `src/common/defs.h` and `src/common/hash.h`.
 `docker/references.userland.yaml` is x86-64 libc and static libs.
 Both ingest into `postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`).
 Each object gets a JSON sidecar (`<artifact>.json`) with the resolved
-commit, compiler `--version`, sha256, and `debug_path_prefix`.
-`build_manifest` skips a job when that hash still matches.
+commit, compiler `--version`, sha256, `debug_path_prefix`, and `prepare`.
+`build_manifest` skips a job when that hash still matches and `prepare`
+is unchanged.
 
 ## API Endpoints
 

@@ -466,7 +466,7 @@
         "dry_run",
         "wait_seconds"
       ],
-      "description": "Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them. A matrix of toolchain × opt (and board, for framework entries) is how the corpus covers compiler drift. Jobs whose artifact exists and whose sidecar sha256 still matches are skipped; a missing or mismatched sidecar rebuilds. dry_run returns every command line without cloning or compiling. One shared wait_seconds deadline covers the whole matrix; unfinished jobs return a job_id for build_reference_status."
+      "description": "Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them. A matrix of toolchain × opt (and board, for framework entries) is how the corpus covers compiler drift. Jobs whose artifact exists, whose sidecar sha256 still matches, and whose sidecar prepare matches the job are skipped; a missing or mismatched sidecar (or a changed prepare) rebuilds. dry_run returns every command line without cloning or compiling. One shared wait_seconds deadline covers the whole matrix; unfinished jobs return a job_id for build_reference_status."
     },
     {
       "path": "/build_reference",
@@ -482,6 +482,8 @@
         "opt",
         "defines",
         "extra_flags",
+        "prepare",
+        "prepare_timeout",
         "strip_debug",
         "output_name",
         "dry_run",
@@ -492,7 +494,7 @@
         "config",
         "wait_seconds"
       ],
-      "description": "Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through this tool; the shared volume is the handoff. ref must be a tag or SHA (bare branch names are refused). Compiled with -g; strip_debug=true runs strip --strip-debug (keeps .symtab) when corpus disk is tight. dry_run returns the compiler command line and output path without cloning or compiling. Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode <name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework configures a stub (docker/stubs/<framework>/), builds, and harvests build-tree objects, never the linked ELF. Each artifact is written with a <artifact>.json sidecar (resolved commit SHA, compiler --version, sha256). Long builds return {status: started, job_id} when they outlive wait_seconds; poll build_reference_status."
+      "description": "Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through this tool; the shared volume is the handoff. ref must be a tag or SHA (bare branch names are refused). Compiled with -g; strip_debug=true runs strip --strip-debug (keeps .symtab) when corpus disk is tight. dry_run returns the compiler command line, prepare command, and output path without cloning or compiling. mode=sources accepts prepare (a shell command run in the cloned tree after checkout, before compile) so generated headers do not need a framework stub. prepare comes from this call or a manifest, never from repository content. Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode <name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework configures a stub (docker/stubs/<framework>/), builds, and harvests build-tree objects, never the linked ELF. Each artifact is written with a <artifact>.json sidecar (resolved commit SHA, compiler --version, sha256). Long builds return {status: started, job_id} when they outlive wait_seconds; poll build_reference_status."
     },
     {
       "path": "/build_reference_status",

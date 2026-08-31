@@ -48,7 +48,11 @@ public class ReferenceBuildService {
                     + "this tool; the shared volume is the handoff. ref must be a tag or SHA "
                     + "(bare branch names are refused). Compiled with -g; strip_debug=true runs "
                     + "strip --strip-debug (keeps .symtab) when corpus disk is tight. dry_run "
-                    + "returns the compiler command line and output path without cloning or compiling. "
+                    + "returns the compiler command line, prepare command, and output path without "
+                    + "cloning or compiling. mode=sources accepts prepare (a shell command run in "
+                    + "the cloned tree after checkout, before compile) so generated headers do not "
+                    + "need a framework stub. prepare comes from this call or a manifest, never "
+                    + "from repository content. "
                     + "Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode "
                     + "<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework "
                     + "configures a stub (docker/stubs/<framework>/), builds, and harvests "
@@ -84,6 +88,15 @@ public class ReferenceBuildService {
                     Object defines,
             @Param(value = "extra_flags", source = ParamSource.BODY, defaultValue = "",
                     description = "Extra compiler flags, JSON array") Object extraFlags,
+            @Param(value = "prepare", source = ParamSource.BODY, defaultValue = "",
+                    description = "mode=sources: shell command run in the cloned tree after "
+                            + "checkout and before compile (e.g. make src/common/defs.h). "
+                            + "Must come from this call or a manifest, never from repository "
+                            + "content. Failed prepare returns the command's stdout and stderr.")
+                    String prepare,
+            @Param(value = "prepare_timeout", source = ParamSource.BODY, defaultValue = "300",
+                    description = "Seconds allowed for prepare (default 300, max 3600).")
+                    int prepareTimeout,
             @Param(value = "strip_debug", source = ParamSource.BODY, defaultValue = "false",
                     description = "strip --strip-debug (keeps .symtab). Default false so "
                             + "references keep DWARF for typed import and View Source.")
@@ -119,7 +132,8 @@ public class ReferenceBuildService {
             ReferenceBuild.Spec spec = ReferenceBuild.parse(
                     name, repo, ref, sources, toolchain, archFlags, opt, defines, extraFlags,
                     stripDebug, outputName, inv.identities(),
-                    mode, framework, libraries, board, frameworkConfig, inv.stubs());
+                    mode, framework, libraries, board, frameworkConfig, inv.stubs(),
+                    prepare, prepareTimeout);
             return runSpec(spec, dryRun, false, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -136,7 +150,8 @@ public class ReferenceBuildService {
             String archFlags, String opt, Object defines, Object extraFlags,
             boolean stripDebug, String outputName, boolean dryRun) {
         return buildReference(name, repo, ref, sources, toolchain, archFlags, opt,
-                defines, extraFlags, stripDebug, outputName, dryRun,
+                defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
+                stripDebug, outputName, dryRun,
                 FrameworkBuild.MODE_SOURCES, "", null, "", null,
                 ReferenceBuild.DEFAULT_WAIT_SECONDS);
     }
@@ -149,17 +164,33 @@ public class ReferenceBuildService {
             String mode, String framework, Object libraries, String board,
             Object frameworkConfig) {
         return buildReference(name, repo, ref, sources, toolchain, archFlags, opt,
-                defines, extraFlags, stripDebug, outputName, dryRun,
+                defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
+                stripDebug, outputName, dryRun,
                 mode, framework, libraries, board, frameworkConfig,
                 ReferenceBuild.DEFAULT_WAIT_SECONDS);
+    }
+
+    /** Framework/sources overload that still defaults prepare. */
+    public Response buildReference(
+            String name, String repo, String ref, Object sources, String toolchain,
+            String archFlags, String opt, Object defines, Object extraFlags,
+            boolean stripDebug, String outputName, boolean dryRun,
+            String mode, String framework, Object libraries, String board,
+            Object frameworkConfig, int waitSeconds) {
+        return buildReference(name, repo, ref, sources, toolchain, archFlags, opt,
+                defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
+                stripDebug, outputName, dryRun,
+                mode, framework, libraries, board, frameworkConfig,
+                waitSeconds);
     }
 
     @McpTool(path = "/build_manifest", method = "POST",
             description = "Expand docker/references.yaml (or a path under FILE_ROOT) into "
                     + "build_reference jobs and run them. A matrix of toolchain × opt (and "
                     + "board, for framework entries) is how the corpus covers compiler drift. "
-                    + "Jobs whose artifact exists and whose sidecar sha256 still matches are "
-                    + "skipped; a missing or mismatched sidecar rebuilds. dry_run returns every "
+                    + "Jobs whose artifact exists, whose sidecar sha256 still matches, and "
+                    + "whose sidecar prepare matches the job are skipped; a missing or "
+                    + "mismatched sidecar (or a changed prepare) rebuilds. dry_run returns every "
                     + "command line without cloning or compiling. One shared wait_seconds "
                     + "deadline covers the whole matrix; unfinished jobs return a job_id for "
                     + "build_reference_status. Userland corpus: path=references.userland.yaml.",
@@ -441,6 +472,8 @@ public class ReferenceBuildService {
             body.put("ref", spec.ref());
             body.put("name", spec.name());
             body.put("mode", spec.mode());
+            body.put("prepare", spec.prepare());
+            body.put("prepare_timeout", spec.prepareTimeout());
             if (spec.isFramework()) {
                 body.put("framework", spec.framework());
                 body.put("board", spec.board());
@@ -568,14 +601,25 @@ public class ReferenceBuildService {
                 if (nested.get("error") != null) {
                     message = String.valueOf(nested.get("error"));
                 }
-                if (nested.get("stderr") != null) {
+                if (nested.get("stderr") != null || nested.get("stdout") != null) {
                     built = new LinkedHashMap<>(built);
-                    built.put("stderr", nested.get("stderr"));
+                    if (nested.get("stderr") != null) {
+                        built.put("stderr", nested.get("stderr"));
+                    }
+                    if (nested.get("stdout") != null) {
+                        built.put("stdout", nested.get("stdout"));
+                    }
                 }
             }
             if (built.get("stderr") != null) {
                 message = message + (message.contains(String.valueOf(built.get("stderr")))
                         ? "" : "\n" + built.get("stderr"));
+            }
+            if (built.get("stdout") != null) {
+                String so = String.valueOf(built.get("stdout"));
+                if (!so.isBlank() && !message.contains(so)) {
+                    message = message + "\n" + so;
+                }
             }
             return Response.err(message, status);
         }
@@ -615,6 +659,10 @@ public class ReferenceBuildService {
         body.put("name", spec.name());
         body.put("ref", spec.ref());
         body.put("mode", spec.mode());
+        body.put("prepare", spec.prepare());
+        if (built.get("failed_units") != null) {
+            body.put("failed_units", built.get("failed_units"));
+        }
         return Response.ok(body);
     }
 

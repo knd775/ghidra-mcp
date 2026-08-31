@@ -420,16 +420,26 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue("docker/references.yaml must exist", Files.isRegularFile(manifest));
         List<ReferenceBuild.Spec> jobs = ReferenceManifest.load(
                 manifest, List.of("gcc10-arm", "gcc12-arm", "gcc13-arm"));
-        assertEquals(30, jobs.size());
+        assertEquals(32, jobs.size());
         List<ReferenceBuild.Spec> littlefs = jobs.stream()
                 .filter(s -> "littlefs".equals(s.name())).toList();
         List<ReferenceBuild.Spec> littlefsLogging = jobs.stream()
                 .filter(s -> "littlefs-logging".equals(s.name())).toList();
         List<ReferenceBuild.Spec> pico = jobs.stream()
                 .filter(s -> "pico-sdk".equals(s.name())).toList();
+        List<ReferenceBuild.Spec> frotz = jobs.stream()
+                .filter(s -> "frotz".equals(s.name())).toList();
         assertEquals(9, littlefs.size());
         assertEquals(9, littlefsLogging.size());
         assertEquals(12, pico.size());
+        assertEquals(2, frotz.size());
+        assertEquals("make src/common/defs.h src/common/hash.h", frotz.get(0).prepare());
+        assertEquals(300, frotz.get(0).prepareTimeout());
+        assertFalse(frotz.get(0).isFramework());
+        assertEquals("frotz-2.54-gcc13-arm-O2.o", frotz.get(0).resolvedOutputName());
+        assertEquals("frotz-2.54-gcc13-arm-Os.o", frotz.get(1).resolvedOutputName());
+        assertTrue(frotz.get(0).sources().contains("src/common/process.c"));
+        assertEquals(List.of("-std=gnu11"), frotz.get(0).extraFlags());
         assertEquals("littlefs-v2.9.3-gcc10-arm-Os.o", littlefs.get(0).resolvedOutputName());
         assertEquals("littlefs-v2.9.3-gcc13-arm-O3.o", littlefs.get(8).resolvedOutputName());
         assertEquals("littlefs-logging-v2.9.3-gcc10-arm-Os.o",
@@ -494,8 +504,40 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(client.calls.isEmpty());
         assertEquals("one GET /health for the whole matrix", 1, client.healthCalls.size());
         String json = r.toJson();
-        assertTrue(json, json.contains("\"count\":30") || json.contains("\"count\": 30"));
+        assertTrue(json, json.contains("\"count\":32") || json.contains("\"count\": 32"));
+        assertTrue(json, json.contains("make src/common/defs.h src/common/hash.h"));
         assertTrue(json, json.contains("would_execute"));
+    }
+
+    public void testCommandLinesLeadWithPrepare() {
+        ReferenceBuild.Spec spec = ReferenceBuild.parse(
+                "frotz",
+                "https://gitlab.com/DavidGriffith/frotz.git",
+                "2.54",
+                List.of("src/common/process.c"),
+                "gcc13-arm",
+                "",
+                "-O2",
+                List.of(),
+                List.of(),
+                false,
+                "",
+                List.of("gcc13-arm"),
+                "sources",
+                "",
+                null,
+                "",
+                null,
+                null,
+                "make src/common/defs.h src/common/hash.h",
+                120);
+        List<List<String>> cmd = spec.commandLines(Path.of("/data/uploads", spec.resolvedOutputName()));
+        assertEquals(List.of("/bin/sh", "-c", "make src/common/defs.h src/common/hash.h"), cmd.get(0));
+        assertEquals("arm-none-eabi-gcc", cmd.get(1).get(0));
+        assertEquals(120, spec.prepareTimeout());
+        Map<String, Object> req = spec.toBuilderRequest(Path.of("/data/uploads", spec.resolvedOutputName()));
+        assertEquals("make src/common/defs.h src/common/hash.h", req.get("prepare"));
+        assertEquals(120, req.get("prepare_timeout"));
     }
 
     public void testIdenticalInputsProduceIdenticalArgv() {
@@ -1024,6 +1066,139 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertFalse(FrameworkBuild.artifactIsCurrent(artifact));
     }
 
+    public void testDryRunShowsPrepareAndDoesNotCompile() {
+        Response r = svc.buildReference(
+                "frotz",
+                "https://gitlab.com/DavidGriffith/frotz.git",
+                "2.54",
+                List.of("src/common/process.c"),
+                "gcc13-arm",
+                "",
+                "-O2",
+                List.of(),
+                List.of(),
+                "make src/common/defs.h src/common/hash.h",
+                300,
+                false,
+                "",
+                true,
+                "sources",
+                "",
+                null,
+                "",
+                null,
+                ReferenceBuild.DEFAULT_WAIT_SECONDS);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("would_execute") || json.contains("\"dry_run\":true"));
+        assertTrue(json, json.contains("make src/common/defs.h src/common/hash.h"));
+        assertTrue(json, json.contains("/bin/sh"));
+        assertTrue(json, json.contains("src/common/process.c"));
+        assertTrue("dry_run must not clone or compile", client.calls.isEmpty());
+    }
+
+    public void testPrepareRejectedInFrameworkMode() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                "make headers",
+                300,
+                false,
+                "",
+                true,
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of(),
+                ReferenceBuild.DEFAULT_WAIT_SECONDS);
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("prepare is only valid in mode=sources"));
+        assertTrue(client.calls.isEmpty());
+    }
+
+    public void testPrepareFailureReturnsStdoutAndStderr() {
+        Map<String, Object> fail = new LinkedHashMap<>();
+        fail.put("ok", false);
+        fail.put("status", "prepare_failed");
+        fail.put("error", "prepare failed:\nmake: *** No rule to make target");
+        fail.put("stdout", "generating defs.h");
+        fail.put("stderr", "make: *** No rule to make target 'src/common/defs.h'");
+        client.setResponse(fail);
+        Response r = svc.buildReference(
+                "frotz",
+                "https://gitlab.com/DavidGriffith/frotz.git",
+                "2.54",
+                List.of("src/common/process.c"),
+                "gcc13-arm",
+                "",
+                "-O2",
+                List.of(),
+                List.of(),
+                "make src/common/defs.h",
+                300,
+                false,
+                "",
+                false,
+                "sources",
+                "",
+                null,
+                "",
+                null,
+                ReferenceBuild.DEFAULT_WAIT_SECONDS);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("prepare_failed"));
+        assertTrue(json, json.contains("No rule to make target"));
+        assertTrue(json, json.contains("generating defs.h"));
+    }
+
+    public void testSourcesManifestRebuildsWhenPrepareChanges() throws Exception {
+        String yaml = "references:\n"
+                + "  - name: frotz\n"
+                + "    repo: https://gitlab.com/DavidGriffith/frotz.git\n"
+                + "    ref: 2.54\n"
+                + "    prepare: make src/common/defs.h src/common/hash.h\n"
+                + "    sources: [src/common/process.c]\n"
+                + "    toolchain: gcc13-arm\n"
+                + "    opt: -O2\n";
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads").resolve("frotz-2.54-gcc13-arm-O2.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {4, 5, 6}, "make src/common/defs.h");
+        stubSourcesBuilderResponse(existing);
+        Response r = svc.buildManifest("", false);
+        assertEquals("changed prepare must not skip", 1, client.calls.size());
+        assertFalse(r.toJson(), r.toJson().contains("\"skipped\":true"));
+        Map<?, ?> req = (Map<?, ?>) client.calls.get(0).get("request");
+        assertEquals("make src/common/defs.h src/common/hash.h", req.get("prepare"));
+    }
+
+    public void testSourcesManifestSkipsWhenPrepareMatches() throws Exception {
+        String yaml = "references:\n"
+                + "  - name: frotz\n"
+                + "    repo: https://gitlab.com/DavidGriffith/frotz.git\n"
+                + "    ref: 2.54\n"
+                + "    prepare: make src/common/defs.h src/common/hash.h\n"
+                + "    sources: [src/common/process.c]\n"
+                + "    toolchain: gcc13-arm\n"
+                + "    opt: -O2\n";
+        Files.writeString(tmp.resolve("references.yaml"), yaml);
+        Path existing = tmp.resolve("uploads").resolve("frotz-2.54-gcc13-arm-O2.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {4, 5, 6},
+                "make src/common/defs.h src/common/hash.h");
+        Response r = svc.buildManifest("", false);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertTrue(client.calls.isEmpty());
+        assertTrue(r.toJson(), r.toJson().contains("skipped"));
+    }
+
     public void testBuildReferenceDoesNotSkipExistingOutput() throws Exception {
         Path existing = tmp.resolve("uploads").resolve("littlefs-v2.9.3-gcc13-arm-Os.o");
         Files.createDirectories(existing.getParent());
@@ -1075,13 +1250,34 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         client.setResponse(ok);
     }
 
+    private void stubSourcesBuilderResponse(Path artifact) {
+        Map<String, Object> ok = new LinkedHashMap<>();
+        ok.put("ok", true);
+        ok.put("path", artifact.toString());
+        ok.put("bytes", 3);
+        ok.put("sha256", "abc");
+        ok.put("function_count", 4);
+        ok.put("defined_functions", List.of("interpret", "load_operand", "store", "branch"));
+        ok.put("commit_sha", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        ok.put("cc_version", "arm-none-eabi-gcc 13.2.1");
+        client.setResponse(ok);
+    }
+
     private static void writeArtifactWithMatchingSidecar(Path artifact, byte[] data) throws Exception {
+        writeArtifactWithMatchingSidecar(artifact, data, "");
+    }
+
+    private static void writeArtifactWithMatchingSidecar(Path artifact, byte[] data, String prepare)
+            throws Exception {
         Files.createDirectories(artifact.getParent());
         Files.write(artifact, data);
         String hex = FrameworkBuild.sha256Hex(artifact);
+        String extra = (prepare == null || prepare.isEmpty())
+                ? ""
+                : ",\"prepare\":\"" + prepare.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
         Files.writeString(
                 FrameworkBuild.sidecarPath(artifact),
-                "{\"sha256\":\"" + hex + "\"}\n",
+                "{\"sha256\":\"" + hex + "\"" + extra + "}\n",
                 StandardCharsets.UTF_8);
     }
 

@@ -166,13 +166,13 @@ public final class FrameworkBuild {
         List<Path> paths = expectedPaths(spec, fileRoot);
         if (paths.isEmpty()) return false;
         for (Path p : paths) {
-            if (!artifactIsCurrent(p)) return false;
+            if (!artifactIsCurrent(p, spec)) return false;
         }
         return true;
     }
 
     public static boolean sourceOutputExists(ReferenceBuild.Spec spec, Path fileRoot) {
-        return artifactIsCurrent(spec.outputPath(fileRoot));
+        return artifactIsCurrent(spec.outputPath(fileRoot), spec);
     }
 
     /** Sidecar sits beside the object: {@code littlefs-v2.9.3-gcc13-arm-Os.o.json}. */
@@ -186,6 +186,15 @@ public final class FrameworkBuild {
      * do not crash.
      */
     public static boolean artifactIsCurrent(Path artifact) {
+        return artifactIsCurrent(artifact, null);
+    }
+
+    /**
+     * Like {@link #artifactIsCurrent(Path)}, and when {@code spec} is given
+     * the sidecar's recorded {@code prepare} must match the spec. {@code prepare}
+     * is not part of the artifact hash, but a changed command must not skip.
+     */
+    public static boolean artifactIsCurrent(Path artifact, ReferenceBuild.Spec spec) {
         try {
             if (artifact == null || !Files.isRegularFile(artifact) || Files.size(artifact) <= 0) {
                 return false;
@@ -199,7 +208,16 @@ public final class FrameworkBuild {
             if (!obj.has("sha256") || obj.get("sha256").isJsonNull()) return false;
             String expected = obj.get("sha256").getAsString().trim().toLowerCase(Locale.ROOT);
             if (expected.isEmpty()) return false;
-            return expected.equals(sha256Hex(artifact));
+            if (!expected.equals(sha256Hex(artifact))) return false;
+            if (spec != null) {
+                String want = spec.prepare() == null ? "" : spec.prepare();
+                String recorded = "";
+                if (obj.has("prepare") && !obj.get("prepare").isJsonNull()) {
+                    recorded = obj.get("prepare").getAsString();
+                }
+                if (!want.equals(recorded)) return false;
+            }
+            return true;
         } catch (Exception e) {
             return false;
         }
