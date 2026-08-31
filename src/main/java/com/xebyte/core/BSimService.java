@@ -609,7 +609,19 @@ public class BSimService {
         List<Map<String, Object>> renamed = new ArrayList<>();
         List<Map<String, Object>> wouldRename = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
-        int unidentifiableSkipped = 0;
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        counts.put("queried", results.size());
+        counts.put("renamed", 0);
+        counts.put("would_rename", 0);
+        counts.put("already_named", 0);
+        counts.put("unidentifiable", 0);
+        counts.put("below_similarity", 0);
+        counts.put("below_confidence", 0);
+        counts.put("ambiguous", 0);
+        counts.put("no_matches", 0);
+        counts.put("self_match", 0);
+        counts.put("function_not_found", 0);
+        counts.put("rename_failed", 0);
 
         for (BSimMatches.FunctionResult fr : results) {
             Function func = resolveApplyTarget(program, fr);
@@ -617,13 +629,12 @@ public class BSimService {
             BSimMatches.ApplyAction action = BSimMatches.decide(
                     fr, currentName, skipNamed, minSimilarity, minConfidence, applyUnidentifiable);
             if (action != BSimMatches.ApplyAction.APPLY) {
-                if (action == BSimMatches.ApplyAction.SKIP_UNIDENTIFIABLE) {
-                    unidentifiableSkipped++;
-                }
+                String reason = BSimMatches.reason(action);
+                counts.computeIfPresent(reason, (key, value) -> value + 1);
                 Map<String, Object> skip = new LinkedHashMap<>();
                 skip.put("function", fr.function);
                 if (fr.address != null) skip.put("address", fr.address);
-                skip.put("reason", BSimMatches.reason(action));
+                skip.put("reason", reason);
                 if (!fr.identifiable) skip.put("identifiable", false);
                 BSimMatches.Hit best = fr.best();
                 if (best != null) {
@@ -644,11 +655,13 @@ public class BSimService {
             row.put("executable", best.executable);
             if (dryRun) {
                 wouldRename.add(row);
+                counts.computeIfPresent("would_rename", (key, value) -> value + 1);
                 continue;
             }
             if (func == null) {
                 row.put("reason", "function_not_found");
                 skipped.add(row);
+                counts.computeIfPresent("function_not_found", (key, value) -> value + 1);
                 continue;
             }
             try {
@@ -659,10 +672,12 @@ public class BSimService {
                     return null;
                 });
                 renamed.add(row);
+                counts.computeIfPresent("renamed", (key, value) -> value + 1);
             } catch (Exception e) {
                 row.put("reason", "rename_failed");
                 row.put("error", e.getMessage());
                 skipped.add(row);
+                counts.computeIfPresent("rename_failed", (key, value) -> value + 1);
             }
         }
 
@@ -672,7 +687,8 @@ public class BSimService {
         body.put("min_confidence", minConfidence);
         body.put("min_similarity", minSimilarity);
         body.put("skip_named", skipNamed);
-        body.put("unidentifiable_skipped", unidentifiableSkipped);
+        body.put("counts", counts);
+        body.put("unidentifiable_skipped", counts.get("unidentifiable"));
         body.put("renamed", renamed);
         body.put("would_rename", wouldRename);
         body.put("skipped", skipped);
