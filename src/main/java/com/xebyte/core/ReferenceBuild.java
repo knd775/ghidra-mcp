@@ -585,7 +585,6 @@ public final class ReferenceBuild {
         return ref.replaceAll("[^A-Za-z0-9._-]+", "_");
     }
 
-    /** Recorded DWARF prefix for a corpus entry, e.g. {@code /ref/littlefs}. */
     /**
      * One envelope for sources and framework, success and dry-run. Callers
      * read {@code artifacts}; they do not branch on {@code mode}.
@@ -623,6 +622,7 @@ public final class ReferenceBuild {
         return art;
     }
 
+    /** Recorded DWARF prefix for a corpus entry, e.g. {@code /ref/littlefs}. */
     public static String debugPathPrefix(String name) {
         String n = filenameSafe(name == null ? "" : name.trim());
         if (n.isEmpty()) n = "unnamed";
