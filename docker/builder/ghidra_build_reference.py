@@ -97,17 +97,21 @@ class BuildError(Exception):
 
 
 def _kill_process_group(proc: subprocess.Popen[str]) -> None:
-    """SIGKILL the session started by ``start_new_session``, not just ``proc``."""
-    if proc.poll() is not None:
-        return
+    """SIGKILL the session started by ``start_new_session``, not just ``proc``.
+
+    The shell can exit while a background child still holds the pipes
+    (``sleep 60 &`` without ``wait``). ``proc.poll()`` is then non-None,
+    but the process group is still alive — always signal the group.
+    """
     if os.name == "posix":
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
-            return
+            pass
         except OSError:
-            proc.kill()
-    else:
+            if proc.poll() is None:
+                proc.kill()
+    elif proc.poll() is None:
         proc.kill()
     try:
         proc.wait(timeout=2)

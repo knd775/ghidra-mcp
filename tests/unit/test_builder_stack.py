@@ -934,6 +934,34 @@ class TestPrepare(unittest.TestCase):
                 time.sleep(0.05)
             self.assertFalse(alive, f"descendant {child_pid} survived prepare timeout")
 
+    @unittest.skipUnless(os.name == "posix", "process-group kill is POSIX")
+    def test_prepare_timeout_kills_orphaned_background_child(self):
+        """Shell exits; sleep keeps the pipes. Cleanup must still killpg."""
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "child.pid"
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.run_prepare(
+                    f"sleep 60 & echo $! > {pid_file}",
+                    1,
+                    Path(td),
+                    gbr._default_run,
+                    os.environ,
+                )
+            self.assertEqual(ctx.exception.status, "prepare_failed")
+            self.assertIn("timed out", str(ctx.exception))
+            self.assertTrue(pid_file.is_file(), "descendant must start before timeout")
+            child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            deadline = time.time() + 2
+            alive = True
+            while time.time() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                    break
+                time.sleep(0.05)
+            self.assertFalse(alive, f"orphaned child {child_pid} survived prepare timeout")
+
     def test_prepare_refused_in_framework_mode(self):
         with self.assertRaises(gbr.BuildError) as ctx:
             gbr.handle_request(
