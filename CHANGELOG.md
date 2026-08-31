@@ -6,6 +6,66 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim PostgreSQL ingest: fixed the credential order on the CLI's stdin
+
+`bsim_ingest` into a `postgresql://` database always failed with
+`Password for bsim:ERROR Could not authenticate with database`, while
+`bsim_create_db` and `bsim_list_corpus` succeeded against the very same URL in
+the same session. Nothing could be ingested into the PostgreSQL corpus, so the
+companion `corroboration` schema was never populated either.
+
+Ingesting a `ghidra://` source into PostgreSQL is the only path with **two
+secrets on one pipe**: the spawned `bsim` JVM is stock Ghidra, so both the
+Ghidra Server and the BSim database prompt for a password on stdin. The payload
+was written Ghidra-Server-first. It is the database that connects first —
+`generatesigs --bsim <url> --commit` runs `BulkSignatures.signatureRepo`, which
+calls `generateSignaturesFromServer` with no `--config` override and therefore
+pulls the vector configuration out of the database before
+`SignatureRepository.process` ever contacts the repository. PostgreSQL got the
+repository password and rejected it.
+
+The two working tools hid the shape of it: a database-only command has one
+prompt, so it cannot get the order wrong. H2 hid it too — a `file:` database
+never prompts, so the single line reached the repository prompt it was written
+for, and the failure looked specific to PostgreSQL rather than to having two
+credentials in flight. `BSimServiceValidationTest` now pins the order in both
+directions, and `Could not authenticate with database` is rewritten into an
+explanation naming `GHIDRA_MCP_BSIM_PASSWORD` and the shared pipe.
+
+The same collision exists in the username dimension and is now refused up
+front: `BulkSignatures` applies `--user` (which a `ghidra://` source forces us
+to pass) to the BSim database too, whenever the BSim URL carries no user of its
+own. `GHIDRA_MCP_BSIM_USER` is what puts that user in the URL, so with it unset
+an ingest would log into PostgreSQL as the Ghidra Server account and fail as
+one more indistinguishable "could not authenticate with database".
+
+Found alongside and fixed: the corroboration extract for a `ghidra://` source
+runs its own `analyzeHeadless` and passed `-connect <user>` but not `-p`.
+Without `-p`, `analyzeHeadless` sets `allowPasswordPrompt=false` and
+`HeadlessClientAuthenticator` returns its BADPASSWORD sentinel without ever
+reading stdin — so that extract could never authenticate against a repository,
+and acceptance for a no-program-open ingest would have failed at the next step.
+
+### `bsim_list_databases` reports state, not just configuration
+
+It listed every entry in `GHIDRA_MCP_BSIM_URLS` as though it were a database,
+with a `config_template` taken from a sidecar or `GHIDRA_MCP_BSIM_TEMPLATES`.
+Both are configuration. An operator reaches for this tool precisely when
+something is already wrong, and it reported two `medium_nosize` databases that
+had never been created. H2 rows were already honest (`present` is a file
+check), so the asymmetry was worst exactly where it mattered.
+
+Rows now carry `configured` (allowlisted — that and nothing more) separately
+from `present`, filled in by `BSimDbProbe`: a short read-only JDBC connect, no
+CLI, no JVM spawn, no DDL. `probe` always states what happened — `ok`,
+`no_bsim_schema`, `no_database`, `auth_failed`, `unreachable`, `no_credential`,
+`driver_missing`, `unsupported`, `not_probed` — and a live database also reports
+`executables` and `corroboration_functions`. `present` is **omitted** when
+unknown rather than defaulting either way, so read `probe`. `config_template`
+keeps a `config_template_source` of `sidecar`, `env` or `unknown`, because
+nothing reads a template back out of a database. `probe=false` skips the
+connect entirely.
+
 ### BSim corroboration (constants and strings)
 
 BSim features omit constant values by design, so two `printf` wrappers score

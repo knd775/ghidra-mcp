@@ -305,11 +305,34 @@ public class BSimCli {
     }
 
     /**
-     * Stdin payload for a {@code bsim} invocation: Ghidra Server password first
-     * (when a {@code ghidra://} argument is present), then the PostgreSQL
-     * password (when a {@code postgresql://} argument is present). Stock Ghidra
-     * prompts in that order; an open pipe with nothing written blocks for the
-     * whole process timeout.
+     * Stdin payload for a {@code bsim} invocation: the BSim <b>database</b>
+     * password first (when a {@code postgresql://} argument is present), then
+     * the Ghidra Server password (when a {@code ghidra://} argument is
+     * present). Two prompts read the one pipe in the order the CLI opens its
+     * connections, and a line consumed by the wrong prompt is an authentication
+     * failure against the wrong system.
+     *
+     * <p><b>The database is contacted first, not the repository.</b>
+     * {@code generatesigs --bsim <url> --commit} runs
+     * {@code BulkSignatures.signatureRepo}, whose first act is
+     * {@code generateSignaturesFromServer(..., configtemplate = null, ...)};
+     * with no {@code --config} override that method calls
+     * {@code establishQueryServerConnection} to pull the vector configuration
+     * out of the database <em>before</em> {@code SignatureRepository.process}
+     * ever reaches the Ghidra Server. So the DB prompt comes first, and the
+     * repository prompt second.
+     *
+     * <p>Getting this backwards is not a degraded mode, it is a hard outage of
+     * the whole PostgreSQL ingest path: the DB prompt ate the Ghidra Server
+     * password and {@code bsim} died with
+     * {@code Password for bsim:ERROR Could not authenticate with database},
+     * while {@code bsim_create_db} / {@code bsim_list_corpus} kept working
+     * because a DB-only command has only one prompt to get wrong. H2 masked it
+     * too — a {@code file:} database never prompts, so the single line on the
+     * pipe reached the repository prompt it was meant for.
+     *
+     * <p>An open pipe with nothing written blocks for the whole process
+     * timeout; see {@link #runProcess} for why stdin is always closed.
      */
     public static String stdinForBsimArgs(List<String> args) {
         if (args == null) return null;
@@ -320,12 +343,12 @@ public class BSimCli {
             if (BSimUrls.isPostgresUrl(a)) postgres = true;
         }
         StringBuilder sb = new StringBuilder();
-        if (ghidraServer) {
-            String password = resolvedServerPassword();
-            if (password != null) sb.append(password).append('\n');
-        }
         if (postgres) {
             String password = BSimUrls.resolvedBsimPassword();
+            if (password != null) sb.append(password).append('\n');
+        }
+        if (ghidraServer) {
+            String password = resolvedServerPassword();
             if (password != null) sb.append(password).append('\n');
         }
         return sb.length() == 0 ? null : sb.toString();

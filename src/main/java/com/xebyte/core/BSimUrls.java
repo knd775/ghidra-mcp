@@ -129,6 +129,35 @@ public final class BSimUrls {
                 + "GHIDRA_MCP_BSIM_PASSWORD (and GHIDRA_MCP_BSIM_USER) in the environment.";
     }
 
+    /**
+     * Refuse a combination where {@code bsim generatesigs} would silently log
+     * into the BSim database as the <em>Ghidra Server</em> user.
+     *
+     * <p>A {@code ghidra://} source makes us pass {@code --user <server user>}.
+     * {@code BulkSignatures} applies that name to the BSim database too
+     * whenever the BSim URL carries no userinfo of its own
+     * ({@code hasDefaultLogin()}), and only warns and ignores it when the URL
+     * does. {@link #injectConfiguredUser} supplies that userinfo from
+     * {@code GHIDRA_MCP_BSIM_USER} — so with that variable unset the two
+     * identities quietly merge, and the resulting failure is another
+     * indistinguishable "could not authenticate with database". These are two
+     * different accounts on two different systems; say so before spawning.
+     *
+     * @return an error message, or {@code null} when the combination is safe
+     */
+    public static String ambiguousIngestUser(String resolvedDbUrl, String source) {
+        if (!isPostgresUrl(resolvedDbUrl) || !isServerGhidraUrl(source)) return null;
+        URI uri = parseUri(resolvedDbUrl);
+        if (uri.getUserInfo() != null && !uri.getUserInfo().isBlank()) return null;
+        if (BSimCli.resolvedServerUser() == null) return null;
+        return "db_url is a postgresql:// URL with no user and GHIDRA_MCP_BSIM_USER is not "
+                + "set, but this ingest reads a ghidra:// source and so passes --user to the "
+                + "bsim CLI. Ghidra would apply that Ghidra Server username to the BSim "
+                + "database as well, and the login would fail as \"could not authenticate "
+                + "with database\". Set GHIDRA_MCP_BSIM_USER to the database role (it is not "
+                + "the Ghidra Server login).";
+    }
+
     public static String requireConfigTemplate(String template) {
         String t = requireToken("config_template", template);
         if (!CONFIG_TEMPLATES.contains(t)) {
@@ -530,6 +559,30 @@ public final class BSimUrls {
         }
     }
 
+    /**
+     * Where {@link #readSidecarTemplate} got its answer: {@code "sidecar"},
+     * {@code "env"} ({@code GHIDRA_MCP_BSIM_TEMPLATES}) or {@code "unknown"}.
+     *
+     * <p>Both sources are configuration, never observation — the template is
+     * fixed inside the database at {@code createdatabase} time and nothing here
+     * reads it back. A listing that prints a template with no provenance
+     * invites reading it as fact about a database that may not exist.
+     */
+    public static String templateSource(String dbUrl) {
+        if (dbUrl == null) return "unknown";
+        Path sidecar = sidecarPath(dbUrl);
+        if (sidecar != null && Files.isRegularFile(sidecar)) {
+            try {
+                Map<String, Object> parsed = JsonHelper.parseJson(
+                        Files.readString(sidecar, StandardCharsets.UTF_8));
+                if (parsed != null && parsed.get("config_template") != null) return "sidecar";
+            } catch (Exception ignored) {
+                // Fall through to the env mapping.
+            }
+        }
+        return templateForDatabaseName(databaseName(dbUrl)) != null ? "env" : "unknown";
+    }
+
     static String templateForDatabaseName(String name) {
         if (name == null || name.isBlank()) return null;
         String raw = bsimTemplatesEnv();
@@ -604,15 +657,31 @@ public final class BSimUrls {
             row.put("db_url", url);
             row.put("backend", "h2");
             row.put("path", dbPath.toString());
+            row.put("configured", true);
             row.put("config_template", readSidecarTemplate(url));
-            row.put("present", Files.isRegularFile(root.resolve(name + ".mv.db")));
+            row.put("config_template_source", templateSource(url));
+            // H2 presence was always observed rather than configured; keep it
+            // that way and give it the same probe vocabulary as network rows.
+            boolean onDisk = Files.isRegularFile(root.resolve(name + ".mv.db"));
+            row.put("present", onDisk);
+            row.put("probe", onDisk ? "ok" : "no_database");
             out.add(row);
         }
         return out;
     }
 
-    /** Allowlisted network URLs, with template from sidecar or {@code GHIDRA_MCP_BSIM_TEMPLATES}. */
-    public static List<Map<String, Object>> listAllowlistedDatabases() {
+    /**
+     * Allowlisted network URLs, with template from sidecar or
+     * {@code GHIDRA_MCP_BSIM_TEMPLATES}.
+     *
+     * <p>These rows come from {@code GHIDRA_MCP_BSIM_URLS}, which says what may
+     * be contacted, not what exists — hence {@code configured: true} on every
+     * row and a separate {@code present} that only a probe can fill in.
+     * {@code present} is omitted whenever it is unknown (not probed, or the
+     * probe could not reach a verdict); {@code probe} always says which.
+     */
+    public static List<Map<String, Object>> listAllowlistedDatabases(boolean probe,
+                                                                    int timeoutSeconds) {
         List<Map<String, Object>> out = new ArrayList<>();
         for (String url : parseAllowlist(bsimAllowlistEnv())) {
             if (!isNetworkUrl(url)) continue;
@@ -621,7 +690,15 @@ public final class BSimUrls {
             row.put("name", name);
             row.put("db_url", url);
             row.put("backend", isPostgresUrl(url) ? "postgresql" : url.split(":", 2)[0]);
+            row.put("configured", true);
             row.put("config_template", readSidecarTemplate(url));
+            row.put("config_template_source", templateSource(url));
+            if (probe) {
+                row.putAll(BSimDbProbe.probe(url, timeoutSeconds));
+            } else {
+                // present is deliberately absent, not false: nothing was asked.
+                row.put("probe", "not_probed");
+            }
             out.add(row);
         }
         return out;

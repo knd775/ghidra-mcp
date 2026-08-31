@@ -426,8 +426,11 @@
       "path": "/bsim_list_databases",
       "method": "GET",
       "category": "bsim",
-      "params": [],
-      "description": "List BSim databases: allowlisted postgresql:// URLs (GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under GHIDRA_MCP_BSIM_ROOT. Templates (medium_nosize, medium_32, ...) are fixed at createdatabase time. Sidecars written by bsim_create_db, or GHIDRA_MCP_BSIM_TEMPLATES, report which template each database used. Does not spawn the bsim CLI."
+      "params": [
+        "probe",
+        "probe_timeout_seconds"
+      ],
+      "description": "List BSim databases: allowlisted postgresql:// URLs (GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under GHIDRA_MCP_BSIM_ROOT. Every row separates configuration from state. configured=true means only that the URL is allowlisted; present says whether the database is actually there, and probe explains it (ok, no_database, no_bsim_schema, auth_failed, unreachable, no_credential, not_probed). A live database also reports executables and corroboration_functions. config_template is CONFIGURATION, not a read of the database: config_template_source says whether it came from a bsim_create_db sidecar, GHIDRA_MCP_BSIM_TEMPLATES, or nowhere. Templates are fixed inside the database at createdatabase time. Never spawns the bsim CLI; probing is a short read-only JDBC connect (probe=false skips it and leaves present unreported). present is omitted whenever it is unknown, so read probe rather than treating a missing present as false."
     },
     {
       "path": "/bsim_query",
