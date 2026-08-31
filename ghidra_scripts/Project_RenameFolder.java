@@ -2,13 +2,12 @@
 //
 // Renames a project folder after releasing all cached programs from it. Prevents stale program references from blocking the rename operation.
 //
-// Usage: Args: [0]='oldPath|newName' (e.g., /Mods/PD2-Latest|PD2-Season12).
+// Usage: Args: [0]='oldPath|newName' (e.g., /folder/old-name|new-name).
 // Output: Renames the specified project folder.
 //
 // @author Ben Ethington
-// @category Diablo 2.Project
+// @category Project
 // @description Rename a project folder with cache cleanup
-// @menupath Diablo 2.Project.Rename Folder
 
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.model.*;

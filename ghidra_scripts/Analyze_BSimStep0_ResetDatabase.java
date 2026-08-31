@@ -6,9 +6,8 @@
 // Output: Clears all BSim data tables, ready for fresh import.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Reset BSim database by wiping all data (destructive)
-// @menupath Diablo 2.Analysis.BSim Step 0 Reset Database
 
 import ghidra.app.script.GhidraScript;
 import java.sql.*;

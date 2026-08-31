@@ -1,15 +1,14 @@
 #This Call Replacer
 #
 #This script finds all functions using the __thiscall calling convention and changes them
-#to "unknown" calling convention. Useful when __thiscall is incorrectly applied in Diablo 2
+#to "unknown" calling convention. Useful when __thiscall is incorrectly applied
 #or when you need to force Ghidra to re-analyze calling conventions for C++ member functions.
 #Reports the total count of modified functions.
 #
 #@author Ben Ethington
-#@category Diablo 2
+#@category Repair
 #@description Replaces __thiscall calling convention with unknown for functions with non-standard member semantics
 #@keybinding
-#@menupath Diablo II.This Call Replacer
 
 import json
 

@@ -29,9 +29,8 @@
 //        file:/C:/path/to/refindex out.jsonl 10 0.3 0.0 500
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Dump low-threshold BSim matches for every function; decisions happen in Python
-// @menupath Diablo 2.Analysis.BSim Identify Dump
 
 import java.io.PrintWriter;
 import java.net.URL;

@@ -6,9 +6,8 @@
 // Output: JSON report at workflows/audit_<program>.json with per-function scores.
 //
 // @author Ben Ethington
-// @category Diablo 2.Documentation
+// @category Documentation
 // @description Audit documentation coverage with quality scoring
-// @menupath Diablo 2.Documentation.Audit Coverage
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.*;

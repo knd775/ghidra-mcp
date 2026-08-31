@@ -6,9 +6,8 @@
 // Output: Configurable todo list of undocumented functions.
 //
 // @author Ben Ethington
-// @category Diablo 2.Documentation
+// @category Documentation
 // @description Batch document functions (interactive version)
-// @menupath Diablo 2.Documentation.Batch Functions Interactive
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.DecompInterface;

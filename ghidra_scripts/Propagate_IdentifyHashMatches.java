@@ -6,9 +6,8 @@
 // Output: Console report of naming inconsistencies with proposed renames.
 //
 // @author Ben Ethington
-// @category Diablo 2.Propagation
+// @category Propagation
 // @description Identify hash matches with inconsistent names
-// @menupath Diablo 2.Propagation.Identify Hash Matches
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;

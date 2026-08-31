@@ -49,7 +49,7 @@ Apply Hungarian notation prefixes matching the actual Ghidra data type. Normaliz
 | char * (local) | sz | szBuffer |
 | wchar_t * (param) | lpwsz | lpwszUserName |
 | wchar_t * (local) | wsz | wszPath |
-| struct * | p+Name | pUnitAny |
+| struct * | p+Name | pPacketHeader |
 
 ## Double Pointers
 
@@ -93,7 +93,7 @@ All globals require `g_` prefix:
 ## Special Types
 
 - Function pointers: `pfn` prefix for callbacks (`pfnCallback`), PascalCase for direct calls
-- Structures (by value): camelCase without prefix (`unitAny`)
+- Structures (by value): camelCase without prefix (`packetHeader`)
 
 ## Undefined Type Resolution
 

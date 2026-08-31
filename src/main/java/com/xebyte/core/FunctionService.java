@@ -1731,7 +1731,7 @@ public class FunctionService {
             category = "function")
     public Response listClassMembers(
             @Param(value = "class_name",
-                   description = "Class / struct name, e.g. 'UnitAny'.") String className,
+                   description = "Class / struct name, e.g. 'PacketHeader'.") String className,
             @Param(value = "offset", defaultValue = "0") int offset,
             @Param(value = "limit", defaultValue = "200") int limit,
             @Param(value = "program", description = "Target program name", defaultValue = "") String programName) {

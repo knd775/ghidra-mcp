@@ -6,9 +6,8 @@
 // Output: Sets void return type on functions with undefined returns.
 //
 // @author Ben Ethington
-// @category Diablo 2.Repair
+// @category Repair
 // @description Assign void return type to undefined functions
-// @menupath Diablo 2.Repair.Assign Void Return Types
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.Function;

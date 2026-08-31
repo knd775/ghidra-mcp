@@ -3,7 +3,6 @@
 //@author GhidraMCP
 //@category Analysis
 //@keybinding
-//@menupath D2.Analyze Unmatched Functions
 //@toolbar
 
 import ghidra.app.script.GhidraScript;

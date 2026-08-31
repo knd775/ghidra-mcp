@@ -6,9 +6,8 @@
 // Output: JSON manifest at workflows/survey_manifest.json.
 //
 // @author Ben Ethington
-// @category Diablo 2.Documentation
+// @category Documentation
 // @description Survey undocumented functions for AI-driven RE loops
-// @menupath Diablo 2.Documentation.Survey Undocumented
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.*;

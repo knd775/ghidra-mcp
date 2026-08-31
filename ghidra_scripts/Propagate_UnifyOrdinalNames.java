@@ -6,9 +6,8 @@
 // Output: Applies unified names to ordinal functions across all versions.
 //
 // @author Ben Ethington
-// @category Diablo 2.Propagation
+// @category Propagation
 // @description Unify ordinal function names across all versions
-// @menupath Diablo 2.Propagation.Unify Ordinal Names
 
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.model.*;

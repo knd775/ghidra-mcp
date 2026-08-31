@@ -1628,9 +1628,9 @@ public class DocumentationHashService {
     /**
      * Best-effort version extraction from a Program's DomainFile path.
      * Examples:
-     *   /Mods/PD2-S12/Bnclient.dll       -> "PD2-S12"
-     *   /Vanilla/1.13d/D2Common.dll      -> "1.13d"
-     *   /LoD/1.00/D2Common.dll           -> "1.00"
+     *   /Mods/ModA-S12/program.dll       -> "ModA-S12"
+     *   /Release/1.13d/program.dll       -> "1.13d"
+     *   /Release/1.00/program.dll        -> "1.00"
      * Falls back to "unknown" if the path doesn't match.
      */
     private static String extractVersion(Program program) {
@@ -1640,7 +1640,7 @@ public class DocumentationHashService {
         if (pathname == null) return "unknown";
         String[] parts = pathname.split("/");
         // Skip leading empty + the project-bucket segment, take the next:
-        //   "" / "Mods" / "PD2-S12" / "Bnclient.dll"  -> parts[2] = "PD2-S12"
+        //   "" / "Mods" / "ModA-S12" / "program.dll"  -> parts[2] = "ModA-S12"
         if (parts.length >= 3 && !parts[2].isEmpty()) return parts[2];
         return "unknown";
     }
@@ -1656,7 +1656,7 @@ public class DocumentationHashService {
             @Param(value = "program",
                 description = "Target program path/name", defaultValue = "") String programName,
             @Param(value = "version_override", source = ParamSource.QUERY,
-                description = "Override the auto-extracted version (e.g. 'PD2-S12')",
+                description = "Override the auto-extracted version (e.g. 'ModA-S12')",
                 defaultValue = "") String versionOverride,
             @Param(value = "dry_run", source = ParamSource.QUERY, defaultValue = "false",
                 description = "Build payload but skip the POST") boolean dryRun) {
@@ -1706,7 +1706,7 @@ public class DocumentationHashService {
             @Param(value = "program",
                 description = "Target program path/name", defaultValue = "") String programName,
             @Param(value = "version_override", source = ParamSource.QUERY,
-                description = "Override the auto-extracted version (e.g. 'PD2-S12')",
+                description = "Override the auto-extracted version (e.g. 'ModA-S12')",
                 defaultValue = "") String versionOverride,
             @Param(value = "limit", source = ParamSource.QUERY, defaultValue = "0",
                 description = "Stop after N functions (0 = no limit)") int limit,

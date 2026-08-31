@@ -6,9 +6,8 @@
 // Output: Console listing of programs in dependency-first order.
 //
 // @author Ben Ethington
-// @category Diablo 2.Documentation
+// @category Documentation
 // @description Compute dependency-based binary documentation order
-// @menupath Diablo 2.Documentation.Compute Dependency Order
 
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.model.DomainFile;
