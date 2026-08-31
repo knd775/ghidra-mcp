@@ -2,13 +2,12 @@
 //
 // Simple status check for an H2 BSim database. Reports database info, executable count, and function count.
 //
-// Usage: Args: [0]=H2 database path (default: C:/tmp/bsim_diablo2).
+// Usage: Args: [0]=H2 database path (default: C:/tmp/bsim_db).
 // Output: Console output with database statistics.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Check BSim H2 database status and contents
-// @menupath Diablo 2.Analysis.BSim Status
 
 import java.io.File;
 import java.util.Iterator;
@@ -27,7 +26,7 @@ import ghidra.features.bsim.query.protocol.ResponseExe;
 public class Analyze_BSimStatus extends GhidraScript {
     @Override
     protected void run() throws Exception {
-        String dbPath = "C:/tmp/bsim_diablo2";
+        String dbPath = "C:/tmp/bsim_db";
         String[] args = getScriptArgs();
         if (args != null && args.length > 0 && !args[0].isEmpty()) dbPath = args[0].trim();
 

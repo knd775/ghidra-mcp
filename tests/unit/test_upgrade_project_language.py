@@ -173,12 +173,12 @@ def test_unresolvable_returns_none_rather_than_a_guess(monkeypatch, tmp_path):
 
 
 SAMPLE_LOG = """\
-INFO  Connected to repository 'diablo2' (RepositoryAdapter)
+INFO  Connected to repository 'myrepo' (RepositoryAdapter)
 INFO  REPORT: Processing project file: /Vanilla/1.01/Ijl11.dll (HeadlessAnalyzer)
 INFO  REPORT: Save succeeded for processed file: /Vanilla/1.01/Ijl11.dll (HeadlessAnalyzer)
 INFO  REPORT: Committed file changes to repository: /Vanilla/1.01/Ijl11.dll (HeadlessAnalyzer)
 WARN  Skipped processing for /Vanilla/1.01/Game.exe -- failed to get exclusive file checkout required for commit
-ERROR /Vanilla/1.02/D2Win.dll: this file was created with an older version of Ghidra.
+ERROR /Vanilla/1.02/Wing.dll: this file was created with an older version of Ghidra.
 ERROR /Vanilla/1.03/Fog.dll: this file was created with a newer version of Ghidra, and can not be processed.
 ERROR REPORT: Error trying to save changes to file: /Vanilla/1.04b/Storm.dll
 """
@@ -216,7 +216,7 @@ def test_log_parser_recognises_every_outcome():
     assert found["processed"] == ["/Vanilla/1.01/Ijl11.dll"]
     assert found["committed"] == ["/Vanilla/1.01/Ijl11.dll"]
     assert found["no_exclusive"] == ["/Vanilla/1.01/Game.exe"]
-    assert found["older"] == ["/Vanilla/1.02/D2Win.dll"]
+    assert found["older"] == ["/Vanilla/1.02/Wing.dll"]
     assert found["newer"] == ["/Vanilla/1.03/Fog.dll"]
     assert found["save_errors"] == ["/Vanilla/1.04b/Storm.dll"]
 
@@ -236,16 +236,16 @@ def test_trailing_log_decoration_is_stripped_from_paths():
     inventory path it corresponds to, and any reconciliation of "planned vs
     actually upgraded" silently finds zero matches.
     """
-    line = "INFO  REPORT: Processing project file: /Vanilla/1.06/D2Lang.dll (HeadlessAnalyzer)  "
+    line = "INFO  REPORT: Processing project file: /Vanilla/1.06/Lang.dll (HeadlessAnalyzer)  "
     match = upl.RE_PROCESSING.search(line)
     assert match
-    assert match.group(1) == "/Vanilla/1.06/D2Lang.dll"
+    assert match.group(1) == "/Vanilla/1.06/Lang.dll"
 
 
 def test_undecorated_lines_still_parse():
-    line = "INFO  REPORT: Committed file changes to repository: /Vanilla/1.06/D2Lang.dll"
+    line = "INFO  REPORT: Committed file changes to repository: /Vanilla/1.06/Lang.dll"
     match = upl.RE_COMMITTED.search(line)
-    assert match and match.group(1) == "/Vanilla/1.06/D2Lang.dll"
+    assert match and match.group(1) == "/Vanilla/1.06/Lang.dll"
 
 
 def test_program_name_containing_parentheses_survives():
@@ -254,7 +254,7 @@ def test_program_name_containing_parentheses_survives():
     assert match and match.group(1) == "/Lab/Game (copy).exe"
 
 
-SPACED = "/Vanilla/1.00/Diablo II.exe"
+SPACED = "/Vanilla/1.00/My Program.exe"
 
 
 @pytest.mark.parametrize(
@@ -286,7 +286,7 @@ SPACED = "/Vanilla/1.00/Diablo II.exe"
     ],
 )
 def test_paths_containing_spaces_are_captured_whole(regex_name: str, line: str):
-    """`Diablo II.exe` exists in all 25 Vanilla folders.
+    """`My Program.exe` contains a space and appears in many project folders.
 
     The first cut matched skip/error paths with ``(\\S+)``, which cannot span the
     space -- the line failed to match AT ALL, so the file vanished from the tally
@@ -310,7 +310,7 @@ def test_unauthorized_is_detected(line: str):
 
 
 def test_healthy_log_is_not_flagged_unauthorized():
-    assert not upl.RE_UNAUTHORIZED.search("INFO  Connected to repository 'diablo2'")
+    assert not upl.RE_UNAUTHORIZED.search("INFO  Connected to repository 'myrepo'")
 
 
 # --------------------------------------------------------------------------- #
@@ -326,14 +326,14 @@ def test_walk_project_recurses_and_keeps_only_programs(monkeypatch):
         "/Vanilla/1.01": {
             "folders": [],
             "files": [
-                {"path": "/Vanilla/1.01/D2Game.dll", "content_type": "Program", "is_versioned": True},
+                {"path": "/Vanilla/1.01/Core.dll", "content_type": "Program", "is_versioned": True},
                 {"path": "/Vanilla/1.01/notes.txt", "content_type": "File", "is_versioned": True},
             ],
         },
     }
     monkeypatch.setattr(upl, "mcp_get", lambda base, path, **kw: tree[kw["folder"]])
     found = upl.walk_project("http://x")
-    assert [e["path"] for e in found] == ["/Vanilla/1.01/D2Game.dll"]
+    assert [e["path"] for e in found] == ["/Vanilla/1.01/Core.dll"]
 
 
 def test_walk_project_survives_a_failing_folder(monkeypatch):
@@ -410,10 +410,10 @@ def test_mcp_get_accepts_a_path_query_parameter(monkeypatch):
         return FakeResponse(b'{"result": "{\\"success\\": true}"}')
 
     monkeypatch.setattr(upl.urllib.request, "urlopen", fake_urlopen)
-    result = upl.mcp_get("http://x", "open_program", path="/Vanilla/1.01/D2Game.dll")
+    result = upl.mcp_get("http://x", "open_program", path="/Vanilla/1.01/Core.dll")
     assert result == {"success": True}
     assert "open_program?" in seen["url"]
-    assert "path=%2FVanilla%2F1.01%2FD2Game.dll" in seen["url"]
+    assert "path=%2FVanilla%2F1.01%2FCore.dll" in seen["url"]
 
 
 # --------------------------------------------------------------------------- #
@@ -485,7 +485,7 @@ def test_folder_url_has_no_double_slash_for_root(monkeypatch, tmp_path):
     upl.run_folder(
         ghidra_dir=tmp_path,
         server="h:1",
-        repo="diablo2",
+        repo="myrepo",
         folder="/",
         user="u",
         password="p",
@@ -494,4 +494,4 @@ def test_folder_url_has_no_double_slash_for_root(monkeypatch, tmp_path):
         timeout=10.0,
         log_dir=tmp_path / "logs",
     )
-    assert captured["cmd"][1] == "ghidra://h:1/diablo2"
+    assert captured["cmd"][1] == "ghidra://h:1/myrepo"

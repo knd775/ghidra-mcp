@@ -6,9 +6,8 @@
 // Output: JSON hash index file for cross-version propagation.
 //
 // @author Ben Ethington
-// @category Diablo 2.Propagation
+// @category Propagation
 // @description Build function hash index from current program
-// @menupath Diablo 2.Propagation.Build Hash Index
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.*;

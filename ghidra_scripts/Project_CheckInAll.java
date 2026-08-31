@@ -6,9 +6,8 @@
 // Output: Checks in all programs to version control.
 //
 // @author Ben Ethington
-// @category Diablo 2.Project
+// @category Project
 // @description Check in all checked-out programs with dated message
-// @menupath Diablo 2.Project.Check In All
 
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.model.*;

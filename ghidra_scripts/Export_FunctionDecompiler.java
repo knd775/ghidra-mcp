@@ -6,9 +6,8 @@
 // Output: JSON files with function prototypes and decompiled code.
 //
 // @author Ben Ethington
-// @category Diablo 2.Export
+// @category Export
 // @description Export all functions with decompiled C code to JSON
-// @menupath Diablo 2.Export.Function Decompiler
 
 import java.io.File;
 import java.io.FileWriter;

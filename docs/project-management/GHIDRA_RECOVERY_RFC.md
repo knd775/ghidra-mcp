@@ -129,8 +129,8 @@ Example recovery state:
   "launched_by_bridge": true,
   "ghidra_path": "F:/ghidra_12.1_PUBLIC",
   "project": "MyProject",
-  "project_path": "C:/Users/benam/ghidra/projects/MyProject.gpr",
-  "program": "/Mods/PD2-S12/D2Common.dll",
+  "project_path": "C:/Users/example/ghidra/projects/MyProject.gpr",
+  "program": "/folder/subfolder/example.dll",
   "socket": "...",
   "tcp_url": "http://127.0.0.1:8089"
 }
@@ -211,12 +211,12 @@ Enhance `/mcp/instance_info` or `/mcp/health` to include richer recovery state:
   "project_path": "...",
   "open_programs": [
     {
-      "name": "D2Common.dll",
-      "project_path": "/Mods/PD2-S12/D2Common.dll",
+      "name": "example.dll",
+      "project_path": "/folder/subfolder/example.dll",
       "language_id": "x86:LE:32:default"
     }
   ],
-  "current_program": "/Mods/PD2-S12/D2Common.dll",
+  "current_program": "/folder/subfolder/example.dll",
   "busy": false,
   "active_requests": 0
 }

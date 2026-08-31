@@ -6,9 +6,8 @@
 // Output: Populates the PostgreSQL BSim database with function signatures.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Ingest all functions into a BSim PostgreSQL database
-// @menupath Diablo 2.Analysis.BSim Ingest Program
 
 import java.net.URL;
 import java.util.Iterator;

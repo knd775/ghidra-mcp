@@ -80,17 +80,9 @@ AUTH_TOKEN = (os.getenv("GHIDRA_MCP_AUTH_TOKEN") or "").strip()
 # having to set GHIDRA_MCP_URL per instance. See issue #175 + Copilot review.
 TCP_PORT_SCAN_RANGE = 16
 
-# Debugger proxy target (the debugger server, which lives in the d2-game-exe
-# repo since 2026-08-11). Empty/default points at the
-# standalone debugger server's default port.
+# Debugger proxy target (the standalone debugger server). Empty/default
+# points at that server's default port.
 DEBUGGER_URL = os.getenv("GHIDRA_DEBUGGER_URL", "http://127.0.0.1:8099")
-
-# D2Debugger in-process oracle (D2MOO's D2Debugger.dll, compiled into the running
-# Game.exe and serving 127.0.0.1:8790). Unlike DEBUGGER_URL this is not a debugger
-# at all -- it is an HTTP surface *inside* the live game, so it answers while the
-# game runs and needs no elevation on the client side (loopback TCP is not gated
-# by integrity level). Env name matches the one fun-doc/D2MOO tooling already uses.
-ORACLE_URL = os.getenv("D2DBG_MCP_URL", "http://127.0.0.1:8790")
 
 # ==========================================================================
 # Logging
@@ -119,7 +111,7 @@ MANAGEMENT_TOOL_NAMES = {
 }
 
 # WinDbg debugger proxy tools (Phase 1+2+3). The standalone debugger server
-# (in the d2-game-exe repo) wraps dbgeng via pybag and only runs on Windows, so these
+# wraps dbgeng via pybag and only runs on Windows, so these
 # are registered conditionally — see debugger._debugger_enabled(). The names stay
 # reserved in _ALL_STATIC_TOOL_NAMES on every platform so dynamic-tool naming is
 # identical everywhere (a Ghidra /debugger/status endpoint -> debugger_status_2
@@ -149,21 +141,9 @@ DEBUGGER_TOOL_NAMES = {
     "debugger_watch_log",
 }
 
-# D2Debugger in-process oracle proxy tools. Registered conditionally (see
-# oracle._oracle_enabled()) for the same reason as the debugger names: reserved
-# in _ALL_STATIC_TOOL_NAMES on every platform so dynamic-tool naming stays
-# identical everywhere, but only registered where the oracle can actually exist.
-ORACLE_TOOL_NAMES = {
-    "oracle_status",
-    "oracle_modules",
-    "oracle_read_memory",
-    "oracle_call_function",
-    "oracle_prove_function",
-}
-
 # Full structural set: every tool name the bridge may define. Used for
 # name-collision detection / reservation so dynamic tool names are platform-stable.
-_ALL_STATIC_TOOL_NAMES = MANAGEMENT_TOOL_NAMES | DEBUGGER_TOOL_NAMES | ORACLE_TOOL_NAMES
+_ALL_STATIC_TOOL_NAMES = MANAGEMENT_TOOL_NAMES | DEBUGGER_TOOL_NAMES
 
 # Active set: static tools actually registered with this process. Debugger names
 # are added by bridge_mcp_ghidra.debugger (once DEBUGGER_URL is known) only when

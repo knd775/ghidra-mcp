@@ -6,9 +6,8 @@
 // Output: Prioritized todo list of functions needing documentation.
 //
 // @author Ben Ethington
-// @category Diablo 2.Documentation
+// @category Documentation
 // @description Batch document functions with completeness validation
-// @menupath Diablo 2.Documentation.Batch Functions
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.DecompInterface;

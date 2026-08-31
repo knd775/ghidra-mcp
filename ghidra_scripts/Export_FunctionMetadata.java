@@ -6,9 +6,8 @@
 // Output: JSON files (game.json and game_minify.json) with function metadata.
 //
 // @author Ben Ethington
-// @category Diablo 2.Export
+// @category Export
 // @description Export function metadata with hooking information
-// @menupath Diablo 2.Export.Function Metadata
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;

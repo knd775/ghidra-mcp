@@ -2,13 +2,12 @@
 //
 // Runs Ghidra auto-analysis on every program in a specified project folder. Skips known non-game binaries (binkw32, SmackW32, etc.).
 //
-// Usage: Args: [0]=folder path (e.g., /Mods/PD2-S12).
+// Usage: Args: [0]=folder path (e.g., /folder/subfolder).
 // Output: Auto-analysis applied to all programs in the folder.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Batch analyze all programs in a project folder
-// @menupath Diablo 2.Analysis.Batch Folder
 
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.model.*;

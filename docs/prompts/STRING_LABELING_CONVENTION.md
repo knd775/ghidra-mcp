@@ -88,11 +88,11 @@ sz[Category]_[Description][Suffix]
 
 | Content Pattern | Category | Example Label |
 |-----------------|----------|---------------|
-| Static paths (Data\Global\) | `szPath_` | `szPath_GlobalMonsters` |
+| Static paths (Data\Config\) | `szPath_` | `szPath_ConfigTables` |
 | Format paths with %s (%s\UI\%s) | `szFmtPath_` | `szFmtPath_LoadingScreen` |
-| UI resource paths (Panel\, Menu\) | `szUIPath_` | `szUIPath_PanelInvChar` |
+| UI resource paths (Panel\, Menu\) | `szUIPath_` | `szUIPath_PanelMain` |
 | Source file paths (..\Source\) | `szSrcFile_` | `szSrcFile_GfxUtil` |
-| Filename constants (.txt, .dat) | `szFile_` | `szFile_D2MemTxt` |
+| Filename constants (.txt, .dat) | `szFile_` | `szFile_ConfigTxt` |
 
 ### UI and Display
 
@@ -101,7 +101,7 @@ sz[Category]_[Description][Suffix]
 | Menu labels (Options, Previous) | `szMenu_` | `szMenu_Options` |
 | Option names (Gamma, Contrast) | `szOpt_` | `szOpt_LightQuality` |
 | UI element names | `szUI_` | `szUI_MiniPanel` |
-| Window/dialog titles | `szTitle_` | `szTitle_DiabloII` |
+| Window/dialog titles | `szTitle_` | `szTitle_MainWindow` |
 | Screen identifiers | `szScreen_` | `szScreen_Screen01` |
 
 ### Format and Debug Strings
@@ -133,10 +133,10 @@ sz[Category]_[Description][Suffix]
 
 | Content Pattern | Category | Example Label |
 |-----------------|----------|---------------|
-| Battle.net strings | `szBnet_` | `szBnet_ChatPrefix` |
-| Server IPs/addresses | `szServer_` | `szServer_BnetIP1` |
+| Network service strings | `szNet_` | `szNet_ChatPrefix` |
+| Server IPs/addresses | `szServer_` | `szServer_LoginIP1` |
 | Chat commands (/whisper) | `szChat_` | `szChat_Whisper` |
-| Command strings | `szCmd_` | `szCmd_NoPickup` |
+| Command strings | `szCmd_` | `szCmd_Reconnect` |
 
 ### Audio and Video
 
@@ -144,7 +144,7 @@ sz[Category]_[Description][Suffix]
 |-----------------|----------|---------------|
 | Sound parameters (EAX, Reverb) | `szSound_` | `szSound_EaxReverb` |
 | Video mode names | `szVideo_` | `szVideo_Direct3D` |
-| Bink video files (.bik) | `szBik_` | `szBik_D2Intro` |
+| Bink video files (.bik) | `szBik_` | `szBik_IntroVideo` |
 | Resolution strings | `szRes_` | `szRes_640x292` |
 
 ### Game-Specific
@@ -152,10 +152,10 @@ sz[Category]_[Description][Suffix]
 | Content Pattern | Category | Example Label |
 |-----------------|----------|---------------|
 | Game strings | `szGame_` | `szGame_Expansion` |
-| Item strings | `szItem_` | `szItem_Ethereal` |
+| Item strings | `szItem_` | `szItem_Broken` |
 | State strings | `szState_` | `szState_GameOver` |
 | Pool names | `szPool_` | `szPool_ClientPoolSystem` |
-| Automap strings | `szAutomap_` | `szAutomap_PartyNames` |
+| Automap strings | `szAutomap_` | `szAutomap_Legend` |
 | Environment effects | `szEnv_` | `szEnv_Bubbles` |
 
 ### Compression/Library
@@ -192,11 +192,11 @@ szOpt_SmallOff3     # Third instance
 | `Fmt` | Format strings | `szDbg_TileCacheFmt` |
 | `Msg` | Message body | `szSecurity_BufferOverrunMsg` |
 | `Title` | Dialog title | `szSecurity_BufferOverrunTitle` |
-| `Dir` | Directory path | `szPath_MonstersDir` |
+| `Dir` | Directory path | `szPath_TexturesDir` |
 | `Alt` | Alternative version | `szApi_MessageBoxA_Alt` |
 | `Upper` | Uppercase variant | `szDllName_Kernel32Upper` |
-| `Lower` | Lowercase variant | `szDll_D2GameLower` |
-| `Local` | Local/embedded copy | `szDllName_D2ClientLocal` |
+| `Lower` | Lowercase variant | `szDllName_Kernel32Lower` |
+| `Local` | Local/embedded copy | `szDllName_User32Local` |
 
 ---
 

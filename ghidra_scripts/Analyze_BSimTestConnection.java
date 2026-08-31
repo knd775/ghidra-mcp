@@ -6,9 +6,8 @@
 // Output: Console JSON with database connection status and info.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Test connectivity to a BSim PostgreSQL database
-// @menupath Diablo 2.Analysis.BSim Test Connection
 
 import java.net.URL;
 

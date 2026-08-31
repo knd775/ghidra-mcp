@@ -6,9 +6,8 @@
 // Output: Fixes function parameter counts based on RET analysis.
 //
 // @author Ben Ethington
-// @category Diablo 2.Repair
+// @category Repair
 // @description Fix stack parameter counts using RET analysis
-// @menupath Diablo 2.Repair.Stack Arguments Searcher
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.services.DataTypeManagerService;

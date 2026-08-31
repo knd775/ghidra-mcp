@@ -425,7 +425,7 @@ public class DataTypeService {
     @McpTool(path = "/create_struct", method = "POST", description = "Create a structure data type. Body fields must be a JSON array of objects; each object needs name and type, with optional offset. Example fields: [{\"name\":\"dwId\",\"type\":\"uint\",\"offset\":0},{\"name\":\"pNext\",\"type\":\"void *\",\"offset\":4}]. Type may be any resolvable Ghidra data type or existing struct name. Set replace_placeholder=true to delete a 1-byte demangler/placeholder type with the same name before creating. To change size of an existing struct in place, use resize_struct; for atomic delete+recreate, use recreate_struct (see docs/STRUCT_RESIZE_WORKFLOW.md).", category = "datatype")
     public Response createStruct(
             @Param(value = "name", source = ParamSource.BODY,
-                   description = "New structure type name, for example UnitAny or SkillTableEntry") String name,
+                   description = "New structure type name, for example PacketHeader or SkillTableEntry") String name,
             @Param(value = "fields", source = ParamSource.BODY, fieldsJson = true,
                    description = "JSON array of field objects. Required keys: name, type. Optional key: offset as a decimal byte offset. Alternate keys are accepted: field_name/fieldName, field_type/fieldType/data_type/dataType, field_offset/fieldOffset/off. Example: [{\"name\":\"dwId\",\"type\":\"uint\",\"offset\":0},{\"name\":\"pNext\",\"type\":\"void *\",\"offset\":4}]") String fieldsJson,
             @Param(value = "replace_placeholder", source = ParamSource.BODY, defaultValue = "false",
@@ -3590,7 +3590,7 @@ public class DataTypeService {
         // global is INVISIBLE elsewhere: /list_globals resolves the CONTAINING
         // unit, so it reports the eater's type at the dead address and the
         // dashboard shows the global as perfectly typed. Measured on
-        // PD2_EXT.dll 2026-08-03: the types bar counted 1 untyped, audit_global
+        // a corpus DLL 2026-08-03: the types bar counted 1 untyped, audit_global
         // counted 3, and the 2 ghosts were exactly the globals a neighbouring
         // type application had destroyed. Surface the container so the
         // difference is reportable instead of inferable.
@@ -3685,7 +3685,7 @@ public class DataTypeService {
         // consuming process resolves against it — so `g_` + Hungarian form is
         // not an improvement, it is the destruction of the symbol's identity.
         //
-        // Measured on PD2_EXT.dll 2026-08-04. That DLL is a `version.dll` proxy:
+        // Measured on a corpus DLL 2026-08-04. That DLL is a `version.dll` proxy:
         // all 12 of its named exports are FORWARDER strings ("version.VerFindFileW")
         // and it has no real code exports at all. A globals pass renamed every
         // one of them — `GetFileVersionInfoA` became
@@ -3700,7 +3700,7 @@ public class DataTypeService {
         // correct `char[N]` and an explanation. Only the NAME is off-limits.
         //
         // NOT every export is protected, and the distinction is the whole
-        // subtlety. D2's own DLLs export by ORDINAL: Ghidra names those
+        // subtlety. Many corpus DLLs export by ORDINAL: Ghidra names those
         // `Ordinal_10001`, they carry no identity worth keeping, and renaming
         // them to something meaningful is the core of this project's workflow.
         // A blanket "exports are untouchable" rule would break that. What is
@@ -4478,7 +4478,7 @@ public class DataTypeService {
             @Param(value = "name", source = ParamSource.BODY,
                    description = "New name. Must follow g_ + Hungarian + descriptor convention (e.g., g_dwActiveQuestState, g_pUnitList).") String newName,
             @Param(value = "type_name", source = ParamSource.BODY,
-                   description = "Ghidra data type to apply (e.g., uint, byte, UnitAny *, char *, MyStruct). Use create_struct/create_array_type first if the type doesn't exist. Pass empty to leave type unchanged.") String typeName,
+                   description = "Ghidra data type to apply (e.g., uint, byte, PacketHeader *, char *, MyStruct). Use create_struct/create_array_type first if the type doesn't exist. Pass empty to leave type unchanged.") String typeName,
             @Param(value = "array_length", source = ParamSource.BODY, defaultValue = "0",
                    description = "If >0, applied as an array of array_length elements of type_name. Required when documenting an array of fixed length (e.g., a 100-entry data table).") int arrayLength,
             @Param(value = "plate_comment", source = ParamSource.BODY,
@@ -4665,7 +4665,7 @@ public class DataTypeService {
         // Eviction guard. clearCodeUnits below operates on whole code units and
         // its exception is swallowed, so without this a type application quietly
         // deletes any named global it overlaps — and reports success. Measured
-        // 2026-08-03: three globals destroyed in one PD2_EXT.dll pass, each one
+        // 2026-08-03: three globals destroyed in one corpus DLL pass, each one
         // reported `completed` seconds earlier. Refuse instead, and name the
         // casualties so the caller can pick a type that fits or fix the conflict
         // deliberately via allow_evict.

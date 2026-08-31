@@ -146,7 +146,7 @@ package = true
 #      one-shot CLIs that drive a live Ghidra instance (or an LLM) end-to-end.
 #      Keeping their 0% in the denominator makes the ratchet measure "how many
 #      live-only scripts exist" instead of "how tested is the runtime code."
-# Importable engines/libraries (type_unifier, d2moo_types, port_pipeline, ...)
+# Importable engines/libraries
 # deliberately stay IN the denominator even when poorly covered -- that is the
 # test debt the ratchet exists to squeeze. Do not add runtime modules here.
 omit = [

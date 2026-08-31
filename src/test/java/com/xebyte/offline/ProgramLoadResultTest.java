@@ -51,12 +51,12 @@ public class ProgramLoadResultTest extends TestCase {
 
     public void testNotFoundMentionsRequestedPath() {
         ProgramLoadResult r = ProgramLoadResult.notFound(
-            "/Vanilla/1.13d/D2Common.dll",
+            "/folder/program.dll",
             Collections.emptyList(),
             null);
         assertFalse(r.success);
         assertTrue("error mentions requested path",
-            r.error.contains("/Vanilla/1.13d/D2Common.dll"));
+            r.error.contains("/folder/program.dll"));
         assertTrue("error mentions empty-project case",
             r.error.contains("no program files"));
     }
@@ -120,10 +120,10 @@ public class ProgramLoadResultTest extends TestCase {
     // -------------------------------------------------------------------
 
     public void testServerBindingInfoBound() {
-        ServerBindingInfo b = new ServerBindingInfo(true, "192.0.2.10:13100", "diablo2");
+        ServerBindingInfo b = new ServerBindingInfo(true, "192.0.2.10:13100", "myrepo");
         assertTrue(b.serverBound);
         assertEquals("192.0.2.10:13100", b.serverInfo);
-        assertEquals("diablo2", b.repoName);
+        assertEquals("myrepo", b.repoName);
     }
 
     public void testServerBindingInfoUnbound() {

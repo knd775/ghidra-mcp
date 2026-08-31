@@ -1,8 +1,7 @@
 //Apply reviewed suggestions from propagation_suggestions file
 //@author GhidraMCP
-//@category D2
+//@category Propagation
 //@keybinding
-//@menupath D2.1c - Apply Reviewed Suggestions
 //@toolbar
 
 import ghidra.app.script.GhidraScript;

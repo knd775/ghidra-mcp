@@ -99,7 +99,7 @@ DEFAULT_MCP = "http://127.0.0.1:8089"
 # Ghidra emits exactly these, per file, on the paths we care about. Every line
 # carries a trailing " (ComponentName)" that must not become part of the path.
 # Paths are matched non-greedily up to a literal delimiter, never with \S+:
-# "Diablo II.exe" has a SPACE, and \S+ makes the whole line fail to match, so a
+# a file name with a space ("My Program.exe") is common, and \S+ makes the whole line fail to match, so a
 # skipped file silently disappears from the tally instead of being reported.
 _TAIL = r"(?:\s+\([A-Za-z]\w*\))?\s*$"
 RE_PROCESSING = re.compile(r"REPORT: Processing (?:read-only )?project file: (.+?)" + _TAIL)

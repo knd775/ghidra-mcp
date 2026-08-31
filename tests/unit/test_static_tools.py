@@ -185,7 +185,7 @@ class TestListInstances(unittest.TestCase):
         uds = {
             "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
             "pid": 9020,
-            "project": "diablo2",
+            "project": "myrepo",
             "url": "http://127.0.0.1:8089",
         }
 
@@ -214,7 +214,7 @@ class TestConnectInstanceFailures(unittest.TestCase):
     misconfigured."""
 
     def test_uds_schema_fetch_failure_reports_socket(self):
-        one = [{"project": "diablo2", "socket": "/tmp/d2.sock", "pid": 42}]
+        one = [{"project": "myrepo", "socket": "/tmp/repo.sock", "pid": 42}]
 
         with (
             isolated_bridge() as bridge,
@@ -226,17 +226,17 @@ class TestConnectInstanceFailures(unittest.TestCase):
                 side_effect=RuntimeError("HTTP 503"),
             ),
         ):
-            data = json.loads(asyncio.run(bridge.connect_instance("diablo2")))
+            data = json.loads(asyncio.run(bridge.connect_instance("myrepo")))
 
         self.assertIn("Schema fetch failed", data["error"])
         self.assertIn("HTTP 503", data["error"])
-        self.assertEqual(data["socket"], "/tmp/d2.sock")
+        self.assertEqual(data["socket"], "/tmp/repo.sock")
 
     def test_substring_project_match_is_accepted_after_exact_match_fails(self):
-        """connect_instance("diablo") should find the "diablo2" project --
+        """connect_instance("myrep") should find the "myrepo" project --
         agents routinely pass a prefix. The substring pass runs only after the
         exact pass misses, so it needs its own case."""
-        one = [{"project": "diablo2", "socket": "/tmp/d2.sock", "pid": 42}]
+        one = [{"project": "myrepo", "socket": "/tmp/repo.sock", "pid": 42}]
 
         with (
             isolated_bridge() as bridge,
@@ -246,12 +246,12 @@ class TestConnectInstanceFailures(unittest.TestCase):
             patch.object(bridge.registry, "register_tools_from_schema", return_value=3),
         ):
             bridge.state._full_schema = []
-            data = json.loads(asyncio.run(bridge.connect_instance("diablo")))
+            data = json.loads(asyncio.run(bridge.connect_instance("myrep")))
 
         self.assertTrue(data["connected"])
         self.assertEqual(data["transport"], "uds")
-        self.assertEqual(data["project"], "diablo2")
-        self.assertEqual(data["socket"], "/tmp/d2.sock")
+        self.assertEqual(data["project"], "myrepo")
+        self.assertEqual(data["socket"], "/tmp/repo.sock")
 
     def test_uds_match_without_af_unix_routes_to_the_enriched_tcp_url(self):
         """Windows CPython has no socket.AF_UNIX, so a matched UDS instance
@@ -260,7 +260,7 @@ class TestConnectInstanceFailures(unittest.TestCase):
         (or, worse, defaulting to whatever is on port 8089)."""
         one = [
             {
-                "project": "diablo2",
+                "project": "myrepo",
                 "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
                 "pid": 9020,
                 "url": "http://127.0.0.1:8091",
@@ -278,7 +278,7 @@ class TestConnectInstanceFailures(unittest.TestCase):
             patch.dict(os.environ, env, clear=True),
         ):
             bridge.state._full_schema = []
-            data = json.loads(asyncio.run(bridge.connect_instance("diablo2")))
+            data = json.loads(asyncio.run(bridge.connect_instance("myrepo")))
             mode = bridge.state._transport_mode
             socket_path = bridge.state._active_socket
 
@@ -323,12 +323,12 @@ class TestConnectInstanceFailures(unittest.TestCase):
             patch.dict(os.environ, env, clear=True),
         ):
             bridge.state._transport_mode = "none"
-            data = json.loads(asyncio.run(bridge.connect_instance("diablo2")))
+            data = json.loads(asyncio.run(bridge.connect_instance("myrepo")))
 
             self.assertEqual(bridge.state._transport_mode, "none")
             self.assertIsNone(bridge.state._active_tcp)
 
-        self.assertIn("No instance matching 'diablo2'", data["error"])
+        self.assertIn("No instance matching 'myrepo'", data["error"])
         self.assertEqual(data["available"], [])
 
 
@@ -875,7 +875,7 @@ class TestAutoConnect(unittest.TestCase):
 
     def test_single_uds_instance_connects_and_registers(self):
         bridge = self._bridge
-        one = [{"socket": "/tmp/d2.sock", "pid": 42, "project": "diablo2"}]
+        one = [{"socket": "/tmp/repo.sock", "pid": 42, "project": "myrepo"}]
 
         with (
             patch.object(bridge.discovery, "discover_instances", return_value=one),
@@ -887,14 +887,14 @@ class TestAutoConnect(unittest.TestCase):
 
         fetch.assert_called_once()
         self.assertEqual(bridge.state._transport_mode, "uds")
-        self.assertEqual(bridge.state._active_socket, "/tmp/d2.sock")
-        self.assertEqual(bridge.state._connected_project, "diablo2")
+        self.assertEqual(bridge.state._active_socket, "/tmp/repo.sock")
+        self.assertEqual(bridge.state._connected_project, "myrepo")
 
     def test_uds_schema_failure_leaves_bridge_disconnected(self):
         """A half-connected bridge (socket set, no tools) is worse than none --
         the failure arm must clear the transport so connect_instance can retry."""
         bridge = self._bridge
-        one = [{"socket": "/tmp/d2.sock", "pid": 42, "project": "diablo2"}]
+        one = [{"socket": "/tmp/repo.sock", "pid": 42, "project": "myrepo"}]
 
         with (
             patch.object(bridge.discovery, "discover_instances", return_value=one),
@@ -922,7 +922,7 @@ class TestAutoConnect(unittest.TestCase):
             {
                 "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
                 "pid": 9020,
-                "project": "diablo2",
+                "project": "myrepo",
                 "url": "http://127.0.0.1:8091",
             }
         ]
@@ -1009,7 +1009,7 @@ class TestListInstancesPayloadSize(unittest.TestCase):
         programs = [
             {
                 "name": f"Prog{i}.dll",
-                "path": f"/Mods/PD2-S12/Prog{i}.dll",
+                "path": f"/Mods/sub/Prog{i}.dll",
                 "open": i == open_index,
             }
             for i in range(n)
@@ -1017,7 +1017,7 @@ class TestListInstancesPayloadSize(unittest.TestCase):
         return {
             "socket": "/tmp/ghidra.sock",
             "pid": 60196,
-            "project": "diablo2",
+            "project": "myrepo",
             "programs": programs,
             "tcp_port": 8089,
         }
@@ -1036,7 +1036,7 @@ class TestListInstancesPayloadSize(unittest.TestCase):
 
         self.assertNotIn("programs", inst, "full roster must not be inlined")
         self.assertEqual(inst["program_count"], 626)
-        self.assertEqual(inst["open_programs"], ["/Mods/PD2-S12/Prog18.dll"])
+        self.assertEqual(inst["open_programs"], ["/Mods/sub/Prog18.dll"])
         # The real payload was ~90k; anything in that neighborhood is a
         # regression regardless of how the summary is spelled.
         self.assertLess(len(raw), 8000, f"payload too large: {len(raw)} chars")
