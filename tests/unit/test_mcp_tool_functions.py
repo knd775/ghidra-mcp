@@ -187,7 +187,7 @@ class TestPostToolDispatch(unittest.TestCase):
         schema = {
             "properties": {
                 "db_url": {"type": "string", "source": "body"},
-                "config_template": {"type": "string", "source": "body", "default": "medium_32"},
+                "config_template": {"type": "string", "source": "body", "default": "medium_nosize"},
             },
             "required": ["db_url"],
         }

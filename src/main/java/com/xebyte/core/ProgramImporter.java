@@ -19,6 +19,9 @@ import ghidra.util.task.TaskMonitor;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Shared loader-selection for {@code /load_program} and {@code /import_file}.
@@ -287,8 +290,7 @@ public final class ProgramImporter {
                 compilerSpec = language.getCompilerSpecByID(new CompilerSpecID(compilerSpecId.trim()));
                 if (compilerSpec == null) {
                     return LanguageAndSpec.error(
-                        "Unknown compiler spec '" + compilerSpecId.trim()
-                            + "' for language '" + languageId + "'");
+                        unknownCompilerSpecMessage(languageId, compilerSpecId.trim()));
                 }
             } else {
                 compilerSpec = language.getDefaultCompilerSpec();
@@ -296,9 +298,81 @@ public final class ProgramImporter {
             return new LanguageAndSpec(language, compilerSpec, null);
         } catch (Exception e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            if (compilerSpecId != null && !compilerSpecId.isBlank()
+                    && (msg.contains("Compiler Spec") || msg.toLowerCase(Locale.ROOT).contains("compiler spec"))) {
+                return LanguageAndSpec.error(
+                    unknownCompilerSpecMessage(languageId, compilerSpecId.trim()) + " (" + msg + ")");
+            }
             return LanguageAndSpec.error(
                 "Unknown language '" + languageId + "': " + msg);
         }
+    }
+
+    /**
+     * ARM has no {@code gcc} spec — use {@code default}. x86-64 ELF uses {@code gcc}.
+     * A blanket default of either is wrong.
+     */
+    public static String suggestedElfCompilerSpec(String languageId) {
+        if (languageId == null) return "gcc";
+        String id = languageId.toUpperCase(Locale.ROOT);
+        if (id.startsWith("ARM:") || id.startsWith("AARCH64:")) return "default";
+        return "gcc";
+    }
+
+    public static String unknownCompilerSpecMessage(String languageId, String compilerSpecId) {
+        String spec = compilerSpecId == null ? "" : compilerSpecId.trim();
+        String lang = languageId == null ? "" : languageId.trim();
+        StringBuilder sb = new StringBuilder();
+        sb.append("Unknown compiler spec '").append(spec).append("' for language '")
+                .append(lang).append("'.");
+        if ("gcc".equalsIgnoreCase(spec) && "default".equals(suggestedElfCompilerSpec(lang))) {
+            sb.append(" ARM uses compiler_spec=default, not gcc. gcc is valid for x86/x86-64 ELF.");
+        }
+        return sb.toString();
+    }
+
+    public static String compilerSpecId(Program program) {
+        if (program == null) return "";
+        try {
+            return program.getCompilerSpec().getCompilerSpecID().getIdAsString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * x86-64 ELF auto-imports as {@code windows}, which quietly degrades BSim
+     * cross-architecture confidence 2–4×. Warn; do not silently retarget.
+     */
+    public static String elfWindowsCompilerWarning(String executableFormat, String compilerSpecId,
+            String languageId) {
+        if (executableFormat == null || compilerSpecId == null) return null;
+        if (!executableFormat.toUpperCase(Locale.ROOT).contains("ELF")) return null;
+        if (!"windows".equalsIgnoreCase(compilerSpecId.trim())) return null;
+        String suggested = suggestedElfCompilerSpec(languageId);
+        return "Imported ELF with compiler spec 'windows', which quietly degrades BSim "
+                + "cross-architecture confidence 2-4x. Re-import with compiler_spec="
+                + suggested + " (ARM uses default; x86/x86-64 ELF uses gcc).";
+    }
+
+    public static String elfWindowsCompilerWarning(Program program) {
+        if (program == null) return null;
+        String format = program.getExecutableFormat();
+        String spec = compilerSpecId(program);
+        String lang = "";
+        try {
+            if (program.getLanguageID() != null) lang = program.getLanguageID().getIdAsString();
+        } catch (Exception ignored) {
+        }
+        return elfWindowsCompilerWarning(format, spec, lang);
+    }
+
+    public static void attachElfWindowsWarning(Map<String, Object> body, Program program) {
+        if (body == null) return;
+        String warn = elfWindowsCompilerWarning(program);
+        if (warn == null) return;
+        body.put("warning", warn);
+        body.put("warnings", List.of(warn));
     }
 
     private static final class LanguageAndSpec {

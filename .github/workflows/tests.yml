@@ -245,6 +245,46 @@ jobs:
         flags: unittests
         fail_ci_if_error: false
 
+  bsim-postgres-image:
+    # Acceptance 0 (CREATE EXTENSION lshvector) and 8 (non-SSL TCP rejected).
+    # Sparse-clones Ghidra for the C sources; compiles against postgres:16.
+    name: BSim PostgreSQL image (lshvector + SSL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [sync-generated-docs]
+    if: |
+      always()
+      && needs.sync-generated-docs.result != 'cancelled'
+      && (
+        needs.sync-generated-docs.result == 'skipped'
+        || (needs.sync-generated-docs.result == 'success' && needs.sync-generated-docs.outputs.pushed != 'true')
+      )
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Build ghidra-mcp-bsim
+      run: |
+        docker build -f docker/Dockerfile.bsim -t ghidra-mcp-bsim:ci .
+
+    - name: Run CREATE EXTENSION lshvector and prove non-SSL is rejected
+      run: |
+        docker run -d --name ghidra-mcp-bsim-smoke \
+          -e POSTGRES_USER=bsim \
+          -e POSTGRES_PASSWORD=test \
+          -e POSTGRES_DB=postgres \
+          ghidra-mcp-bsim:ci
+        trap 'docker logs ghidra-mcp-bsim-smoke || true; docker rm -f ghidra-mcp-bsim-smoke || true' EXIT
+        for i in $(seq 1 40); do
+          if docker exec ghidra-mcp-bsim-smoke pg_isready -U bsim -d postgres; then
+            break
+          fi
+          sleep 2
+        done
+        docker exec ghidra-mcp-bsim-smoke pg_isready -U bsim -d postgres
+        chmod +x docker/bsim/smoke-lshvector.sh
+        ./docker/bsim/smoke-lshvector.sh ghidra-mcp-bsim-smoke test
+
   code-quality:
     # ADVISORY / non-blocking: every step below ends in `|| true` (or an echo
     # fallback), so this job surfaces lint/format drift without ever failing CI.
@@ -286,7 +326,7 @@ jobs:
   build-status:
     name: Build Status
     runs-on: ubuntu-latest
-    needs: [sync-generated-docs, java-build, python-tests]
+    needs: [sync-generated-docs, java-build, python-tests, bsim-postgres-image]
     if: always()
 
     steps:
@@ -300,7 +340,7 @@ jobs:
           echo "Generated docs were committed onto the PR branch. The follow-up Tests run on that commit is the merge gate."
           exit 0
         fi
-        if [ "${{ needs.java-build.result }}" = "success" ] && [ "${{ needs.python-tests.result }}" = "success" ]; then
+        if [ "${{ needs.java-build.result }}" = "success" ] && [ "${{ needs.python-tests.result }}" = "success" ] && [ "${{ needs.bsim-postgres-image.result }}" = "success" ]; then
           echo "All tests passed"
           exit 0
         else

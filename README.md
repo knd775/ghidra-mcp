@@ -455,7 +455,9 @@ GhidraMCP is designed for **localhost-only development**. The default configurat
 |---|---|
 | `GHIDRA_MCP_AUTH_TOKEN` | When set, every HTTP request must carry `Authorization: Bearer <token>`. Timing-safe comparison. `/mcp/health`, `/health`, `/check_connection` are exempt. |
 | `GHIDRA_MCP_FILE_ROOT` | When set to a directory path, filesystem-path endpoints (`/load_program`, `/import_file`, `/open_project`, `/delete_file`, `/upload_file`, etc.) canonicalize the input and require it to fall under this root. Prevents path-traversal. `/upload_file` writes only to `<root>/uploads/`. |
-| `GHIDRA_MCP_BSIM_ROOT` | When set, `file:` BSim database URLs must resolve under this directory. Not covered by `GHIDRA_MCP_FILE_ROOT`. Default compose mount is `/srv/ghidra/bsim`. |
+| `GHIDRA_MCP_BSIM_ROOT` | When set, `file:` BSim database URLs must resolve under this directory. Not covered by `GHIDRA_MCP_FILE_ROOT`. Default compose mount is `/srv/ghidra/bsim` (leftover H2 files and template sidecars). |
+| `GHIDRA_MCP_BSIM_URLS` | Comma-separated allowlist of BSim network URLs (`postgresql://host[:port]/database`). Fail-closed: unset rejects every network `db_url`. Compose lists `embedded` and `userland` on both compose DNS and `BIND_ADDR`. |
+| `GHIDRA_MCP_BSIM_USER` / `GHIDRA_MCP_BSIM_PASSWORD` | PostgreSQL role for BSim. Not the Ghidra Server login. Never put the password in `db_url`. |
 | `GHIDRA_MCP_MAX_UPLOAD_BYTES` | Decoded-size ceiling for `/upload_file` (default 16 MiB). Separate from the 64 MiB JSON request-body cap. |
 | `GHIDRA_MCP_ALLOW_SCRIPTS` | Set to `1`, `true`, or `yes` to enable `/run_script_inline` and `/run_ghidra_script`. **Off by default as of v5.4.1** — these endpoints execute arbitrary Java against the Ghidra process. The server logs a warning at startup when this is set. In headless mode this also triggers OSGi `BundleHost` initialization (Felix framework, ~hundreds of ms); leave it off if you don't need script execution. |
 
@@ -918,11 +920,11 @@ Available on the standalone headless server (`GhidraMCPHeadlessServer`).
 Wraps Ghidra's `bsim` CLI. Query returns similarity **and** confidence; a ranked list without confidence is how the previous matcher committed wrong names. The tools do not invent a corpus — compile the library at several GCC / opt-levels and ingest with symbols. See [docs/prompts/BSIM.md](docs/prompts/BSIM.md).
 
 - `bsim_apply_matches` - Bulk-rename functions from BSim matches above a caller-chosen confidence floor
-- `bsim_create_db` - Create a BSim database via bsim createdatabase
-- `bsim_ingest` - Generate BSim signatures from a ghidraURL or open program and commit them
+- `bsim_create_db` - Create a BSim database via `bsim createdatabase`
+- `bsim_ingest` - Generate BSim signatures from a ghidraURL (or an open program) and commit them with `bsim generatesigs --bsim --commit`
 - `bsim_job_status` - Status and result of a background BSim operation
 - `bsim_list_corpus` - List executables in a BSim database (bsim listexes / getexecount)
-- `bsim_list_databases` - List H2 BSim databases under GHIDRA_MCP_BSIM_ROOT and the known config templates
+- `bsim_list_databases` - List BSim databases: allowlisted postgresql:// URLs (GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under GHIDRA_MCP_BSIM_ROOT
 - `bsim_query` - Query one function or the whole open program against a BSim database
 - `build_manifest` - Expand docker/references.yaml (or a path under FILE_ROOT) into build_reference jobs and run them
 - `build_reference` - Clone a git tag or commit in the builder container and compile it to GHIDRA_MCP_FILE_ROOT/uploads

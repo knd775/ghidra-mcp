@@ -419,6 +419,29 @@ public class AnnotationScannerOfflineTest extends TestCase {
             && Boolean.TRUE.equals(declaresDryRun.get("/bsim_apply_matches")));
     }
 
+    public void testProgramParamAcceptsJsonBody() throws Exception {
+        ProgramBodyFixture fixture = new ProgramBodyFixture();
+        AnnotationScanner fixtureScanner = new AnnotationScanner(null, new Object[] { fixture });
+        EndpointDef endpoint = null;
+        for (EndpointDef ep : fixtureScanner.getEndpoints()) {
+            if ("/test_program_body".equals(ep.path())) endpoint = ep;
+        }
+        assertNotNull(endpoint);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("program", "firmware.elf");
+        body.put("db_url", "file:/tmp/db");
+        endpoint.handler().handle(Collections.emptyMap(), body);
+        assertEquals("firmware.elf", fixture.seenProgram);
+
+        fixture.seenProgram = null;
+        Map<String, String> query = new HashMap<>();
+        query.put("program", "from-query.elf");
+        body.put("program", "from-body.elf");
+        endpoint.handler().handle(query, body);
+        assertEquals("query string wins", "from-query.elf", fixture.seenProgram);
+    }
+
     /** Tiny fixture service scanned by {@link #testDryRunWithoutDeclaredParamDoesNotInvoke}. */
     static class DryRunWriteFixture {
         volatile boolean invoked;
@@ -444,6 +467,19 @@ public class AnnotationScannerOfflineTest extends TestCase {
                         boolean dryRun) {
             invoked = true;
             return Response.ok(java.util.Map.of("dry_run", dryRun, "status", "preview"));
+        }
+    }
+
+    static class ProgramBodyFixture {
+        volatile String seenProgram;
+
+        @McpTool(path = "/test_program_body", method = "POST",
+                 description = "Fixture: QUERY-sourced program must also accept JSON body")
+        public Response write(
+                @Param(value = "program", defaultValue = "") String program,
+                @Param(value = "db_url", source = ParamSource.BODY, defaultValue = "") String dbUrl) {
+            seenProgram = program;
+            return Response.ok("ok");
         }
     }
 }

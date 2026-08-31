@@ -33,10 +33,11 @@ import java.util.logging.Logger;
  * response, indistinguishable from the synchronous behavior; slow ones return
  * a job ticket, and {@code bsim_job_status} serves the result when it lands.
  *
- * <p>Jobs run on a single worker thread, FIFO. That is deliberate: H2 BSim
- * databases are single-writer, and {@link BSimCli#LOCK} already serialized
- * every CLI run — a wider pool would only deepen the queue behind that lock
- * while pinning HTTP threads.
+ * <p>Jobs run on a single worker thread, FIFO. That is deliberate for H2
+ * {@code file:} databases (single-writer, and {@link BSimCli#LOCK} already
+ * serializes those CLI runs). PostgreSQL is a network service: GUI clients
+ * query it concurrently with MCP. The worker is still one-wide because each
+ * call spawns a JVM, not because Postgres needs the H2 lock.
  */
 public class BSimJobs {
 

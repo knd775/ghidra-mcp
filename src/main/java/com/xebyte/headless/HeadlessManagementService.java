@@ -93,13 +93,16 @@ public class HeadlessManagementService {
                 ? program.getExecutableFormat() : "";
             String imageBase = program.getImageBase() != null
                 ? "0x" + program.getImageBase() : "";
-            return Response.ok(JsonHelper.mapOf(
-                "success", true,
-                "program", program.getName(),
-                "language", langOut,
-                "executable_format", formatOut,
-                "image_base", imageBase,
-                "function_count", program.getFunctionManager().getFunctionCount()));
+            java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+            body.put("success", true);
+            body.put("program", program.getName());
+            body.put("language", langOut);
+            body.put("compiler", ProgramImporter.compilerSpecId(program));
+            body.put("executable_format", formatOut);
+            body.put("image_base", imageBase);
+            body.put("function_count", program.getFunctionManager().getFunctionCount());
+            ProgramImporter.attachElfWindowsWarning(body, program);
+            return Response.ok(body);
         }
         if (loaded.error != null && !loaded.error.isBlank()) {
             return Response.err(loaded.error);

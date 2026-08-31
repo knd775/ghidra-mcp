@@ -284,7 +284,8 @@ class TestBuilderCompose(unittest.TestCase):
     def test_manifest_includes_pico_sdk_framework_matrix(self):
         doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(len(doc["references"]), 2)
-        self.assertNotIn("database", doc)
+        self.assertEqual(doc["database"], "postgresql://ghidra-bsim:5432/embedded")
+        self.assertEqual(doc["config_template"], "medium_nosize")
         pico = doc["references"][1]
         self.assertEqual(pico["name"], "pico-sdk")
         self.assertEqual(pico["mode"], "framework")
@@ -299,7 +300,8 @@ class TestBuilderCompose(unittest.TestCase):
     def test_userland_manifest_is_separate_and_expands(self):
         path = REPO_ROOT / "docker" / "references.userland.yaml"
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        self.assertEqual(doc["database"], "file:/srv/ghidra/bsim/userland")
+        self.assertEqual(doc["database"], "postgresql://ghidra-bsim:5432/userland")
+        self.assertEqual(doc["config_template"], "medium_nosize")
         count = 0
         names = []
         for entry in doc["references"]:

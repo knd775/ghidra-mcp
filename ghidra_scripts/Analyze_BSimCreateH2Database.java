@@ -2,7 +2,7 @@
 //
 // Creates a new H2 file-based BSim database for local similarity analysis. Works headlessly from MCP without any GUI prompts or dialogs.
 //
-// Usage: Args: [0]=database file path (no .mv.db extension), [1]=template name (default: medium_32), [2]=display name.
+// Usage: Args: [0]=database file path (no .mv.db extension), [1]=template name (default: medium_nosize), [2]=display name.
 // Output: Creates H2 database file at the specified path.
 //
 // @author Ben Ethington
@@ -32,7 +32,7 @@ public class Analyze_BSimCreateH2Database extends GhidraScript {
 
         // Parse args
         String dbPath = "C:/tmp/bsim_diablo2";
-        String template = "medium_32";
+        String template = "medium_nosize";
         String dbName = "Diablo2_BSim";
 
         if (args != null && args.length > 0 && !args[0].isEmpty()) {

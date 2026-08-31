@@ -1,8 +1,8 @@
 # GhidraMCP Headless Server - Docker Deployment
 
 The compose file on this branch is the stack this fork actually runs:
-Ghidra Server (RMI) + headless MCP + Python bridge + a Cloudflare Tunnel.
-There is no Traefik in this file.
+Ghidra Server (RMI) + headless MCP + Python bridge + BSim PostgreSQL +
+a Cloudflare Tunnel. There is no Traefik in this file.
 
 > **Security.** The headless server binds `0.0.0.0` inside the container.
 > Host publish of 8089/8081 is loopback only. Remote MCP is the tunnel
@@ -18,6 +18,11 @@ There is no Traefik in this file.
 >
 > The image runs as uid 1000 (`ghidra`). The bridge shares that namespace
 > as uid 1000 (`bridge`).
+>
+> BSim PostgreSQL is published on `BIND_ADDR:5432` (VPN/LAN, same
+> posture as Ghidra Server RMI) and is **not** on the tunnel network.
+> A stock `postgres` image will not work; this stack uses
+> `ghidra-mcp-bsim` (`lshvector` + SSL).
 
 ## Quick Start
 
@@ -29,7 +34,8 @@ curl -H "Authorization: Bearer $GHIDRA_MCP_AUTH_TOKEN" \
 ```
 
 Local MCP is `http://127.0.0.1:8081/mcp`. Ghidra Server RMI is on
-`BIND_ADDR:13100-13102` (not loopback, not 0.0.0.0).
+`BIND_ADDR:13100-13102` (not loopback, not 0.0.0.0). BSim is on
+`BIND_ADDR:5432`.
 
 `docker-compose.multi.yml` is a leftover nginx scale-out sketch. It is
 not this stack.
@@ -48,6 +54,10 @@ docker build -t ghcr.io/knd775/ghidra-mcp-bridge:dev -f docker/Dockerfile.bridge
 # Reference builder (ARM GNU prefixes + distro gcc-13). First build
 # downloads the pinned tarballs; after that, pull from GHCR.
 docker build -t ghcr.io/knd775/ghidra-mcp-builder:dev -f docker/Dockerfile.builder .
+
+# BSim PostgreSQL (lshvector C extension + SSL). Sparse-clones Ghidra
+# 12.1.2 for the extension sources; do not use support/bsim_ctl.
+docker build -t ghcr.io/knd775/ghidra-mcp-bsim:dev -f docker/Dockerfile.bsim .
 ```
 
 Or `docker compose -f docker/docker-compose.yml build`.
@@ -58,6 +68,7 @@ Images are also published to GHCR on push to `main`/`dev`/`develop`:
 ghcr.io/<owner>/ghidra-mcp-headless
 ghcr.io/<owner>/ghidra-mcp-bridge
 ghcr.io/<owner>/ghidra-mcp-builder
+ghcr.io/<owner>/ghidra-mcp-bsim
 ```
 
 The bridge must share the headless network namespace.
@@ -86,9 +97,14 @@ mvn clean package -P docker -DskipTests
 | `GHIDRA_MCP_FILE_ROOT` | `/data` | Samples bind (`SAMPLES_DIR`) |
 | `GHIDRA_MCP_STUBS` | `/opt/ghidra-builder/stubs` | Framework stub projects for `mode=framework` |
 | `GHIDRA_MCP_BUILDER_URL` | `http://ghidra-builder:8092` | One builder, every identity. Internal network only. |
-| `GHIDRA_MCP_BSIM_ROOT` | `/srv/ghidra/bsim` | Confines `file:` BSim URLs. Dedicated volume, not under `/data`. |
+| `GHIDRA_MCP_BSIM_ROOT` | `/srv/ghidra/bsim` | Confines leftover `file:` BSim URLs and holds template sidecars. Dedicated volume, not under `/data`. |
+| `GHIDRA_MCP_BSIM_URLS` | compose DNS + `BIND_ADDR` for `embedded` and `userland` | Allowlist of `postgresql://` BSim URLs. Fail-closed: unset rejects every network `db_url`. |
+| `GHIDRA_MCP_BSIM_USER` | `BSIM_DB_USER` | PostgreSQL role. Not the Ghidra Server account. |
+| `GHIDRA_MCP_BSIM_PASSWORD` | `BSIM_DB_PASSWORD` | PostgreSQL password. Never put this in `db_url`. |
+| `GHIDRA_MCP_BSIM_TEMPLATES` | `embedded:medium_nosize,userland:medium_nosize` | Name → config template when no sidecar exists. |
+| `BSIM_DB_USER` / `BSIM_DB_PASSWORD` | `bsim` / required | Postgres role for `ghidra-bsim`. |
 | `GHIDRA_SERVER_HOST` | `BIND_ADDR` | RMI address the headless client dials |
-| `BIND_ADDR` | required | Host IP for RMI publish and `-ip` |
+| `BIND_ADDR` | required | Host IP for RMI publish, BSim 5432, and `-ip` |
 | `GHIDRA_MCP_ALLOWED_HOSTS` | required | Tunnel hostname for the bridge Host check |
 | `TUNNEL_TOKEN` | required | Cloudflare dashboard tunnel token |
 | `PROGRAM_FILE` | - | Path to binary file to load on startup |
@@ -99,14 +115,47 @@ mvn clean package -P docker -DskipTests
 | Volume / bind | Container Path | Description |
 |--------|---------------|-------------|
 | `SAMPLES_DIR` (host path) | `/data` | Binaries / `GHIDRA_MCP_FILE_ROOT` |
-| `ghidra-repos` | `/repos` | Ghidra Server project history; back this up |
+| `ghidra-repos` | `/repos` | Ghidra Server project history; `bsim-backup` tars this |
 | `ghidra-mcp-home` | `/home/ghidra` | `$HOME/.ghidra` settings |
 | `ghidra-mcp-projects` | `/projects` | Local (non-repo) project data |
-| `ghidra-bsim` | `/srv/ghidra/bsim` | H2 BSim databases (`file:/srv/ghidra/bsim/<db>`). Writable by uid 1000. Back this up; regenerating a corpus means recompiling everything in it. |
+| `ghidra-bsim` | `/srv/ghidra/bsim` | Leftover H2 files and `<db>.ghidra-mcp.json` sidecars. Writable by uid 1000. |
+| `ghidra-bsim-pgdata` | `/var/lib/postgresql/data` | PostgreSQL data for `embedded` + `userland`. Hours of ingest; back this up. |
+| `ghidra-bsim-certs` | `/var/lib/postgresql/certs` | Self-signed server cert. Key is `0600` `postgres`. |
+| `bsim-backups` | `/backups` (backup sidecar) | `pg_dump -Fc` of both databases, plus `ghidra-repos` tars. |
 | `builder-src-cache` | `/src` (builder) | Bare git clones for `build_reference`. Persists so a second build of the same ref does not re-clone. |
-| `docker/references.yaml` | `/data/references.yaml` | Embedded ARM corpus. `build_manifest` with no path reads this. |
-| `docker/references.userland.yaml` | `/data/references.userland.yaml` | x86-64 userland corpus. `build_manifest(path="references.userland.yaml")`. |
+| `docker/references.yaml` | `/data/references.yaml` | Embedded ARM corpus (`postgresql://ghidra-bsim:5432/embedded`, `medium_nosize`). `build_manifest` with no path reads this. |
+| `docker/references.userland.yaml` | `/data/references.userland.yaml` | x86-64 userland corpus (`.../userland`, `medium_nosize`). `build_manifest(path="references.userland.yaml")`. |
 | `docker/stubs/` | `/opt/ghidra-builder/stubs` | Framework stub projects (`pico-sdk` shipped). Listed by `mode=framework` validation. |
+
+## BSim PostgreSQL
+
+H2 `file:` databases are local and single-writer. Analysts connected to
+Ghidra Server over RMI have no path to a file inside a container, so
+interactive "Find Similar Functions" was unavailable. Ghidra Server does
+not host or proxy BSim.
+
+`ghidra-bsim` is PostgreSQL 16 with Ghidra's `lshvector` extension
+compiled in (`docker/Dockerfile.bsim`, sources fetched from the Ghidra
+12.1.2 tag and blob-checked against `docker/bsim/lshvector.lock`). SSL
+is on; `hostnossl` is `reject`. Two databases on the one instance:
+
+| Database | Template | Contents |
+|---|---|---|
+| `embedded` | `medium_nosize` | ARM Cortex-M references |
+| `userland` | `medium_nosize` | x86-64 Linux references |
+
+The split is corpus domain, not pointer size. Mixing architectures in one
+`medium_nosize` database is harmless; keep them separate because native
+x86-64 references cannot substitute for ARM ones. Constraining a mixed
+database is `bsim_query(arch=...)`.
+
+GUI URL: `postgresql://<BIND_ADDR>:5432/<database>`. Login is
+`BSIM_DB_USER` / `BSIM_DB_PASSWORD`, not the Ghidra Server account.
+If `ghidra.cacerts` is already set for Ghidra Server TLS, import
+`server.crt` from the certs volume or GUI clients fail PKIX.
+
+Do not use `support/bsim_ctl`. Migration (re-ingest, do not convert H2):
+`docker/bsim/MIGRATION.md`. Operator guide: `docs/prompts/BSIM.md`.
 
 ## Reference builder
 
@@ -152,12 +201,12 @@ Corpus updates are MCP tools: `builder_health`, `build_manifest`,
 the Docker host.
 
 `dry_run=true` returns the compiler or cmake command line without cloning
-or compiling. `docker/references.yaml` is the ARM corpus (medium_32).
+or compiling. `docker/references.yaml` is the ARM corpus (medium_nosize,
+`postgresql://ghidra-bsim:5432/embedded`).
 `docker/references.userland.yaml` is x86-64 libc and static libs
-(medium_64, `file:/srv/ghidra/bsim/userland`). Leave
-`file:/srv/ghidra/bsim/re` as the existing ARM database; do not ingest
-x86-64 into it. Each object gets a JSON sidecar (`<artifact>.json`) with
-the resolved commit, compiler `--version`, sha256, and
+(medium_nosize, `postgresql://ghidra-bsim:5432/userland`). Do not ingest
+x86-64 into `embedded`. Each object gets a JSON sidecar (`<artifact>.json`)
+with the resolved commit, compiler `--version`, sha256, and
 `debug_path_prefix`. `build_manifest` skips a job when that hash still
 matches.
 

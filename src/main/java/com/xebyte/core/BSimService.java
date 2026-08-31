@@ -18,8 +18,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * MCP wrappers around Ghidra's {@code bsim} CLI.
@@ -52,7 +52,8 @@ public class BSimService {
 
     static final String QUERY_SCRIPT_RESOURCE = "/bsim/BSim_McpQuery.java";
     static final String QUERY_SCRIPT_NAME = "BSim_McpQuery.java";
-    static final double DEFAULT_SIMILARITY = 0.7;
+    static final String DEFAULT_TEMPLATE = "medium_nosize";
+    static final String WHOLE_PROGRAM_FUNCTION = "ALL";
     static final String STRIPPED_WARNING =
             "This program has few or no user-defined function names. "
                     + "A stripped binary adds signature noise and yields no names to propagate. "
@@ -93,20 +94,25 @@ public class BSimService {
 
     @McpTool(path = "/bsim_create_db", method = "POST",
             description = "Create a BSim database via `bsim createdatabase`. Default template "
-                    + "medium_32 (32-bit ARM firmware). Use medium_64 for x86-64 userland "
-                    + "(32-bit and 64-bit cannot share a database). Call-graph data is recorded "
-                    + "unless callgraph=false. H2 file: URLs need a writable parent directory; "
-                    + "PostgreSQL when more than one writer is needed. Writes a "
-                    + "<name>.ghidra-mcp.json sidecar with the template so bsim_list_databases "
-                    + "can report it. The database is empty until bsim_ingest. Returns a job_id "
-                    + "instead of a result when the CLI outlives wait_seconds.",
+                    + "medium_nosize (every database, unconditionally). medium_nosize beat "
+                    + "medium_32 under compiler and optimisation drift and gave up nothing on "
+                    + "identical builds. Call-graph data is recorded unless callgraph=false. "
+                    + "Compose uses PostgreSQL (postgresql://ghidra-bsim:5432/embedded and "
+                    + ".../userland) so GUI clients on the VPN can search the same corpus — "
+                    + "those are corpus domains, not a pointer-size split. file: H2 URLs remain "
+                    + "for leftover local databases. Writes a <name>.ghidra-mcp.json sidecar "
+                    + "with the template so bsim_list_databases can report it. Network db_url "
+                    + "values must be on GHIDRA_MCP_BSIM_URLS. The database is empty until "
+                    + "bsim_ingest. Returns a job_id instead of a result when the CLI outlives "
+                    + "wait_seconds.",
             category = "bsim")
     public Response createDb(
             @Param(value = "db_url", source = ParamSource.BODY,
-                    description = "BSim URL: file:/path/db, postgresql://..., elastic://..., https://...")
+                    description = "BSim URL: postgresql://host/db (allowlisted) or file:/path/db")
                     String dbUrl,
-            @Param(value = "config_template", source = ParamSource.BODY, defaultValue = "medium_32",
-                    description = "large_32 | medium_32 | medium_64 | medium_cpool | medium_nosize")
+            @Param(value = "config_template", source = ParamSource.BODY, defaultValue = "medium_nosize",
+                    description = "medium_nosize (default) | medium_32 | medium_64 | large_32 | medium_cpool. "
+                            + "medium_nosize accepts mixed pointer sizes; sized templates do not.")
                     String configTemplate,
             @Param(value = "name", source = ParamSource.BODY, defaultValue = "",
                     description = "Display name stored in the database metadata") String name,
@@ -120,8 +126,11 @@ public class BSimService {
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
+            String pgCred = BSimUrls.missingPostgresCredential(url);
+            if (pgCred != null) return Response.err(pgCred);
             String template = BSimUrls.requireConfigTemplate(
-                    (configTemplate == null || configTemplate.isBlank()) ? "medium_32" : configTemplate);
+                    (configTemplate == null || configTemplate.isBlank())
+                            ? DEFAULT_TEMPLATE : configTemplate);
             List<String> args = new ArrayList<>();
             args.add("createdatabase");
             args.add(url);
@@ -167,10 +176,12 @@ public class BSimService {
     // ========================================================================
 
     @McpTool(path = "/bsim_list_databases", method = "GET",
-            description = "List H2 BSim databases under GHIDRA_MCP_BSIM_ROOT and the known "
-                    + "config templates. Templates (medium_32, medium_64, ...) are fixed at "
-                    + "createdatabase time. Sidecars written by bsim_create_db report which "
-                    + "template each file: database used. Does not spawn the bsim CLI.",
+            description = "List BSim databases: allowlisted postgresql:// URLs "
+                    + "(GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under "
+                    + "GHIDRA_MCP_BSIM_ROOT. Templates (medium_nosize, medium_32, ...) are fixed at "
+                    + "createdatabase time. Sidecars written by bsim_create_db, or "
+                    + "GHIDRA_MCP_BSIM_TEMPLATES, report which template each database used. "
+                    + "Does not spawn the bsim CLI.",
             category = "bsim")
     public Response listDatabases() {
         Map<String, Object> body = new LinkedHashMap<>();
@@ -178,9 +189,12 @@ public class BSimService {
         body.put("config_templates", List.copyOf(BSimUrls.CONFIG_TEMPLATE_ORDER));
         String root = BSimUrls.bsimRootEnv();
         body.put("bsim_root", root);
-        List<Map<String, Object>> databases = (root == null || root.isBlank())
-                ? List.of()
-                : BSimUrls.listFileDatabases(Path.of(root));
+        body.put("bsim_urls", BSimUrls.bsimAllowlistEnv());
+        List<Map<String, Object>> databases = new ArrayList<>();
+        databases.addAll(BSimUrls.listAllowlistedDatabases());
+        if (root != null && !root.isBlank()) {
+            databases.addAll(BSimUrls.listFileDatabases(Path.of(root)));
+        }
         body.put("databases", databases);
         body.put("count", databases.size());
         return Response.ok(body);
@@ -193,10 +207,13 @@ public class BSimService {
     @McpTool(path = "/bsim_ingest", method = "POST",
             description = "Generate BSim signatures from a ghidraURL (or an open program) and "
                     + "commit them with `bsim generatesigs --bsim --commit`. Refuses a source with "
-                    + "no functions, and a pointer-size mismatch against the existing corpus "
-                    + "(ingesting 64-bit into a medium_32 database silently degrades results). "
-                    + "Warns when the source has few user-defined names. Ingest with symbols. "
-                    + "Ingest takes minutes: expect a job_id, then poll bsim_job_status.",
+                    + "no functions, and a pointer-size mismatch against a sized template "
+                    + "(medium_32 / medium_64 / large_32). medium_nosize accepts mixed pointer "
+                    + "sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but records "
+                    + "the throwaway project URL, so a second pass is not a no-op). The ingest "
+                    + "response carries executable_md5 for the artifact sidecar. Warns when the "
+                    + "source has few user-defined names. Ingest with symbols. Ingest takes "
+                    + "minutes: expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response ingest(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -218,6 +235,8 @@ public class BSimService {
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
+            String pgCred = BSimUrls.missingPostgresCredential(url);
+            if (pgCred != null) return Response.err(pgCred);
             if (source == null || source.isBlank()) {
                 return Response.err("source is required (ghidraURL, repo path, or open program name)");
             }
@@ -256,6 +275,8 @@ public class BSimService {
             if (program != null) {
                 Response reject = precheckProgram(program, url, warnings);
                 if (reject != null) return reject;
+                Response skip = skipIfAlreadyIngested(program, url);
+                if (skip != null) return skip;
             }
 
             // A caller-supplied xml_dir is theirs to keep; a temp one is ours
@@ -291,21 +312,16 @@ public class BSimService {
                 // pass the username as an argument and feed the password on
                 // stdin, where HeadlessClientAuthenticator's no-console
                 // fallback reads it.
-                String stdinData = null;
                 if (BSimUrls.isServerGhidraUrl(ghidraUrl)) {
                     String user = BSimCli.resolvedServerUser();
                     if (user != null) {
                         args.add("--user");
                         args.add(user);
                     }
-                    String password = BSimCli.resolvedServerPassword();
-                    if (password != null) {
-                        stdinData = password + "\n";
-                    }
                 }
-                BSimCli.Result r = runBsim(BSimCli.INGEST_TIMEOUT, args, stdinData);
+                BSimCli.Result r = runBsim(BSimCli.INGEST_TIMEOUT, args);
                 if (!r.ok()) {
-                    return cliError("generatesigs failed", r);
+                    return ingestCliError("generatesigs failed", r);
                 }
 
                 BSimCli.Result countR = runBsim(BSimCli.DEFAULT_TIMEOUT, List.of("getexecount", url));
@@ -317,6 +333,13 @@ public class BSimService {
                 body.put("source", ghidraUrl);
                 body.put("commit", commit);
                 if (exeCount != null) body.put("executables", exeCount);
+                String md5 = programMd5(program);
+                if (md5 != null && !md5.isBlank()) {
+                    body.put("executable_md5", md5);
+                    BSimUrls.recordIngestedMd5(url, md5);
+                    recordArtifactExecutableMd5(program, md5);
+                }
+                if (program != null) body.put("executable_name", program.getName());
                 if (!warnings.isEmpty()) body.put("warnings", warnings);
                 return Response.ok(body);
             } finally {
@@ -337,12 +360,16 @@ public class BSimService {
                     + "Filter on confidence, not similarity. Cross-compiler matches legitimately "
                     + "score 0.2-0.4 similarity; confidence indicates whether that overlap is "
                     + "meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 "
-                    + "(a starting floor, not a calibration). Each match has separate numeric "
-                    + "similarity and confidence, plus the source executable name and architecture. "
-                    + "Flagged ambiguous when the top two differently-named hits sit within 0.05 "
-                    + "similarity. A similarity_threshold above 0.5 silently drops cross-compiler "
-                    + "matches and adds a warning. Queries run a helper analyzeHeadless JVM and "
-                    + "can take minutes: expect a job_id, then poll bsim_job_status.",
+                    + "(a starting floor, not a calibration). Optional arch / executable / "
+                    + "compiler / exclude_md5 are server-side BSimFilter atoms (not post-processed; "
+                    + "max_matches applies after the filter). Functions whose feature vector is "
+                    + "too small to identify are returned with identifiable=false, never dropped. "
+                    + "Each match has separate numeric similarity and confidence, plus the source "
+                    + "executable name and architecture. Flagged ambiguous when the top two "
+                    + "differently-named hits sit within 0.05 similarity. A similarity_threshold "
+                    + "above 0.5 silently drops cross-compiler matches and adds a warning. Queries "
+                    + "run a helper analyzeHeadless JVM and can take minutes: expect a job_id, "
+                    + "then poll bsim_job_status.",
             category = "bsim")
     public Response query(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -361,21 +388,47 @@ public class BSimService {
             @Param(value = "max_matches", source = ParamSource.BODY, defaultValue = "10",
                     description = "Maximum matches per function") int maxMatches,
             @Param(value = "program", defaultValue = "") String programName,
+            @Param(value = "arch", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: architecture equals (comma = OR). "
+                            + "e.g. ARM:LE:32:Cortex")
+                    String arch,
+            @Param(value = "executable", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: executable name equals (comma = OR)")
+                    String executable,
+            @Param(value = "compiler", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: compiler equals (comma = OR)")
+                    String compiler,
+            @Param(value = "exclude_md5", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: exclude corpus executables by MD5 "
+                            + "(comma = AND of not-equals)")
+                    String excludeMd5,
+            @Param(value = "min_feature_count", source = ParamSource.BODY, defaultValue = "8",
+                    description = "Flag the queried function unidentifiable when its LSH vector "
+                            + "has fewer than this many features. Default 8. 0 disables. "
+                            + "Matches are still returned.")
+                    int minFeatureCount,
+            @Param(value = "min_function_size", source = ParamSource.BODY, defaultValue = "0",
+                    description = "Byte-size proxy used only when min_feature_count is 0. Default 0 (off).")
+                    int minFunctionSize,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
+            String pgCred = BSimUrls.missingPostgresCredential(url);
+            if (pgCred != null) return Response.err(pgCred);
             ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
             if (pe.hasError()) return pe.error();
             Program program = pe.program();
+            QuerySpec spec = new QuerySpec(function, similarityThreshold, confidenceThreshold,
+                    maxMatches, arch, executable, compiler, excludeMd5,
+                    minFeatureCount, minFunctionSize);
 
             Map<String, Object> request = new LinkedHashMap<>();
             request.put("db_url", url);
             request.put("program", program.getName());
             if (function != null && !function.isBlank()) request.put("function", function);
             BSimJobs.Job job = jobs.submit("bsim_query", request,
-                    () -> runQuery(url, program, function, similarityThreshold,
-                            confidenceThreshold, maxMatches));
+                    () -> runQuery(url, program, spec));
             return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -392,10 +445,13 @@ public class BSimService {
             description = "Bulk-rename functions from BSim matches above a caller-chosen confidence "
                     + "floor. min_confidence has no default — there is no universally safe value. "
                     + "dry_run defaults to true and does not write. skip_named defaults to true "
-                    + "(never overwrite an analyst name). Ambiguous matches are never applied, "
-                    + "whatever the scores. Applied names are the BSim hit names as-is (C linkage, "
-                    + "not PascalCase). Runs a full-program BSim query first, which takes minutes: "
-                    + "expect a job_id, then poll bsim_job_status.",
+                    + "(never overwrite an analyst name). Ambiguous matches are never applied. "
+                    + "Functions flagged unidentifiable (too few LSH features) are skipped unless "
+                    + "apply_unidentifiable=true. Optional arch / executable / compiler / "
+                    + "exclude_md5 are the same server-side filters as bsim_query. Applied names "
+                    + "are the BSim hit names as-is (C linkage, not PascalCase). Runs a "
+                    + "full-program BSim query first, which takes minutes: expect a job_id, then "
+                    + "poll bsim_job_status.",
             category = "bsim")
     public Response applyMatches(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -412,12 +468,34 @@ public class BSimService {
                     description = "Preview without renaming. Default true. Honored in this method; "
                             + "a true dry_run does not call setName.")
                     boolean dryRun,
-            @Param(value = "similarity_threshold", source = ParamSource.BODY, defaultValue = "0.7",
-                    description = "Query-time similarity floor (before apply filters)")
+            @Param(value = "similarity_threshold", source = ParamSource.BODY, defaultValue = "0.0",
+                    description = "Query-time similarity floor (before apply filters). Default 0.0, "
+                            + "same as bsim_query: cross-compiler matches sit at 0.2-0.4.")
                     double querySimilarity,
             @Param(value = "max_matches", source = ParamSource.BODY, defaultValue = "10",
                     description = "Matches fetched per function") int maxMatches,
             @Param(value = "program", defaultValue = "") String programName,
+            @Param(value = "arch", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: architecture equals (comma = OR)")
+                    String arch,
+            @Param(value = "executable", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: executable name equals (comma = OR)")
+                    String executable,
+            @Param(value = "compiler", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: compiler equals (comma = OR)")
+                    String compiler,
+            @Param(value = "exclude_md5", source = ParamSource.BODY, defaultValue = "",
+                    description = "Server-side filter: exclude corpus executables by MD5")
+                    String excludeMd5,
+            @Param(value = "min_feature_count", source = ParamSource.BODY, defaultValue = "8",
+                    description = "Skip functions whose LSH vector is below this feature count. "
+                            + "Default 8. Same flag as bsim_query.")
+                    int minFeatureCount,
+            @Param(value = "apply_unidentifiable", source = ParamSource.BODY, defaultValue = "false",
+                    description = "If true, apply matches even when the queried function is "
+                            + "flagged unidentifiable. Default false — that is where a "
+                            + "degenerate match bulk-renames into a shared repository.")
+                    boolean applyUnidentifiable,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         if (minConfidence == null) {
@@ -428,6 +506,8 @@ public class BSimService {
         }
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
+            String pgCred = BSimUrls.missingPostgresCredential(url);
+            if (pgCred != null) return Response.err(pgCred);
             ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
             if (pe.hasError()) return pe.error();
             Program program = pe.program();
@@ -439,7 +519,9 @@ public class BSimService {
             request.put("min_confidence", minConfidence);
             BSimJobs.Job job = jobs.submit("bsim_apply_matches", request,
                     () -> runApplyMatches(url, program, minConfidence, minSimilarity,
-                            skipNamed, dryRun, querySimilarity, maxMatches));
+                            skipNamed, dryRun, querySimilarity, maxMatches,
+                            arch, executable, compiler, excludeMd5,
+                            minFeatureCount, applyUnidentifiable));
             return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -451,8 +533,13 @@ public class BSimService {
     /** The query + decide + rename body of {@code bsim_apply_matches}; runs on the job worker. */
     private Response runApplyMatches(String url, Program program, Double minConfidence,
                                      double minSimilarity, boolean skipNamed, boolean dryRun,
-                                     double querySimilarity, int maxMatches) throws Exception {
-        Response queried = runQuery(url, program, "", querySimilarity, 0.0, maxMatches);
+                                     double querySimilarity, int maxMatches,
+                                     String arch, String executable, String compiler,
+                                     String excludeMd5, int minFeatureCount,
+                                     boolean applyUnidentifiable) throws Exception {
+        QuerySpec spec = new QuerySpec("", querySimilarity, 0.0, maxMatches,
+                arch, executable, compiler, excludeMd5, minFeatureCount, 0);
+        Response queried = runQuery(url, program, spec);
         if (queried instanceof Response.Err) return queried;
         Map<String, Object> payload = JsonHelper.parseJson(queried.toJson());
         List<BSimMatches.FunctionResult> results =
@@ -461,17 +548,22 @@ public class BSimService {
         List<Map<String, Object>> renamed = new ArrayList<>();
         List<Map<String, Object>> wouldRename = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
+        int unidentifiableSkipped = 0;
 
         for (BSimMatches.FunctionResult fr : results) {
             Function func = resolveApplyTarget(program, fr);
             String currentName = func != null ? func.getName() : fr.function;
             BSimMatches.ApplyAction action = BSimMatches.decide(
-                    fr, currentName, skipNamed, minSimilarity, minConfidence);
+                    fr, currentName, skipNamed, minSimilarity, minConfidence, applyUnidentifiable);
             if (action != BSimMatches.ApplyAction.APPLY) {
+                if (action == BSimMatches.ApplyAction.SKIP_UNIDENTIFIABLE) {
+                    unidentifiableSkipped++;
+                }
                 Map<String, Object> skip = new LinkedHashMap<>();
                 skip.put("function", fr.function);
                 if (fr.address != null) skip.put("address", fr.address);
                 skip.put("reason", BSimMatches.reason(action));
+                if (!fr.identifiable) skip.put("identifiable", false);
                 BSimMatches.Hit best = fr.best();
                 if (best != null) {
                     skip.put("best_name", best.name);
@@ -519,6 +611,7 @@ public class BSimService {
         body.put("min_confidence", minConfidence);
         body.put("min_similarity", minSimilarity);
         body.put("skip_named", skipNamed);
+        body.put("unidentifiable_skipped", unidentifiableSkipped);
         body.put("renamed", renamed);
         body.put("would_rename", wouldRename);
         body.put("skipped", skipped);
@@ -547,6 +640,8 @@ public class BSimService {
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
+            String pgCred = BSimUrls.missingPostgresCredential(url);
+            if (pgCred != null) return Response.err(pgCred);
             List<String> args = new ArrayList<>();
             args.add("listexes");
             args.add(url);
@@ -615,21 +710,23 @@ public class BSimService {
     // Internals
     // ========================================================================
 
-    Response runQuery(String dbUrl, Program program, String function,
-                      double similarity, double confidence, int maxMatches) throws Exception {
+    Response runQuery(String dbUrl, Program program, QuerySpec spec) throws Exception {
         // saveToPackedFile refuses to overwrite, so the gzf must be a path
         // nothing has created yet — File.createTempFile pre-creates a zero-byte
         // file and made every query fail with "<path> already exists". One
         // owned directory also gives every exit path a single recursive delete.
         Path workDir = Files.createTempDirectory("bsim-query-");
         try {
-            File gzf = workDir.resolve("program.gzf").toFile();
+            File gzf = workDir.resolve(packedProgramFileName(program)).toFile();
             Path projDir = Files.createDirectory(workDir.resolve("proj"));
             Path scriptDir = workDir.resolve("script");
             Path outJson = workDir.resolve("query-out.json");
             program.saveToPackedFile(gzf, TaskMonitor.DUMMY);
             extractQueryScript(scriptDir);
-            String funcArg = (function == null || function.isBlank()) ? "-" : function.trim();
+            String funcArg = (spec.function == null || spec.function.isBlank())
+                    ? WHOLE_PROGRAM_FUNCTION : spec.function.trim();
+            // analyzeHeadless treats a bare "-" as a flag and drops later args.
+            if ("-".equals(funcArg)) funcArg = WHOLE_PROGRAM_FUNCTION;
             List<String> args = new ArrayList<>();
             args.add(projDir.toAbsolutePath().toString());
             args.add("BSimQuery");
@@ -645,14 +742,17 @@ public class BSimService {
             args.add(dbUrl);
             args.add(outJson.toAbsolutePath().toString());
             args.add(funcArg);
-            args.add(Double.toString(similarity));
-            args.add(Double.toString(confidence));
-            args.add(Integer.toString(Math.max(1, maxMatches)));
+            args.add(Double.toString(spec.similarity));
+            args.add(Double.toString(spec.confidence));
+            args.add(Integer.toString(Math.max(1, spec.maxMatches)));
+            if (nonBlank(spec.arch)) args.add("arch=" + spec.arch.trim());
+            if (nonBlank(spec.executable)) args.add("executable=" + spec.executable.trim());
+            if (nonBlank(spec.compiler)) args.add("compiler=" + spec.compiler.trim());
+            if (nonBlank(spec.excludeMd5)) args.add("exclude_md5=" + spec.excludeMd5.trim());
+            args.add("min_feature_count=" + spec.minFeatureCount);
+            args.add("min_function_size=" + spec.minFunctionSize);
 
-            BSimCli.Result r;
-            synchronized (BSimCli.LOCK) {
-                r = cli.analyzeHeadless(BSimCli.QUERY_TIMEOUT, args);
-            }
+            BSimCli.Result r = analyzeHeadless(BSimCli.QUERY_TIMEOUT, args, dbUrl);
             if (!Files.isRegularFile(outJson) || Files.size(outJson) == 0) {
                 return cliError("BSim query produced no JSON (analyzeHeadless exit "
                         + r.exitCode + ")", r);
@@ -665,7 +765,7 @@ public class BSimService {
             String md5 = program.getExecutableMD5();
             List<BSimMatches.FunctionResult> results = BSimMatches.parseQueryPayload(payload, md5);
             List<String> warnings = new ArrayList<>();
-            String simWarn = BSimMatches.similarityThresholdWarning(similarity);
+            String simWarn = BSimMatches.similarityThresholdWarning(spec.similarity);
             if (simWarn != null) warnings.add(simWarn);
             try {
                 int bits = program.getLanguage().getLanguageDescription().getSize();
@@ -675,7 +775,11 @@ public class BSimService {
             } catch (Exception ignored) {
                 // Language metadata missing on a stub program is not a query failure.
             }
-            if (function != null && !function.isBlank() && results.size() == 1) {
+            int unidentifiable = 0;
+            for (BSimMatches.FunctionResult fr : results) {
+                if (!fr.identifiable) unidentifiable++;
+            }
+            if (spec.function != null && !spec.function.isBlank() && results.size() == 1) {
                 Map<String, Object> body = results.get(0).toMap();
                 if (!warnings.isEmpty()) body.put("warnings", warnings);
                 return Response.ok(body);
@@ -686,6 +790,8 @@ public class BSimService {
             body.put("program", program.getName());
             body.put("results", rows);
             body.put("count", rows.size());
+            body.put("identifiable_count", rows.size() - unidentifiable);
+            body.put("unidentifiable_count", unidentifiable);
             if (!warnings.isEmpty()) body.put("warnings", warnings);
             return Response.ok(body);
         } finally {
@@ -717,26 +823,20 @@ public class BSimService {
             warnings.add(STRIPPED_WARNING);
         }
         int srcBits = program.getLanguage().getLanguageDescription().getSize();
-        BSimCli.Result listR = runBsim(BSimCli.DEFAULT_TIMEOUT,
-                List.of("listexes", dbUrl, "--limit", "50"));
-        List<BSimCliParser.ExeRecord> existing = BSimCliParser.parseExeList(listR.output);
-        List<String> archs = new ArrayList<>();
-        for (BSimCliParser.ExeRecord e : existing) archs.add(e.arch);
-        Set<Integer> sizes = BSimUrls.uniqueArchSizes(archs);
-        if (sizes.size() == 1 && !sizes.contains(srcBits) && srcBits > 0) {
-            int corpusBits = sizes.iterator().next();
-            return Response.err(
-                    "source language is " + srcBits + "-bit ("
-                            + program.getLanguageID() + ") but the corpus is "
-                            + corpusBits + "-bit. Ingesting across pointer sizes into a "
-                            + "sized template (medium_32 / medium_64) silently degrades "
-                            + "results. Use medium_nosize if you meant to mix sizes, or "
-                            + "create a matching database.");
+        String languageId;
+        try {
+            languageId = program.getLanguageID().getIdAsString();
+        } catch (Exception e) {
+            languageId = "";
         }
-        if (existing.isEmpty() && srcBits == 64) {
-            warnings.add("Corpus is empty and the source is 64-bit. If this database was "
-                    + "created with medium_32, ingest will silently degrade matches. "
-                    + "Use medium_64 or medium_nosize.");
+        String template = BSimUrls.readSidecarTemplate(dbUrl);
+        String sizeErr = BSimUrls.pointerSizeIngestError(srcBits, languageId, template);
+        if (sizeErr != null) return Response.err(sizeErr);
+        int templateBits = BSimUrls.templatePointerBits(template);
+        if ((template == null || templateBits < 0) && srcBits == 64) {
+            warnings.add("Corpus template is unknown and the source is 64-bit. "
+                    + "If this database was created with medium_32, Ghidra will accept "
+                    + "the ingest and silently degrade matches. Use medium_nosize.");
         }
         return null;
     }
@@ -812,7 +912,7 @@ public class BSimService {
         Path gzfDir = Files.createTempDirectory(workDir, "ingest-gzf-");
         Path proj = null;
         try {
-            File gzf = gzfDir.resolve("program.gzf").toFile();
+            File gzf = gzfDir.resolve(packedProgramFileName(program)).toFile();
             program.saveToPackedFile(gzf, TaskMonitor.DUMMY);
             proj = Files.createTempDirectory(workDir, "ingest-proj-");
             List<String> args = new ArrayList<>();
@@ -822,10 +922,7 @@ public class BSimService {
             args.add(gzf.getAbsolutePath());
             args.add("-overwrite");
             args.add("-noanalysis");
-            BSimCli.Result r;
-            synchronized (BSimCli.LOCK) {
-                r = cli.analyzeHeadless(BSimCli.INGEST_TIMEOUT, args);
-            }
+            BSimCli.Result r = analyzeHeadless(BSimCli.INGEST_TIMEOUT, args, null);
             if (!r.ok()) {
                 throw new IOException(
                         "Failed to stage source into a temp project: " + tail(r.output, 1500));
@@ -857,9 +954,23 @@ public class BSimService {
 
     private BSimCli.Result runBsim(Duration timeout, List<String> args, String stdinData)
             throws Exception {
-        synchronized (BSimCli.LOCK) {
-            return cli.bsim(timeout, args, stdinData);
+        String stdin = stdinData != null ? stdinData : BSimCli.stdinForBsimArgs(args);
+        if (BSimUrls.argsContainFileUrl(args)) {
+            synchronized (BSimCli.LOCK) {
+                return cli.bsim(timeout, args, stdin);
+            }
         }
+        return cli.bsim(timeout, args, stdin);
+    }
+
+    private BSimCli.Result analyzeHeadless(Duration timeout, List<String> args, String dbUrl)
+            throws Exception {
+        if (dbUrl != null && BSimUrls.isFileUrl(dbUrl)) {
+            synchronized (BSimCli.LOCK) {
+                return cli.analyzeHeadless(timeout, args);
+            }
+        }
+        return cli.analyzeHeadless(timeout, args);
     }
 
     private Response cliError(String prefix, BSimCli.Result r) {
@@ -885,6 +996,139 @@ public class BSimService {
                 throw new IOException("Missing classpath resource " + QUERY_SCRIPT_RESOURCE);
             }
             Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private Response skipIfAlreadyIngested(Program program, String dbUrl) throws Exception {
+        String md5 = programMd5(program);
+        if (md5 == null || md5.isBlank()) return null;
+        BSimCli.Result listR = runBsim(BSimCli.DEFAULT_TIMEOUT,
+                List.of("listexes", dbUrl, "--limit", "10000"));
+        BSimCliParser.ExeRecord hit = null;
+        for (BSimCliParser.ExeRecord e : BSimCliParser.parseExeList(listR.output)) {
+            if (e.md5 != null && md5.equalsIgnoreCase(e.md5)) {
+                hit = e;
+                break;
+            }
+        }
+        if (hit == null) return null;
+        String currentCompiler = programCompiler(program);
+        if (currentCompiler != null && hit.compiler != null
+                && !hit.compiler.isBlank()
+                && !"unknown".equalsIgnoreCase(hit.compiler)
+                && !currentCompiler.equalsIgnoreCase(hit.compiler)) {
+            return Response.err(
+                    "MD5 " + md5 + " is already ingested as executable '" + hit.name
+                            + "' compiler=" + hit.compiler + ". BSim keys on the executable "
+                            + "MD5, not the compiler spec; overwrite=true does not replace it. "
+                            + "Changing windows to gcc (or any compiler) on the same bytes "
+                            + "requires a new database, not a re-ingest.");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", "skipped");
+        body.put("reason", "already_ingested");
+        body.put("db_url", dbUrl);
+        body.put("executable_md5", md5);
+        body.put("name", hit.name);
+        if (hit.compiler != null) body.put("compiler", hit.compiler);
+        return Response.ok(body);
+    }
+
+    private Response ingestCliError(String prefix, BSimCli.Result r) {
+        String rewritten = BSimCliParser.rewriteIngestError(r.output);
+        String detail = rewritten != null ? rewritten : tail(r.output, 1200);
+        String msg = prefix + " (exit " + r.exitCode + ")";
+        if (detail != null && !detail.isBlank()) msg = msg + ": " + detail;
+        return Response.err(msg);
+    }
+
+    public static String packedProgramFileName(Program program) {
+        String name = "";
+        try {
+            if (program != null) name = program.getName();
+        } catch (Exception ignored) {
+        }
+        return packedProgramFileName(name);
+    }
+
+    public static String packedProgramFileName(String name) {
+        if (name == null || name.isBlank()) name = "program";
+        String sanitized = name.replaceAll("[^A-Za-z0-9._+-]+", "_");
+        if (sanitized.isBlank()) sanitized = "program";
+        if (sanitized.length() > 120) sanitized = sanitized.substring(0, 120);
+        if (sanitized.toLowerCase(Locale.ROOT).endsWith(".gzf")) return sanitized;
+        return sanitized + ".gzf";
+    }
+
+    private static String programMd5(Program program) {
+        if (program == null) return null;
+        try {
+            String md5 = program.getExecutableMD5();
+            return md5 == null || md5.isBlank() ? null : md5.trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String programCompiler(Program program) {
+        if (program == null) return null;
+        try {
+            return program.getCompilerSpec().getCompilerSpecID().getIdAsString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static void recordArtifactExecutableMd5(Program program, String md5) {
+        if (program == null || md5 == null || md5.isBlank()) return;
+        String path;
+        try {
+            path = program.getExecutablePath();
+        } catch (Exception e) {
+            return;
+        }
+        if (path == null || path.isBlank()) return;
+        Path sidecar = FrameworkBuild.sidecarPath(Path.of(path));
+        if (!Files.isRegularFile(sidecar)) return;
+        try {
+            Map<String, Object> parsed = JsonHelper.parseJson(
+                    Files.readString(sidecar, StandardCharsets.UTF_8));
+            if (parsed == null) parsed = new LinkedHashMap<>();
+            parsed.put("executable_md5", md5.trim().toLowerCase(Locale.ROOT));
+            Files.writeString(sidecar, JsonHelper.toJson(parsed) + "\n", StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static boolean nonBlank(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    private static final class QuerySpec {
+        final String function;
+        final double similarity;
+        final double confidence;
+        final int maxMatches;
+        final String arch;
+        final String executable;
+        final String compiler;
+        final String excludeMd5;
+        final int minFeatureCount;
+        final int minFunctionSize;
+
+        QuerySpec(String function, double similarity, double confidence, int maxMatches,
+                  String arch, String executable, String compiler, String excludeMd5,
+                  int minFeatureCount, int minFunctionSize) {
+            this.function = function;
+            this.similarity = similarity;
+            this.confidence = confidence;
+            this.maxMatches = maxMatches;
+            this.arch = arch == null ? "" : arch;
+            this.executable = executable == null ? "" : executable;
+            this.compiler = compiler == null ? "" : compiler;
+            this.excludeMd5 = excludeMd5 == null ? "" : excludeMd5;
+            this.minFeatureCount = minFeatureCount;
+            this.minFunctionSize = minFunctionSize;
         }
     }
 

@@ -59,7 +59,7 @@ import subprocess
 import sys
 import tempfile
 
-TEMPLATE = "medium_32"
+TEMPLATE = "medium_nosize"
 
 #: Roots to scan when the environment does not name a USABLE install.
 _SEARCH_ROOTS = ("F:\\", "C:\\", "D:\\", os.path.expanduser("~"))

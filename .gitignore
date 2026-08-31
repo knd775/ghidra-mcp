@@ -276,6 +276,8 @@ replay_pid*
 !uv.lock
 # ARM GNU pins for ghidra-builder. Not a Ghidra project lockfile.
 !docker/builder/toolchains.lock
+# lshvector C sources copied from Ghidra at image build. Not a Ghidra project lockfile.
+!docker/bsim/lshvector.lock
 
 # Ghidra analysis files
 *.gzf

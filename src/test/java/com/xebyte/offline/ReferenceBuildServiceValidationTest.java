@@ -449,7 +449,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         List<ReferenceBuild.Spec> jobs = ReferenceManifest.load(
                 manifest, List.of("gcc13-x86_64"));
         assertEquals(24, jobs.size());
-        assertEquals("file:/srv/ghidra/bsim/userland",
+        assertEquals("postgresql://ghidra-bsim:5432/userland",
                 ReferenceManifest.databaseUrl(Files.readString(manifest)));
         assertTrue(jobs.stream().allMatch(s -> "gcc13-x86_64".equals(s.toolchain())));
         assertTrue(jobs.stream().noneMatch(ReferenceBuild.Spec::stripDebug));

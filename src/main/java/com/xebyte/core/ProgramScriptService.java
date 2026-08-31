@@ -2048,16 +2048,18 @@ public class ProgramScriptService {
                 programProvider.setCurrentProgram(program);
             }
 
-            return Response.ok(JsonHelper.mapOf(
-                "success", true,
-                "name", program.getName(),
-                "path", program.getDomainFile().getPathname(),
-                "language", program.getLanguageID().getIdAsString(),
-                "executable_format", program.getExecutableFormat() != null
-                    ? program.getExecutableFormat() : "",
-                "analyzing", false,
-                "auto_analyzed", autoAnalyzed
-            ));
+            java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+            body.put("success", true);
+            body.put("name", program.getName());
+            body.put("path", program.getDomainFile().getPathname());
+            body.put("language", program.getLanguageID().getIdAsString());
+            body.put("compiler", ProgramImporter.compilerSpecId(program));
+            body.put("executable_format", program.getExecutableFormat() != null
+                    ? program.getExecutableFormat() : "");
+            body.put("analyzing", false);
+            body.put("auto_analyzed", autoAnalyzed);
+            ProgramImporter.attachElfWindowsWarning(body, program);
+            return Response.ok(body);
         } catch (Exception e) {
             String msg = e.getMessage();
             if (msg == null || msg.isEmpty()) {
