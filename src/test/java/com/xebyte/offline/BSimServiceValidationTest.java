@@ -122,7 +122,7 @@ public class BSimServiceValidationTest extends TestCase {
     }
 
     public void testListDatabasesReportsTemplates() {
-        Response r = svc.listDatabases();
+        Response r = svc.listDatabases(false, 3);
         assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("medium_32"));
@@ -134,7 +134,7 @@ public class BSimServiceValidationTest extends TestCase {
         com.xebyte.core.BSimTestEnv.setAllowlist(
                 "postgresql://ghidra-bsim:5432/embedded,postgresql://ghidra-bsim:5432/userland");
         com.xebyte.core.BSimTestEnv.setTemplates("embedded:medium_32,userland:medium_64");
-        Response r = svc.listDatabases();
+        Response r = svc.listDatabases(false, 3);
         assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("postgresql://ghidra-bsim:5432/embedded"));
@@ -142,6 +142,73 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("medium_32"));
         assertTrue(json, json.contains("medium_64"));
         assertTrue(json, json.contains("\"backend\":\"postgresql\""));
+    }
+
+    /**
+     * The allowlist says what may be contacted, not what exists. Reporting a
+     * configured template as though it were a property of a live database is
+     * exactly the reading that sent an operator hunting for two databases that
+     * had never been created.
+     */
+    public void testListDatabasesSeparatesConfigurationFromState() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setTemplates("embedded:medium_32");
+        Response r = svc.listDatabases(false, 3);
+        String json = r.toJson();
+        assertTrue(json, json.contains("\"configured\":true"));
+        assertTrue("template must be labelled as configuration",
+                json.contains("\"config_template_source\":\"env\""));
+        assertFalse("an unprobed network row must not imply presence either way",
+                json.contains("\"present\""));
+        assertTrue(json, json.contains("\"probe\":\"not_probed\""));
+        assertTrue(json, json.contains("\"probed\":false"));
+    }
+
+    /**
+     * The probe must never invent a presence answer it does not have. Without
+     * GHIDRA_MCP_BSIM_PASSWORD there is nothing to connect with, so the row
+     * says so rather than defaulting to present or absent.
+     */
+    public void testListDatabasesProbeWithoutCredentialIsHonest() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setPassword("");
+        Response r = svc.listDatabases(true, 3);
+        String json = r.toJson();
+        assertTrue(json, json.contains("\"probe\":\"no_credential\""));
+        assertFalse("no credential means unknown, not absent",
+                json.contains("\"present\""));
+    }
+
+    public void testProbeStatesComeFromSqlState() {
+        assertEquals("no_database", com.xebyte.core.BSimDbProbe.classify(
+                new java.sql.SQLException("db missing", "3D000")));
+        assertEquals("auth_failed", com.xebyte.core.BSimDbProbe.classify(
+                new java.sql.SQLException("nope", "28P01")));
+        assertEquals("unreachable", com.xebyte.core.BSimDbProbe.classify(
+                new java.sql.SQLException("refused", "08001")));
+        // Only a definite "no such database" may claim absence; everything
+        // else leaves presence unknown rather than reporting a false negative.
+        assertEquals(Boolean.FALSE, com.xebyte.core.BSimDbProbe.presenceFor(
+                new java.sql.SQLException("db missing", "3D000")));
+        assertNull(com.xebyte.core.BSimDbProbe.presenceFor(
+                new java.sql.SQLException("refused", "08001")));
+    }
+
+    public void testProbeDetailNeverLeaksThePassword() {
+        com.xebyte.core.BSimTestEnv.setPassword("hunter2secret");
+        String detail = com.xebyte.core.BSimDbProbe.sanitize(
+                new java.sql.SQLException("FATAL: password \"hunter2secret\" rejected", "28P01"));
+        assertFalse(detail, detail.contains("hunter2secret"));
+        assertTrue(detail, detail.contains("***"));
+    }
+
+    public void testNonPostgresNetworkUrlIsReportedUnprobeable() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("https://bsim.example/refs");
+        Response r = svc.listDatabases(true, 3);
+        String json = r.toJson();
+        assertTrue(json, json.contains("\"probe\":\"unsupported\""));
+        assertFalse("an unprobeable backend must not claim a presence answer",
+                json.contains("\"present\""));
     }
 
     public void testCreateDbPostgresRejectedOffAllowlist() {
@@ -194,7 +261,26 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(Files.readString(sidecar).contains("medium_32"));
     }
 
-    public void testIngestPostgresAndGhidraServerFeedsBothPasswords() {
+    /**
+     * Two console prompts read one pipe, so the payload order IS the protocol.
+     * {@code generatesigs --bsim <url> --commit} runs
+     * {@code BulkSignatures.signatureRepo}, which calls
+     * {@code generateSignaturesFromServer(..., configtemplate = null, ...)};
+     * with no {@code --config} override that pulls the vector configuration out
+     * of the BSim database <em>before</em> {@code SignatureRepository.process}
+     * reaches the Ghidra Server. Database first, repository second.
+     *
+     * <p>The other order is not a degraded mode — it took out the whole
+     * PostgreSQL ingest path. The database prompt ate the Ghidra Server
+     * password and the CLI died with
+     * {@code Password for bsim:ERROR Could not authenticate with database},
+     * while {@code bsim_create_db} and {@code bsim_list_corpus} kept working on
+     * the same URL because a database-only command has only one prompt to feed.
+     * H2 hid it as well: a {@code file:} database never prompts, so the single
+     * line reached the repository prompt it was written for, and the failure
+     * looked specific to PostgreSQL rather than to having two secrets in flight.
+     */
+    public void testIngestFeedsDatabasePasswordBeforeGhidraServerPassword() {
         com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
         com.xebyte.core.BSimTestEnv.setUser("bsim");
         com.xebyte.core.BSimTestEnv.setPassword("bsim-secret");
@@ -204,12 +290,106 @@ public class BSimServiceValidationTest extends TestCase {
                 "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
                 "", true, false, "", WAIT);
         assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
-        assertTrue("Ghidra Server then BSim postgres on stdin",
+        assertTrue("BSim database then Ghidra Server on stdin, in that order",
+                stdins.contains("bsim-secret\nghidra-secret\n"));
+        assertFalse("the reversed order fails BSim database authentication",
                 stdins.contains("ghidra-secret\nbsim-secret\n"));
         List<String> gen = findCommand("generatesigs");
         assertNotNull(gen);
         assertFalse(gen.contains("bsim-secret"));
         assertFalse(gen.contains("ghidra-secret"));
+    }
+
+    /**
+     * Order is a property of {@code stdinForBsimArgs} itself, so pin it there
+     * too: BSimService is not the only caller, and a single-credential command
+     * must still write exactly one line.
+     */
+    public void testStdinPayloadOrderAndSingleCredentialCases() {
+        com.xebyte.core.BSimTestEnv.setUser("bsim");
+        com.xebyte.core.BSimTestEnv.setPassword("bsim-secret");
+        BSimTestCredentials.install("5n4ck3y", "ghidra-secret");
+        assertEquals("bsim-secret\nghidra-secret\n", BSimCli.stdinForBsimArgs(List.of(
+                "generatesigs", "ghidra://host/repo/prog", "/tmp/xml",
+                "--bsim", "postgresql://bsim@ghidra-bsim:5432/embedded", "--commit")));
+        assertEquals("bsim-secret\n", BSimCli.stdinForBsimArgs(List.of(
+                "createdatabase", "postgresql://bsim@ghidra-bsim:5432/embedded",
+                "medium_nosize")));
+        assertEquals("ghidra-secret\n", BSimCli.stdinForBsimArgs(List.of(
+                "generatesigs", "ghidra://host/repo/prog", "/tmp/xml",
+                "--bsim", "file:/srv/ghidra/bsim/nosize", "--commit")));
+        assertNull("a local project URL and an H2 database need no secrets",
+                BSimCli.stdinForBsimArgs(List.of(
+                        "generatesigs", "ghidra:/tmp/proj/BSimIngest", "/tmp/xml",
+                        "--bsim", "file:/srv/ghidra/bsim/nosize", "--commit")));
+    }
+
+    /**
+     * Same family as the stdin ordering bug, in the username dimension.
+     * {@code BulkSignatures} applies {@code --user} — which a {@code ghidra://}
+     * source forces us to pass — to the BSim database as well, whenever the
+     * BSim URL carries no userinfo. Measured against the real CLI: with
+     * {@code postgresql://bsim@...} it logs "BSim DB server info specifies user
+     * 'bsim'. Ignoring user name option", so the userinfo is what saves us, and
+     * that userinfo comes from GHIDRA_MCP_BSIM_USER. Unset, the two identities
+     * merge and fail as one more "could not authenticate with database".
+     */
+    public void testIngestRefusesToMergeBsimAndGhidraServerIdentities() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setUser("");
+        com.xebyte.core.BSimTestEnv.setPassword("bsim-secret");
+        BSimTestCredentials.install("5n4ck3y", "ghidra-secret");
+        Response r = svc.ingest(
+                "postgresql://ghidra-bsim:5432/embedded",
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+                "", true, false, "", WAIT);
+        assertTrue("must refuse before spawning", r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("GHIDRA_MCP_BSIM_USER"));
+        assertNull("nothing may be spawned", findCommand("generatesigs"));
+
+        // With the database user configured the URL carries its own userinfo,
+        // Ghidra ignores --user for the database, and ingest proceeds.
+        com.xebyte.core.BSimTestEnv.setUser("bsim");
+        Response ok = svc.ingest(
+                "postgresql://ghidra-bsim:5432/embedded",
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+                "", true, false, "", WAIT);
+        assertFalse("unexpected error: " + ok.toJson(), ok instanceof Response.Err);
+        assertNotNull(findCommand("generatesigs"));
+    }
+
+    /**
+     * An H2 ingest has one credential and no database login at all, so the
+     * identity check must not fire there — H2 is the path that kept working
+     * throughout and must keep working.
+     */
+    public void testH2IngestIsUnaffectedByTheIdentityCheck() {
+        com.xebyte.core.BSimTestEnv.setUser("");
+        BSimTestCredentials.install("5n4ck3y", "ghidra-secret");
+        Response r = svc.ingest(
+                "file:" + tmp.resolve("h2db"),
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+                "", true, false, "", WAIT);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertNotNull(findCommand("generatesigs"));
+        assertTrue("only the repository password goes on the pipe",
+                stdins.contains("ghidra-secret\n"));
+    }
+
+    /**
+     * {@code Could not authenticate with database} is the one message this
+     * failure ever produced, and on its own it points at nothing. Keep it
+     * explaining which credential is meant and that two prompts share one pipe.
+     */
+    public void testDatabaseAuthFailureIsExplained() {
+        String raw = "INFO  (BSimLaunchable) Password for bsim:ERROR Could not authenticate "
+                + "with database (BSimLaunchable)";
+        String explained = com.xebyte.core.BSimCliParser.rewriteIngestError(raw);
+        assertNotNull(explained);
+        assertTrue(explained, explained.contains("GHIDRA_MCP_BSIM_PASSWORD"));
+        assertTrue("must say it is not the Ghidra Server login",
+                explained.contains("NOT the Ghidra Server login"));
+        assertNull(com.xebyte.core.BSimCliParser.databaseAuthError("all fine here"));
     }
 
     public void testPointerSizeQueryWarningIsAdvisory() {
@@ -898,6 +1078,36 @@ public class BSimServiceValidationTest extends TestCase {
         int start = json.indexOf('"', at + 9) + 1;
         int end = json.indexOf('"', start);
         return json.substring(start, end);
+    }
+
+    /**
+     * The corroboration extract for a {@code ghidra://} source runs its own
+     * {@code analyzeHeadless}, and {@code -p} is what makes that JVM pass
+     * {@code allowPasswordPrompt = true} into {@code HeadlessClientAuthenticator}.
+     * Without it the authenticator logs "not configured to supply required
+     * password" and returns its BADPASSWORD sentinel — it never reads the pipe,
+     * so the password we do write is irrelevant and the extract cannot
+     * authenticate at all. {@code -connect} only names the user.
+     */
+    public void testCorroborationExtractAgainstServerUrlAllowsThePasswordPrompt() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setUser("bsim");
+        com.xebyte.core.BSimTestEnv.setPassword("bsim-secret");
+        BSimTestCredentials.install("5n4ck3y", "ghidra-secret");
+        Response r = svc.ingest(
+                "postgresql://ghidra-bsim:5432/embedded",
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+                "", true, false, "", WAIT);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        List<String> extract = findCommand("BSim_McpExtract.java");
+        assertNotNull("a ghidra:// ingest must still extract corroboration", extract);
+        int connect = extract.indexOf("-connect");
+        assertTrue("-connect names the Ghidra Server user", connect >= 0);
+        assertEquals("5n4ck3y", extract.get(connect + 1));
+        assertTrue("-p is what enables the stdin password prompt",
+                extract.contains("-p"));
+        assertFalse("the password must never appear in argv",
+                extract.contains("ghidra-secret"));
     }
 
     private List<String> findCommand(String verb) {

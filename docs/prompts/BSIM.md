@@ -242,14 +242,41 @@ will otherwise accept it and silently degrade results.
 ### `bsim_list_databases`
 
 ```
-bsim_list_databases()
+bsim_list_databases(probe=True, probe_timeout_seconds=3)
 ```
 
 Lists allowlisted `postgresql://` URLs (`GHIDRA_MCP_BSIM_URLS`) and any
 leftover H2 files under `GHIDRA_MCP_BSIM_ROOT`, plus the known config
-templates. Does not spawn the bsim CLI. Querying a sized template
-(`medium_32` / `medium_64`) against the wrong pointer size returns a
-warning, not a confusing error. `medium_nosize` does not.
+templates. Never spawns the bsim CLI.
+
+**Every row separates what is configured from what exists.** The allowlist
+says what may be contacted; it is not an inventory. `configured: true` means
+only "this URL is allowlisted". `present` is the observed answer and `probe`
+says how it was reached:
+
+| `probe` | meaning |
+| --- | --- |
+| `ok` | the database exists and has BSim's tables; row also carries `executables` and `corroboration_functions` |
+| `no_bsim_schema` | the database exists but `bsim createdatabase` never ran in it |
+| `no_database` | the server is up and says this database does not exist |
+| `auth_failed` / `unreachable` / `no_credential` / `driver_missing` | presence unknown, for the stated reason |
+| `unsupported` | non-`postgresql://` backend; no driver here to probe with |
+| `not_probed` | `probe=false` |
+
+`present` is **omitted whenever it is unknown**, so read `probe` rather than
+treating a missing `present` as `false`. `probe=false` skips the JDBC connect
+entirely.
+
+`config_template` is configuration too — nothing reads the template back out
+of a database, so `config_template_source` says whether it came from a
+`bsim_create_db` sidecar (`sidecar`), `GHIDRA_MCP_BSIM_TEMPLATES` (`env`), or
+nowhere (`unknown`). This tool is what an operator reaches for when something
+is already wrong, and before this it would list two databases that had never
+been created, at a template neither of them had.
+
+Querying a sized template (`medium_32` / `medium_64`) against the wrong
+pointer size returns a warning, not a confusing error. `medium_nosize` does
+not.
 
 ### `bsim_ingest`
 
@@ -266,7 +293,24 @@ blank failure. When the credential is present the server passes
 `--user` and feeds the password to the child on stdin — the spawned JVM
 is stock Ghidra, which never reads this extension's environment
 variables, and its `HeadlessClientAuthenticator` falls back to a stdin
-prompt when there is no console. An invalid `source` is refused
+prompt when there is no console.
+
+**Ingesting a `ghidra://` source into PostgreSQL puts two secrets on one
+pipe, and the order is fixed: BSim database first, Ghidra Server second.**
+`generatesigs --bsim <url> --commit` runs `BulkSignatures.signatureRepo`,
+which pulls the vector configuration out of the database before
+`SignatureRepository.process` ever contacts the repository. Feeding the
+Ghidra Server password first hands it to PostgreSQL and the CLI dies with
+`Password for bsim:ERROR Could not authenticate with database` — while
+`bsim_create_db` and `bsim_list_corpus` keep working on the same URL,
+because a database-only command has just one prompt to feed, and H2 keeps
+working too, because a `file:` database never prompts at all.
+
+The same collision exists for the *username*: `--user` is applied to the BSim
+database as well whenever the BSim URL carries no user of its own, so a
+`postgresql://` `db_url` plus a `ghidra://` source with `GHIDRA_MCP_BSIM_USER`
+unset is refused up front rather than logging into PostgreSQL as the Ghidra
+Server account. Set `GHIDRA_MCP_BSIM_USER` to the database role. An invalid `source` is refused
 synchronously with the remedy. A program with no functions is refused. A
 pointer-size mismatch against a sized template (`medium_32` / `medium_64`
 / `large_32`) is refused — the CLI would otherwise accept it and degrade

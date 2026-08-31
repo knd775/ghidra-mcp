@@ -195,25 +195,43 @@ public class BSimService {
     @McpTool(path = "/bsim_list_databases", method = "GET",
             description = "List BSim databases: allowlisted postgresql:// URLs "
                     + "(GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under "
-                    + "GHIDRA_MCP_BSIM_ROOT. Templates (medium_nosize, medium_32, ...) are fixed at "
-                    + "createdatabase time. Sidecars written by bsim_create_db, or "
-                    + "GHIDRA_MCP_BSIM_TEMPLATES, report which template each database used. "
-                    + "Does not spawn the bsim CLI.",
+                    + "GHIDRA_MCP_BSIM_ROOT. Every row separates configuration from state. "
+                    + "configured=true means only that the URL is allowlisted; present says "
+                    + "whether the database is actually there, and probe explains it (ok, "
+                    + "no_database, no_bsim_schema, auth_failed, unreachable, no_credential, "
+                    + "not_probed). A live database also reports executables and "
+                    + "corroboration_functions. config_template is CONFIGURATION, not a read "
+                    + "of the database: config_template_source says whether it came from a "
+                    + "bsim_create_db sidecar, GHIDRA_MCP_BSIM_TEMPLATES, or nowhere. Templates "
+                    + "are fixed inside the database at createdatabase time. Never spawns the "
+                    + "bsim CLI; probing is a short read-only JDBC connect (probe=false skips "
+                    + "it and leaves present unreported). present is omitted whenever it is "
+                    + "unknown, so read probe rather than treating a missing present as false.",
             category = "bsim")
-    public Response listDatabases() {
+    public Response listDatabases(
+            @Param(value = "probe", defaultValue = "true",
+                    description = "Contact each allowlisted network database to report whether "
+                            + "it exists. false leaves present unreported and probe=not_probed.")
+                    boolean probe,
+            @Param(value = "probe_timeout_seconds", defaultValue = "3",
+                    description = "Per-database connect/read budget in seconds (1-15). Several "
+                            + "URLs are probed in one call, so keep it short.")
+                    int probeTimeoutSeconds) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", "success");
         body.put("config_templates", List.copyOf(BSimUrls.CONFIG_TEMPLATE_ORDER));
         String root = BSimUrls.bsimRootEnv();
         body.put("bsim_root", root);
         body.put("bsim_urls", BSimUrls.bsimAllowlistEnv());
-        List<Map<String, Object>> databases = new ArrayList<>();
-        databases.addAll(BSimUrls.listAllowlistedDatabases());
+        int timeout = Math.max(1, Math.min(15, probeTimeoutSeconds));
+        List<Map<String, Object>> databases =
+                new ArrayList<>(BSimUrls.listAllowlistedDatabases(probe, timeout));
         if (root != null && !root.isBlank()) {
             databases.addAll(BSimUrls.listFileDatabases(Path.of(root)));
         }
         body.put("databases", databases);
         body.put("count", databases.size());
+        body.put("probed", probe);
         return Response.ok(body);
     }
 
@@ -263,6 +281,8 @@ public class BSimService {
             }
             String credErr = BSimUrls.missingServerCredential(source);
             if (credErr != null) return Response.err(credErr);
+            String userErr = BSimUrls.ambiguousIngestUser(url, source);
+            if (userErr != null) return Response.err(userErr);
             Program program = resolveProgramIfOpen(source, programName);
             // Fail unresolvable sources synchronously and specifically —
             // classify throws IllegalArgumentException with the remedy. The
@@ -272,6 +292,10 @@ public class BSimService {
             if (directUrl != null) {
                 credErr = BSimUrls.missingServerCredential(directUrl);
                 if (credErr != null) return Response.err(credErr);
+                // A repo path becomes ghidra:// on this hop, so the two
+                // identities can only merge here — recheck after resolution.
+                userErr = BSimUrls.ambiguousIngestUser(url, directUrl);
+                if (userErr != null) return Response.err(userErr);
             }
 
             Map<String, Object> request = new LinkedHashMap<>();
@@ -1104,7 +1128,8 @@ public class BSimService {
     }
 
     private Response cliError(String prefix, BSimCli.Result r) {
-        String extracted = BSimCliParser.extractError(r.output);
+        String extracted = BSimCliParser.databaseAuthError(r.output);
+        if (extracted == null) extracted = BSimCliParser.extractError(r.output);
         String detail = extracted != null ? extracted : tail(r.output, 1200);
         String msg = prefix + " (exit " + r.exitCode + ")";
         if (detail != null && !detail.isBlank()) msg = msg + ": " + detail;
@@ -1349,6 +1374,14 @@ public class BSimService {
                     args.add("-connect");
                     args.add(user);
                 }
+                // -p is what makes analyzeHeadless pass allowPasswordPrompt=true
+                // to HeadlessClientAuthenticator. Without it the authenticator
+                // logs "Headless client not configured to supply required
+                // password" and hands back its BADPASSWORD sentinel, so the
+                // password we do write to stdin is never read and this extract
+                // can never authenticate against a repository. -connect alone
+                // only names the user.
+                args.add("-p");
             }
             args.add("-scriptPath");
             args.add(scriptDir.toAbsolutePath().toString());
