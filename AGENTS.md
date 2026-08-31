@@ -192,9 +192,10 @@ Find the file(s) you edited; run everything in that row. Unit + Offline is the f
 ### Reference builder invariants
 
 - `dry_run=true` must not `POST /build` (no clone, no compile). It does `GET /health`, and that list is what unknown names quote.
-- `docker/references.yaml` expands to nine littlefs jobs plus twelve pico-sdk framework jobs (gcc10-arm/gcc12-arm/gcc13-arm across opt levels and boards) and names `postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`). `docker/references.userland.yaml` is a separate 24-job x86-64 corpus pointing at the same database.
+- `docker/references.yaml` expands to eighteen littlefs jobs, twelve pico-sdk framework jobs (gcc10-arm/gcc12-arm/gcc13-arm across opt levels and boards), and two frotz 2.54 sources jobs (gcc13-arm × `-O2`/`-Os`) and names `postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`). `docker/references.userland.yaml` is a separate 24-job x86-64 corpus pointing at the same database.
 - `mode=framework` harvests build-tree objects, never the linked ELF.
-- Each artifact gets an `<artifact>.json` sidecar (resolved commit, compiler `--version`, sha256, `debug_path_prefix`). Manifest skip is sidecar-hash match, not filename.
+- `mode=sources` accepts `prepare` (operator-supplied shell command in the cloned tree before compile; never read from the repo). Frotz uses `make src/common/defs.h src/common/hash.h`. Rejected in `mode=framework`.
+- Each artifact gets an `<artifact>.json` sidecar (resolved commit, compiler `--version`, sha256, `debug_path_prefix`, `prepare`). Manifest skip is sidecar-hash match plus recorded `prepare`, not filename.
 - Compile with `-g`; `strip_debug` defaults false.
 - One `builder` service; identity selects binaries inside that image. `POST /build` returns a job id; `wait_seconds` (max 55) then `build_reference_status`. `builder_health` proxies `GET /health`. `source_read` is `POST /source`, not a job.
 - Never mount docker.sock into any service.

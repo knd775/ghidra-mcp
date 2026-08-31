@@ -283,7 +283,7 @@ class TestBuilderCompose(unittest.TestCase):
 
     def test_manifest_includes_pico_sdk_framework_matrix(self):
         doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(len(doc["references"]), 3)
+        self.assertEqual(len(doc["references"]), 4)
         self.assertEqual(doc["database"], "postgresql://ghidra-bsim:5432/bsim")
         self.assertEqual(doc["config_template"], "medium_nosize")
         pico = next(entry for entry in doc["references"] if entry["name"] == "pico-sdk")
@@ -319,8 +319,25 @@ class TestBuilderCompose(unittest.TestCase):
             ["musl", "musl", "glibc", "glibc", "zlib", "openssl", "libsodium", "sqlite"],
         )
         embedded = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(len(embedded["references"]), 3)
+        self.assertEqual(len(embedded["references"]), 4)
         self.assertEqual(doc["database"], embedded["database"])
+
+    def test_manifest_includes_frotz_sources_prepare(self):
+        doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
+        frotz = next(entry for entry in doc["references"] if entry["name"] == "frotz")
+        self.assertNotIn("mode", frotz)
+        self.assertNotIn("framework", frotz)
+        self.assertEqual(frotz["ref"], 2.54 if isinstance(frotz["ref"], float) else "2.54")
+        self.assertEqual(frotz["prepare"], "make src/common/defs.h src/common/hash.h")
+        self.assertEqual(frotz["extra_flags"], ["-std=gnu11"])
+        self.assertIn("src/common/process.c", frotz["sources"])
+        self.assertIn("src/common/object.c", frotz["sources"])
+        self.assertEqual(frotz["matrix"]["toolchain"], ["gcc13-arm"])
+        self.assertEqual(frotz["matrix"]["opt"], ["-O2", "-Os"])
+        for src in frotz["sources"]:
+            self.assertTrue(src.startswith("src/common/"), src)
+            self.assertFalse(src.startswith("src/curses/"), src)
+            self.assertFalse(src.startswith("src/sdl/"), src)
 
 
 class TestBuilderScript(unittest.TestCase):
@@ -679,8 +696,366 @@ class TestBuilderInstallAndRefs(unittest.TestCase):
             self.assertEqual(meta["opt"], "-Os")
             self.assertEqual(meta["defines"], ["LFS_NO_MALLOC", "LFS_NO_ASSERT"])
             self.assertEqual(meta["extra_flags"], [])
+            self.assertEqual(meta["prepare"], "")
             self.assertTrue(meta["built_at"].endswith("Z"))
             self.assertEqual(meta["debug_path_prefix"], "/ref/littlefs")
+
+
+def _git_ok(argv):
+    if "clone" in argv:
+        Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    if "show-ref" in argv and "refs/tags/" in argv[-1]:
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    if "show-ref" in argv:
+        return subprocess.CompletedProcess(argv, 1, "", "")
+    if "rev-parse" in argv:
+        return subprocess.CompletedProcess(argv, 0, "abc123def456\n", "")
+    if "log" in argv:
+        return subprocess.CompletedProcess(argv, 0, "1\n", "")
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+class TestPrepare(unittest.TestCase):
+    def test_prepare_runs_before_compile_and_records_sidecar(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "uploads" / "frotz-2.54-gcc13-arm-O2.o"
+            order = []
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                (dest_dir / "src" / "common").mkdir(parents=True)
+                (dest_dir / "src" / "common" / "process.c").write_text(
+                    '#include "defs.h"\nint interpret(void) { return DEF; }\n'
+                )
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    return _git_ok(argv)
+                if argv[:2] == ["/bin/sh", "-c"]:
+                    order.append("prepare")
+                    snap = Path(kwargs["cwd"])
+                    (snap / "src" / "common" / "defs.h").write_text("#define DEF 1\n")
+                    return subprocess.CompletedProcess(
+                        argv, 0, "generated defs.h\n", ""
+                    )
+                if argv[0] == "arm-none-eabi-gcc" and "--version" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "gcc 13.2.1\n", "")
+                if argv[0] == "arm-none-eabi-gcc" and "-c" in argv:
+                    order.append("compile")
+                    self.assertTrue(
+                        (Path(kwargs["cwd"]) / "src" / "common" / "defs.h").is_file()
+                    )
+                    Path(argv[argv.index("-o") + 1]).write_bytes(b"ELF")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-nm":
+                    return subprocess.CompletedProcess(
+                        argv, 0, "00000000 T interpret\n", ""
+                    )
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            result = gbr.handle_request(
+                {
+                    "name": "frotz",
+                    "repo": "https://gitlab.com/DavidGriffith/frotz.git",
+                    "ref": "2.54",
+                    "sources": ["src/common/process.c"],
+                    "prepare": "make src/common/defs.h",
+                    "prepare_timeout": 300,
+                    "cflags": ["-fno-common"],
+                    "opt": "-O2",
+                    "toolchain": "gcc13-arm",
+                    "output": str(dest),
+                },
+                run=run,
+                src_cache=Path(td) / "src",
+                extract=extract,
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(order, ["prepare", "compile"])
+            self.assertEqual(result["prepare"], "make src/common/defs.h")
+            self.assertEqual(result["command"][0], ["/bin/sh", "-c", "make src/common/defs.h"])
+            self.assertIn("interpret", result["defined_functions"])
+            meta = json.loads((dest.with_name(dest.name + ".json")).read_text())
+            self.assertEqual(meta["prepare"], "make src/common/defs.h")
+            self.assertNotIn("prepare", meta["sha256"])
+
+    def test_prepare_failure_returns_stdout_and_stderr(self):
+        with tempfile.TemporaryDirectory() as td:
+            compiled = {"n": 0}
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                (dest_dir / "src" / "common").mkdir(parents=True)
+                (dest_dir / "src" / "common" / "process.c").write_text("int x;\n")
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    return _git_ok(argv)
+                if argv[:2] == ["/bin/sh", "-c"]:
+                    return subprocess.CompletedProcess(
+                        argv,
+                        1,
+                        "generating defs.h\n",
+                        "make: *** No rule to make target 'src/common/defs.h'\n",
+                    )
+                if argv[0] == "arm-none-eabi-gcc":
+                    compiled["n"] += 1
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.handle_request(
+                    {
+                        "repo": "https://gitlab.com/DavidGriffith/frotz.git",
+                        "ref": "2.54",
+                        "sources": ["src/common/process.c"],
+                        "prepare": "make src/common/defs.h",
+                        "output": str(Path(td) / "uploads" / "out.o"),
+                    },
+                    run=run,
+                    src_cache=Path(td) / "src",
+                    extract=extract,
+                )
+            self.assertEqual(ctx.exception.status, "prepare_failed")
+            self.assertIn("No rule to make target", str(ctx.exception))
+            self.assertIn("generating defs.h", ctx.exception.extra.get("stdout", ""))
+            self.assertIn("No rule to make target", ctx.exception.extra.get("stderr", ""))
+            self.assertEqual(compiled["n"], 0)
+
+    def test_dry_run_shows_prepare_and_compiles_nothing(self):
+        def boom(*_a, **_k):
+            self.fail("dry_run must not clone or compile")
+
+        result = gbr.handle_request(
+            {
+                "name": "frotz",
+                "repo": "https://gitlab.com/DavidGriffith/frotz.git",
+                "ref": "2.54",
+                "sources": ["src/common/process.c"],
+                "prepare": "make src/common/defs.h src/common/hash.h",
+                "cflags": ["-fno-common"],
+                "toolchain": "gcc13-arm",
+                "dry_run": True,
+            },
+            run=boom,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["prepare"], "make src/common/defs.h src/common/hash.h")
+        self.assertEqual(
+            result["command"][0],
+            ["/bin/sh", "-c", "make src/common/defs.h src/common/hash.h"],
+        )
+        self.assertEqual(result["command"][1][0], "arm-none-eabi-gcc")
+
+    def test_failed_unit_is_named_and_build_continues(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "uploads" / "out.o"
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                (dest_dir / "good.c").write_text("int interpret(void) { return 1; }\n")
+                (dest_dir / "bad.c").write_text("#include <unistd.h>\nint fail(void);\n")
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    return _git_ok(argv)
+                if argv[0] == "arm-none-eabi-gcc" and "--version" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "gcc 13.2.1\n", "")
+                if argv[0] == "arm-none-eabi-gcc" and "-c" in argv:
+                    src = argv[-3]
+                    if src == "bad.c":
+                        return subprocess.CompletedProcess(
+                            argv, 1, "", "bad.c:1:10: fatal error: unistd.h: No such file\n"
+                        )
+                    Path(argv[argv.index("-o") + 1]).write_bytes(b"ELF")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-nm":
+                    return subprocess.CompletedProcess(
+                        argv, 0, "00000000 T interpret\n", ""
+                    )
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            result = gbr.handle_request(
+                {
+                    "name": "frotz",
+                    "repo": "https://gitlab.com/DavidGriffith/frotz.git",
+                    "ref": "2.54",
+                    "sources": ["good.c", "bad.c"],
+                    "output": str(dest),
+                    "toolchain": "gcc13-arm",
+                },
+                run=run,
+                src_cache=Path(td) / "src",
+                extract=extract,
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["defined_functions"], ["interpret"])
+            self.assertEqual(len(result["failed_units"]), 1)
+            self.assertEqual(result["failed_units"][0]["source"], "bad.c")
+            self.assertIn("unistd.h", result["failed_units"][0]["stderr"])
+
+    def test_prepare_timeout_rejects_bool_and_fractional(self):
+        with self.assertRaises(gbr.BuildError) as ctx:
+            gbr.require_prepare_timeout({"prepare_timeout": True})
+        self.assertEqual(ctx.exception.status, "invalid_prepare_timeout")
+        with self.assertRaises(gbr.BuildError) as ctx:
+            gbr.require_prepare_timeout({"prepare_timeout": 1.9})
+        self.assertEqual(ctx.exception.status, "invalid_prepare_timeout")
+        self.assertEqual(gbr.require_prepare_timeout({"prepare_timeout": 300}), 300)
+        self.assertEqual(gbr.require_prepare_timeout({"prepare_timeout": 300.0}), 300)
+        self.assertEqual(gbr.require_prepare_timeout({"prepare_timeout": "120"}), 120)
+
+    @unittest.skipUnless(os.name == "posix", "process-group kill is POSIX")
+    def test_prepare_timeout_kills_descendant_processes(self):
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "child.pid"
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.run_prepare(
+                    f"sleep 60 & echo $! > {pid_file}; wait",
+                    1,
+                    Path(td),
+                    gbr._default_run,
+                    os.environ,
+                )
+            self.assertEqual(ctx.exception.status, "prepare_failed")
+            self.assertIn("timed out", str(ctx.exception))
+            self.assertTrue(pid_file.is_file(), "descendant must start before timeout")
+            child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            deadline = time.time() + 2
+            alive = True
+            while time.time() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                    break
+                time.sleep(0.05)
+            self.assertFalse(alive, f"descendant {child_pid} survived prepare timeout")
+
+    @unittest.skipUnless(os.name == "posix", "process-group kill is POSIX")
+    def test_prepare_timeout_kills_orphaned_background_child(self):
+        """Shell exits; sleep keeps the pipes. Cleanup must still killpg."""
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "child.pid"
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.run_prepare(
+                    f"sleep 60 & echo $! > {pid_file}",
+                    1,
+                    Path(td),
+                    gbr._default_run,
+                    os.environ,
+                )
+            self.assertEqual(ctx.exception.status, "prepare_failed")
+            self.assertIn("timed out", str(ctx.exception))
+            self.assertTrue(pid_file.is_file(), "descendant must start before timeout")
+            child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            deadline = time.time() + 2
+            alive = True
+            while time.time() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                    break
+                time.sleep(0.05)
+            self.assertFalse(alive, f"orphaned child {child_pid} survived prepare timeout")
+
+    def test_prepare_refused_in_framework_mode(self):
+        with self.assertRaises(gbr.BuildError) as ctx:
+            gbr.handle_request(
+                {
+                    "mode": "framework",
+                    "repo": "https://github.com/raspberrypi/pico-sdk.git",
+                    "ref": "2.1.0",
+                    "framework": "pico-sdk",
+                    "libraries": ["hardware_i2c"],
+                    "prepare": "make headers",
+                    "output_dir": "/tmp/uploads",
+                },
+                run=lambda *a, **k: self.fail("must not run"),
+            )
+        self.assertEqual(ctx.exception.status, "invalid_prepare")
+
+    @unittest.skipUnless(shutil.which("gcc") and shutil.which("nm"), "host gcc/nm not installed")
+    def test_host_prepare_generates_header_then_compiles(self):
+        with tempfile.TemporaryDirectory() as td:
+            snap = Path(td) / "src"
+            snap.mkdir()
+            (snap / "core.c").write_text(
+                '#include "gen.h"\nint interpret(void) { return TOKEN; }\n'
+            )
+            env = os.environ.copy()
+            env["LC_ALL"] = "C"
+            env["TZ"] = "UTC"
+            env["SOURCE_DATE_EPOCH"] = "0"
+            gbr.run_prepare(
+                "printf '#define TOKEN 1\\n' > gen.h",
+                30,
+                snap,
+                gbr._default_run,
+                env,
+            )
+            self.assertTrue((snap / "gen.h").is_file())
+            out = Path(td) / "out.o"
+            commands, failed = gbr.compile_objects(
+                snapshot=snap,
+                sources=["core.c"],
+                cflags=["-fno-common", "-fno-ident"],
+                cc="gcc",
+                ld="ld",
+                workdir=Path(td) / "obj",
+                output=out,
+                run=gbr._default_run,
+                env=env,
+            )
+            self.assertEqual(failed, [])
+            self.assertTrue(commands)
+            names = gbr.defined_functions("nm", out, gbr._default_run, env)
+            self.assertIn("interpret", names)
+
+    def test_prepare_not_read_from_repository_content(self):
+        """A prepare.sh in the tree is ignored unless the request names it."""
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "uploads" / "out.o"
+            ran_repo_script = {"n": 0}
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                (dest_dir / "prepare.sh").write_text("#!/bin/sh\necho from-repo\n")
+                (dest_dir / "lfs.c").write_text("int lfs_bd_read(void) { return 0; }\n")
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    return _git_ok(argv)
+                if argv[:2] == ["/bin/sh", "-c"] and "prepare.sh" in argv[2]:
+                    ran_repo_script["n"] += 1
+                if argv[0] == "arm-none-eabi-gcc" and "--version" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "gcc\n", "")
+                if argv[0] == "arm-none-eabi-gcc" and "-c" in argv:
+                    Path(argv[argv.index("-o") + 1]).write_bytes(b"ELF")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-nm":
+                    return subprocess.CompletedProcess(
+                        argv, 0, "00000000 T lfs_bd_read\n", ""
+                    )
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            result = gbr.handle_request(
+                {
+                    "repo": "https://github.com/littlefs-project/littlefs.git",
+                    "ref": "v2.9.3",
+                    "sources": ["lfs.c"],
+                    "output": str(dest),
+                },
+                run=run,
+                src_cache=Path(td) / "src",
+                extract=extract,
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(ran_repo_script["n"], 0)
+            self.assertEqual(result["prepare"], "")
 
 
 class TestHttpControlPlane(unittest.TestCase):

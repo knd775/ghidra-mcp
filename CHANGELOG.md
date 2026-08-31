@@ -6,6 +6,29 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### `build_reference` `prepare` step (sources mode)
+
+Libraries whose build generates a header no longer need a framework stub.
+`build_reference` and `build_manifest` accept an optional `prepare` shell
+command (and `prepare_timeout`, default 300s) that runs in the cloned tree
+after checkout and before compiling named sources. A failing prepare returns
+that command's stdout and stderr. The command is recorded verbatim on the
+artifact sidecar. It is not part of the object hash, but a changed `prepare`
+invalidates the manifest skip so a rebuild actually happens.
+
+Frotz 2.54 is now an ordinary ARM corpus entry: `make src/common/defs.h
+src/common/hash.h` plus the interpreter-core sources under `src/common/`,
+compiled with `-std=gnu11` so `typedef int bool` is legal (host GCC 15
+defaults to C23 and rejects it). Units that fail to cross-compile are
+named in `failed_units` and the build still succeeds if anything compiled.
+
+Existing framework stubs were checked against this. None collapsed.
+`pico-sdk` stays: its sources follow from the libraries the stub links.
+`musl`, `glibc`, `openssl`, `libsodium`, and `sqlite` stay: `./configure`
+does not just emit a header — the Makefile or Configure script chooses the
+object set (arch/sysdep, algorithms, optional extensions). That is still
+framework mode. zlib was already sources-mode with an explicit file list.
+
 ### BSim production-run fixes
 
 `bsim_apply_matches` now makes assignment decisions across the whole query.

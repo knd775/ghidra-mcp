@@ -36,7 +36,9 @@ config_template: medium_nosize
 #
 # Each littlefs configuration × 3 toolchains × 3 opt = 9, for 18 littlefs
 # objects total. pico-sdk × 3 toolchains × 2 opt × 2 boards = 12.
-# build_manifest skips jobs whose outputs already exist.
+# frotz × gcc13-arm × {-O2, -Os} = 2. build_manifest skips a job only
+# when the output exists, its sidecar is readable, the artifact SHA-256
+# matches, and the recorded prepare command matches.
 # x86-64 userland lives in docker/references.userland.yaml (same
 # database, different build matrix).
 
@@ -82,3 +84,32 @@ references:
       toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]
       opt: [-Os, -O2]
       board: [pico, pico_w]
+
+  # Interpreter core only. defs.h and hash.h are Makefile-generated, not
+  # committed — that is a missing build step, not a missing project model,
+  # so this stays mode=sources with prepare rather than a framework stub.
+  # Skip src/curses/ and src/sdl/; they are not present on an embedded
+  # target. Hosted-POSIX units that fail to cross-compile are named and
+  # skipped; the core (interpret / load_operand / store / branch) is the
+  # ground truth already identified in firmware. -O2 first: littlefs on
+  # the same class of firmware matched -O2 at 0.92–1.00 vs -Os at 0.27–0.35.
+  - name: frotz
+    repo: https://gitlab.com/DavidGriffith/frotz.git
+    ref: "2.54"
+    prepare: make src/common/defs.h src/common/hash.h
+    # frotz.h does `typedef int bool`. gnu11 is the dialect this
+    # release was written for; GCC 15's default C23 rejects it.
+    extra_flags: [-std=gnu11]
+    sources:
+      - src/common/process.c
+      - src/common/object.c
+      - src/common/text.c
+      - src/common/math.c
+      - src/common/variable.c
+      - src/common/table.c
+      - src/common/buffer.c
+      - src/common/redirect.c
+      - src/common/stream.c
+    matrix:
+      toolchain: [gcc13-arm]
+      opt: [-O2, -Os]

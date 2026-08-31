@@ -88,6 +88,8 @@ public final class ReferenceManifest {
         Object libraries = entry.get("libraries");
         String board = stringOr(entry, "board", "");
         Object cmakeConfig = entry.get("config");
+        String prepare = stringOr(entry, "prepare", "");
+        int prepareTimeout = intOr(entry, "prepare_timeout", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT);
 
         Map<String, List<String>> matrix = matrixOf(entry.get("matrix"));
         if (matrix.isEmpty()) {
@@ -96,7 +98,8 @@ public final class ReferenceManifest {
             return List.of(parseEntry(
                     name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
                     stripDebug, outputName, knownToolchains,
-                    mode, framework, libraries, board, cmakeConfig, knownFrameworks));
+                    mode, framework, libraries, board, cmakeConfig, knownFrameworks,
+                    prepare, prepareTimeout));
         }
 
         // Fill missing axes from the entry-level defaults so a matrix of only
@@ -119,7 +122,8 @@ public final class ReferenceManifest {
             jobs.add(parseEntry(
                     name, repo, ref, sources, toolchain, arch, opt, defines, extra,
                     stripDebug, outputName, knownToolchains,
-                    mode, framework, libraries, cellBoard, cmakeConfig, knownFrameworks));
+                    mode, framework, libraries, cellBoard, cmakeConfig, knownFrameworks,
+                    prepare, prepareTimeout));
         }
         return jobs;
     }
@@ -129,16 +133,12 @@ public final class ReferenceManifest {
             String archFlags, String opt, Object defines, Object extra,
             boolean stripDebug, String outputName, List<String> knownToolchains,
             String mode, String framework, Object libraries, String board, Object cmakeConfig,
-            List<String> knownFrameworks) {
-        if (FrameworkBuild.MODE_FRAMEWORK.equals(FrameworkBuild.requireMode(mode))) {
-            return ReferenceBuild.parse(
-                    name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
-                    stripDebug, outputName, knownToolchains,
-                    mode, framework, libraries, board, cmakeConfig, knownFrameworks);
-        }
+            List<String> knownFrameworks, String prepare, int prepareTimeout) {
         return ReferenceBuild.parse(
                 name, repo, ref, sources, toolchain, archFlags, opt, defines, extra,
-                stripDebug, outputName, knownToolchains);
+                stripDebug, outputName, knownToolchains,
+                mode, framework, libraries, board, cmakeConfig, knownFrameworks,
+                prepare, prepareTimeout);
     }
 
     static List<Map<String, String>> cartesian(Map<String, List<String>> matrix) {
@@ -193,6 +193,26 @@ public final class ReferenceManifest {
         if (v == null) return fallback;
         if (v instanceof Boolean b) return b;
         return Boolean.parseBoolean(String.valueOf(v));
+    }
+
+    private static int intOr(Map<String, Object> entry, String key, int fallback) {
+        Object v = entry.get(key);
+        if (v == null || String.valueOf(v).isBlank()) return fallback;
+        if (v instanceof Number n) {
+            double d = n.doubleValue();
+            if (!Double.isFinite(d) || d != Math.rint(d)
+                    || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException(
+                        "references entry '" + key + "' must be an integer; got " + v);
+            }
+            return (int) d;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "references entry '" + key + "' must be an integer; got " + v);
+        }
     }
 
     private static boolean looksLikeJson(String text) {

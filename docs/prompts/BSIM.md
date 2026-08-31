@@ -38,8 +38,26 @@ build_reference(name="littlefs",
 That writes `/data/uploads/littlefs-v2.9.3-gcc13-arm-Os.o` as uid 1000.
 `import_file` can load that path with no copy. Then `bsim_ingest`.
 
-Frameworks (Pico SDK, later Zephyr) cannot be a file list: headers are
-generated at configure time. `mode="framework"` builds a stub under
+A generated header is a missing build step, not a missing project model.
+Frotz's source list is known (`src/common/*.c`); `defs.h` and `hash.h` are
+Makefile-generated. Pass `prepare`, do not add a stub:
+
+```
+build_reference(name="frotz",
+                repo="https://gitlab.com/DavidGriffith/frotz.git",
+                ref="2.54",
+                prepare="make src/common/defs.h src/common/hash.h",
+                sources=["src/common/process.c", "src/common/object.c",
+                         "src/common/text.c", "src/common/math.c",
+                         "src/common/variable.c", "src/common/table.c",
+                         "src/common/buffer.c", "src/common/redirect.c",
+                         "src/common/stream.c"],
+                toolchain="gcc13-arm",
+                opt="-O2")
+```
+
+Frameworks (Pico SDK, later Zephyr) cannot be a file list: the build
+system decides what gets compiled. `mode="framework"` builds a stub under
 `docker/stubs/<framework>/` and harvests per-library objects:
 
 ```
@@ -68,7 +86,8 @@ The logging variant keeps assertions and `LFS_ERROR` strings by omitting
 pico-sdk is a **framework** entry: one stub CMake project
 (`docker/stubs/pico-sdk/`) × {gcc10-arm, gcc12-arm, gcc13-arm} × {-Os, -O2}
 × {pico, pico_w} is twelve configure/build jobs, each harvesting several
-per-library objects. Compiler version is why: every littlefs from v2.4.2 to v2.9.3
+per-library objects. frotz is a **sources** entry with `prepare`:
+{gcc13-arm} × {-O2, -Os}. Compiler version is why: every littlefs from v2.4.2 to v2.9.3
 produced `lfs_dir_fetchmatch` at 1040–1120 bytes under GCC 13.2, while the
 firmware's was 1416. pico-sdk projects are commonly GCC 10–12. One
 builder image holds gcc10-arm, gcc12-arm, and gcc13-arm; the identity
@@ -82,8 +101,9 @@ the same image and a matrix axis, not a new tool. Pins live in
 nothing and compiles nothing. It does ask the builder `GET /health` so the
 command line is for an identity the container actually has. Each artifact gets a `<artifact>.json` sidecar
 (resolved commit SHA, the compiler's own `--version` line, sha256). `build_manifest`
-skips a job when the artifact exists and that sidecar hash still matches; a
-missing or mismatched sidecar rebuilds. Compiles that outlive `wait_seconds`
+skips a job when the artifact exists, that sidecar hash still matches, and
+the recorded `prepare` matches the job; a missing or mismatched sidecar
+(or a changed `prepare`) rebuilds. Compiles that outlive `wait_seconds`
 (default 45, max 55) return `{status: started, job_id}`; poll
 `build_reference_status`.
 
@@ -151,14 +171,19 @@ constant.
 ```
 build_reference(name, repo, ref, sources=[], toolchain="gcc13-arm",
                  arch_flags="", opt="-Os",
-                 defines=[], extra_flags=[], strip_debug=False,
+                 defines=[], extra_flags=[], prepare="",
+                 prepare_timeout=300, strip_debug=False,
                  output_name=None, dry_run=False,
                  mode="sources", framework=None, libraries=[],
                  board=None, config={}, wait_seconds=45)
 ```
 
 `mode="sources"` (default) compiles named `.c` files and writes
-`/data/uploads/<name>-<ref>-<toolchain>-<opt>.o`. `mode="framework"`
+`/data/uploads/<name>-<ref>-<toolchain>-<opt>.o`. `prepare` is an optional
+shell command run in the cloned tree after checkout and before compile
+(generated headers, not a substitute for a stub). It comes from this call
+or a manifest, never from repository content. A compile unit that fails is
+named in `failed_units` and the rest still link. `mode="framework"`
 ignores `sources`, configures `docker/stubs/<framework>/` against the
 cloned SDK, and harvests **build-tree** `.o`/`.a` files — never the
 linked ELF. Names are
@@ -185,8 +210,9 @@ build_manifest(path="", dry_run=False, wait_seconds=45)
 
 Expands `docker/references.yaml` (or a path under FILE_ROOT). Empty
 `path` uses `/data/references.yaml` then the copy baked into the JAR.
-Jobs whose artifact exists and whose sidecar sha256 still matches are
-skipped. Delete the sidecar to force a rebuild. One shared `wait_seconds`
+Jobs whose artifact exists, whose sidecar sha256 still matches, and whose
+sidecar `prepare` matches the job are skipped. Delete the sidecar (or
+change `prepare`) to force a rebuild. One shared `wait_seconds`
 covers the matrix; leftovers are tickets. Userland:
 `path="references.userland.yaml"` (mounted at
 `/data/references.userland.yaml`). Both manifests ingest into

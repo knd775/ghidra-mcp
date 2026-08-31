@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,8 @@ DEFAULT_CC = "arm-none-eabi-gcc"
 DEFAULT_LD = "arm-none-eabi-ld"
 DEFAULT_STRIP = "arm-none-eabi-strip"
 DEFAULT_NM = "arm-none-eabi-nm"
+DEFAULT_PREPARE_TIMEOUT = 300
+MAX_PREPARE_TIMEOUT = 3600
 # Java dry_run argv uses this token; we substitute the snapshot path at compile.
 SNAPSHOT_PLACEHOLDER = "<snapshot>"
 DEBUG_PATH_ROOT = "/ref"
@@ -93,6 +96,30 @@ class BuildError(Exception):
         self.extra = extra or {}
 
 
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    """SIGKILL the session started by ``start_new_session``, not just ``proc``.
+
+    The shell can exit while a background child still holds the pipes
+    (``sleep 60 &`` without ``wait``). ``proc.poll()`` is then non-None,
+    but the process group is still alive — always signal the group.
+    """
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if proc.poll() is None:
+                proc.kill()
+    elif proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def _default_run(
     argv: list[str],
     *,
@@ -102,17 +129,39 @@ def _default_run(
     timeout: float | None = 120,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    # New session so a timeout can kill pipelines, ``make -j``, and
+    # backgrounded descendants — subprocess.run only signals /bin/sh.
+    proc = subprocess.Popen(
         argv,
         cwd=cwd,
         env=None if env is None else dict(env),
-        check=check,
-        timeout=timeout,
-        input=input_text,
-        text=True,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group(proc)
+        try:
+            leftover_out, leftover_err = proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired as leftover:
+            leftover_out = leftover.stdout if leftover.stdout is not None else exc.stdout
+            leftover_err = leftover.stderr if leftover.stderr is not None else exc.stderr
+        raise subprocess.TimeoutExpired(
+            argv,
+            timeout if timeout is not None else 0,
+            output=leftover_out,
+            stderr=leftover_err,
+        ) from None
+    except BaseException:
+        _kill_process_group(proc)
+        raise
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, argv, stdout, stderr)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def sanitize_repo_id(repo: str) -> str:
@@ -300,6 +349,108 @@ def extract_snapshot_bytes(git_dir: Path, sha: str, dest: Path) -> None:
         raise BuildError(f"tar extract failed: {err}", status="compile_failed")
 
 
+def _proc_text(raw: object) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace").strip()
+    return str(raw).strip()
+
+
+def require_prepare(req: Mapping[str, Any], mode: str) -> str:
+    """Return the operator-supplied prepare command.
+
+    Taken only from the request (manifest or tool call). Never read a
+    prepare script or command from the cloned tree.
+    """
+    if "prepare" not in req or req.get("prepare") is None:
+        return ""
+    raw = req.get("prepare")
+    if not isinstance(raw, str):
+        raise BuildError("prepare must be a string", status="invalid_prepare")
+    if "\0" in raw:
+        raise BuildError(
+            "prepare contains illegal control characters",
+            status="invalid_prepare",
+        )
+    value = raw.strip()
+    if not value:
+        return ""
+    if mode == "framework":
+        raise BuildError(
+            "prepare is only valid in mode=sources (framework stubs already "
+            "have their own prepare/configure/make)",
+            status="invalid_prepare",
+        )
+    return value
+
+
+def require_prepare_timeout(req: Mapping[str, Any]) -> int:
+    raw = req.get("prepare_timeout", DEFAULT_PREPARE_TIMEOUT)
+    if raw is None or raw == "":
+        return DEFAULT_PREPARE_TIMEOUT
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        raise BuildError(
+            f"prepare_timeout must be an integer number of seconds; got {raw!r}",
+            status="invalid_prepare_timeout",
+        )
+    try:
+        timeout = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise BuildError(
+            f"prepare_timeout must be an integer number of seconds; got {raw!r}",
+            status="invalid_prepare_timeout",
+        ) from exc
+    if timeout < 1 or timeout > MAX_PREPARE_TIMEOUT:
+        raise BuildError(
+            f"prepare_timeout must be 1..{MAX_PREPARE_TIMEOUT}; got {timeout}",
+            status="invalid_prepare_timeout",
+        )
+    return timeout
+
+
+def prepare_argv(prepare: str) -> list[str]:
+    return ["/bin/sh", "-c", prepare]
+
+
+def run_prepare(
+    prepare: str,
+    timeout: int,
+    snapshot: Path,
+    run: RunFn,
+    env: Mapping[str, str],
+) -> list[str]:
+    """Run an operator-supplied shell command in the cloned tree."""
+    argv = prepare_argv(prepare)
+    try:
+        stepped = run(argv, cwd=snapshot, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout = _proc_text(exc.stdout)
+        stderr = _proc_text(exc.stderr)
+        detail = "\n".join(part for part in (stdout, stderr) if part)
+        raise BuildError(
+            f"prepare timed out after {timeout}s"
+            + (f":\n{detail}" if detail else ""),
+            status="prepare_failed",
+            extra={
+                "stdout": stdout,
+                "stderr": stderr,
+                "command": argv,
+                "timeout": timeout,
+            },
+        ) from exc
+    stdout = _proc_text(stepped.stdout)
+    stderr = _proc_text(stepped.stderr)
+    if stepped.returncode != 0:
+        detail = "\n".join(part for part in (stdout, stderr) if part)
+        raise BuildError(
+            f"prepare failed:\n{detail}" if detail else "prepare failed",
+            status="prepare_failed",
+            extra={"stdout": stdout, "stderr": stderr, "command": argv},
+        )
+    return argv
+
+
 def compile_objects(
     *,
     snapshot: Path,
@@ -312,10 +463,16 @@ def compile_objects(
     run: RunFn,
     env: Mapping[str, str],
     name: str = "",
-) -> tuple[list[list[str]], str]:
-    """Compile sources; return (commands, compiler_stderr_from_last_failure)."""
+) -> tuple[list[list[str]], list[dict[str, Any]]]:
+    """Compile sources; return (commands, failed_units).
+
+    A unit that fails to compile is named and skipped so the rest of a
+    multi-file reference can still be produced. Zero successful objects
+    is still a hard refuse.
+    """
     commands: list[list[str]] = []
     objects: list[Path] = []
+    failed_units: list[dict[str, Any]] = []
     workdir.mkdir(parents=True, exist_ok=True)
     mapped_base = [flag.replace(SNAPSHOT_PLACEHOLDER, str(snapshot)) for flag in cflags]
     mapped_base = with_debug_maps(mapped_base, snapshot, name or output.stem)
@@ -335,16 +492,36 @@ def compile_objects(
         compiled = run(argv, cwd=snapshot, env=env, timeout=120)
         if compiled.returncode != 0:
             stderr = (compiled.stderr or compiled.stdout or "").strip()
-            raise BuildError(
-                f"compile failed for {rel}:\n{stderr}",
-                status="compile_failed",
-                extra={"stderr": stderr, "source": rel, "command": argv},
-            )
+            failed_units.append({"source": rel, "stderr": stderr, "command": argv})
+            continue
         objects.append(obj)
+
+    if not objects:
+        if len(failed_units) == 1:
+            fu = failed_units[0]
+            raise BuildError(
+                f"compile failed for {fu['source']}:\n{fu['stderr']}",
+                status="compile_failed",
+                extra={
+                    "stderr": fu["stderr"],
+                    "source": fu["source"],
+                    "command": fu["command"],
+                    "failed_units": failed_units,
+                },
+            )
+        parts = [f"{fu['source']}:\n{fu['stderr']}" for fu in failed_units]
+        raise BuildError(
+            "compile failed for all sources:\n" + "\n".join(parts),
+            status="compile_failed",
+            extra={
+                "stderr": "\n".join(fu["stderr"] for fu in failed_units),
+                "failed_units": failed_units,
+            },
+        )
 
     if len(objects) == 1:
         shutil.copy2(objects[0], output)
-        return commands, ""
+        return commands, failed_units
 
     argv = [ld, "-r", "--build-id=none", "-o", str(output), *[str(p) for p in objects]]
     commands.append(argv)
@@ -354,9 +531,9 @@ def compile_objects(
         raise BuildError(
             f"ld -r failed:\n{stderr}",
             status="compile_failed",
-            extra={"stderr": stderr, "command": argv},
+            extra={"stderr": stderr, "command": argv, "failed_units": failed_units},
         )
-    return commands, ""
+    return commands, failed_units
 
 
 def strip_debug(strip_bin: str, output: Path, run: RunFn, env: Mapping[str, str]) -> list[str]:
@@ -503,6 +680,7 @@ def write_provenance_sidecar(
         "opt": str(req.get("opt") or ""),
         "defines": [str(d).strip() for d in (req.get("defines") or []) if str(d).strip()],
         "extra_flags": [str(f) for f in (req.get("extra_flags") or [])],
+        "prepare": str(req.get("prepare") or "").strip(),
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if extra:
@@ -600,6 +778,7 @@ def handle_framework_request(
         extra_flags.append(item if item.startswith("-D") else "-D" + item)
     toolchain = str(req.get("toolchain") or "").strip()
 
+    require_prepare(req, "framework")
     if not repo:
         raise BuildError("repo is required", status="invalid_repo")
     if not libraries:
@@ -891,15 +1070,13 @@ def handle_request(
     cflags = [str(s) for s in (req.get("cflags") or [])]
     do_strip = bool(req.get("strip_debug", False))
     toolchain = str(req.get("toolchain") or "").strip()
+    prepare = require_prepare(req, "sources")
+    prepare_timeout = require_prepare_timeout(req)
 
     if not repo:
         raise BuildError("repo is required", status="invalid_repo")
     if not sources:
         raise BuildError("sources is required (e.g. [\"lfs.c\"])", status="invalid_sources")
-    raw_output = str(req.get("output") or "").strip()
-    if not raw_output:
-        raise BuildError("output is required", status="invalid_output")
-    output = require_output_under_root(Path(raw_output))
 
     reject_branch_name(ref)
     tools = tools_for_request(req)
@@ -913,6 +1090,36 @@ def handle_request(
                 f"source path {src!r} must be a relative path inside the repo",
                 status="invalid_sources",
             )
+
+    if bool(req.get("dry_run")):
+        commands: list[list[str]] = []
+        if prepare:
+            commands.append(prepare_argv(prepare))
+        mapped_base = with_debug_maps(list(cflags), Path(SNAPSHOT_PLACEHOLDER), str(req.get("name") or ""))
+        objects: list[str] = []
+        raw_output = str(req.get("output") or "").strip() or "<output>"
+        for index, rel in enumerate(sources):
+            obj = f"{index:03d}-{Path(rel).name}.o"
+            argv = [cc, "-c", *mapped_base, rel, "-o", obj]
+            commands.append(argv)
+            objects.append(obj)
+        if len(objects) > 1:
+            commands.append([ld, "-r", "--build-id=none", "-o", raw_output, *objects])
+        if do_strip:
+            commands.append([strip_bin, "--strip-debug", raw_output])
+        return {
+            "ok": True,
+            "dry_run": True,
+            "mode": "sources",
+            "command": commands,
+            "prepare": prepare,
+            "prepare_timeout": prepare_timeout,
+        }
+
+    raw_output = str(req.get("output") or "").strip()
+    if not raw_output:
+        raise BuildError("output is required", status="invalid_output")
+    output = require_output_under_root(Path(raw_output))
 
     git_dir = ensure_bare_clone(repo, src_cache, run)
     sha = resolve_commit(git_dir, ref, run)
@@ -930,7 +1137,10 @@ def handle_request(
         env["LANG"] = "C"
         env["TZ"] = "UTC"
         env["SOURCE_DATE_EPOCH"] = epoch
-        commands, _ = compile_objects(
+        commands = []
+        if prepare:
+            commands.append(run_prepare(prepare, prepare_timeout, snapshot, run, env))
+        compiled_cmds, failed_units = compile_objects(
             snapshot=snapshot,
             sources=sources,
             cflags=cflags,
@@ -942,6 +1152,7 @@ def handle_request(
             env=env,
             name=str(req.get("name") or ""),
         )
+        commands.extend(compiled_cmds)
         if do_strip:
             commands.append(strip_debug(strip_bin, staging, run, env))
         names = defined_functions(nm_bin, staging, run, env)
@@ -974,7 +1185,10 @@ def handle_request(
             "command": commands,
             "cc_version": compiler_ver,
             "toolchain": toolchain,
+            "prepare": prepare,
         }
+        if failed_units:
+            result["failed_units"] = failed_units
         return result
     finally:
         shutil.rmtree(work_root, ignore_errors=True)

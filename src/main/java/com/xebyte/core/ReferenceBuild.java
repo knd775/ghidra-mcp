@@ -41,6 +41,9 @@ public final class ReferenceBuild {
     /** Inline wait budget. Past this the MCP hop fabricates a -32603. */
     public static final int MAX_WAIT_SECONDS = 55;
     public static final int DEFAULT_WAIT_SECONDS = 45;
+    /** Seconds allowed for a sources-mode {@code prepare} command. */
+    public static final int DEFAULT_PREPARE_TIMEOUT = 300;
+    public static final int MAX_PREPARE_TIMEOUT = 3600;
     /** Builder substitutes the snapshot directory for this token at compile. */
     public static final String SNAPSHOT_PLACEHOLDER = "<snapshot>";
     /** DWARF paths recorded as {@code /ref/<name>/...} so one Ghidra transform covers the corpus. */
@@ -79,8 +82,34 @@ public final class ReferenceBuild {
             String framework,
             List<String> libraries,
             String board,
-            Map<String, String> config
+            Map<String, String> config,
+            String prepare,
+            int prepareTimeout
     ) {
+        /** Sources-mode / framework specs with no prepare step. */
+        public Spec(
+                String name,
+                String repo,
+                String ref,
+                List<String> sources,
+                String toolchain,
+                String archFlags,
+                String opt,
+                List<String> defines,
+                List<String> extraFlags,
+                boolean stripDebug,
+                String outputName,
+                String mode,
+                String framework,
+                List<String> libraries,
+                String board,
+                Map<String, String> config
+        ) {
+            this(name, repo, ref, sources, toolchain, archFlags, opt, defines, extraFlags,
+                    stripDebug, outputName, mode, framework, libraries, board, config,
+                    "", DEFAULT_PREPARE_TIMEOUT);
+        }
+
         public boolean isFramework() {
             return FrameworkBuild.MODE_FRAMEWORK.equals(mode);
         }
@@ -141,6 +170,9 @@ public final class ReferenceBuild {
             }
             ToolchainIdentity id = identity();
             List<List<String>> steps = new ArrayList<>();
+            if (prepare != null && !prepare.isBlank()) {
+                steps.add(List.of("/bin/sh", "-c", prepare));
+            }
             List<String> cf = cflags();
             if (sources.size() == 1) {
                 List<String> cc = new ArrayList<>();
@@ -221,6 +253,8 @@ public final class ReferenceBuild {
             req.put("strip_debug", stripDebug);
             req.put("toolchain", toolchain);
             req.put("output", output.toString());
+            req.put("prepare", prepare == null ? "" : prepare);
+            req.put("prepare_timeout", prepareTimeout);
             return req;
         }
     }
@@ -298,7 +332,8 @@ public final class ReferenceBuild {
     ) {
         return parse(name, repo, ref, sourcesRaw, toolchain, archFlags, opt, definesRaw,
                 extraFlagsRaw, stripDebug, outputName, knownToolchains,
-                mode, framework, librariesRaw, board, configRaw, null);
+                mode, framework, librariesRaw, board, configRaw, null,
+                "", DEFAULT_PREPARE_TIMEOUT);
     }
 
     public static Spec parse(
@@ -321,14 +356,45 @@ public final class ReferenceBuild {
             Object configRaw,
             List<String> knownFrameworks
     ) {
+        return parse(name, repo, ref, sourcesRaw, toolchain, archFlags, opt, definesRaw,
+                extraFlagsRaw, stripDebug, outputName, knownToolchains,
+                mode, framework, librariesRaw, board, configRaw, knownFrameworks,
+                "", DEFAULT_PREPARE_TIMEOUT);
+    }
+
+    public static Spec parse(
+            String name,
+            String repo,
+            String ref,
+            Object sourcesRaw,
+            String toolchain,
+            String archFlags,
+            String opt,
+            Object definesRaw,
+            Object extraFlagsRaw,
+            boolean stripDebug,
+            String outputName,
+            List<String> knownToolchains,
+            String mode,
+            String framework,
+            Object librariesRaw,
+            String board,
+            Object configRaw,
+            List<String> knownFrameworks,
+            String prepare,
+            int prepareTimeout
+    ) {
         String resolvedMode = FrameworkBuild.requireMode(mode);
+        String prepared = requirePrepare(prepare, resolvedMode);
+        int timeout = requirePrepareTimeout(prepareTimeout);
         if (FrameworkBuild.MODE_SOURCES.equals(resolvedMode)) {
             Spec base = parse(name, repo, ref, sourcesRaw, toolchain, archFlags, opt, definesRaw,
                     extraFlagsRaw, stripDebug, outputName, knownToolchains);
             return new Spec(base.name(), base.repo(), base.ref(), base.sources(), base.toolchain(),
                     base.archFlags(), base.opt(), base.defines(), base.extraFlags(),
                     base.stripDebug(), base.outputName(),
-                    resolvedMode, "", List.of(), "", Map.of());
+                    resolvedMode, "", List.of(), "", Map.of(),
+                    prepared, timeout);
         }
         String n = requireName(name);
         String r = requireRepo(repo);
@@ -454,6 +520,35 @@ public final class ReferenceBuild {
             }
         }
         return sources;
+    }
+
+    /**
+     * Operator-supplied shell command for sources mode. Empty is fine.
+     * Must never be read from repository content — only a manifest or a
+     * direct tool argument.
+     */
+    public static String requirePrepare(String prepare, String mode) {
+        String value = prepare == null ? "" : prepare.strip();
+        if (value.isEmpty()) return "";
+        if (value.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("prepare contains illegal control characters");
+        }
+        String resolved = FrameworkBuild.requireMode(mode);
+        if (FrameworkBuild.MODE_FRAMEWORK.equals(resolved)) {
+            throw new IllegalArgumentException(
+                    "prepare is only valid in mode=sources (framework stubs already "
+                            + "have their own prepare/configure/make)");
+        }
+        return value;
+    }
+
+    public static int requirePrepareTimeout(int prepareTimeout) {
+        if (prepareTimeout < 1 || prepareTimeout > MAX_PREPARE_TIMEOUT) {
+            throw new IllegalArgumentException(
+                    "prepare_timeout must be 1.." + MAX_PREPARE_TIMEOUT
+                            + "; got " + prepareTimeout);
+        }
+        return prepareTimeout;
     }
 
     public static String normalizeOpt(String opt) {
