@@ -6,6 +6,33 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim production-run fixes
+
+`bsim_apply_matches` now makes assignment decisions across the whole query.
+After thresholds and per-function filters, it groups candidates by proposed
+name. Duplicate groups are returned in `conflicts` with each function's
+similarity and confidence, while `counts.conflicting` records how many
+functions were withheld. The default `resolve_conflicts="none"` applies none
+of a group. The opt-in `best` mode applies one confidence leader only when its
+positive lead meets `conflict_min_confidence_margin`; ties always remain
+unresolved. Existing function names are reserved too, so one apply run cannot
+create duplicate function names.
+
+`corroborate_match` now distinguishes an executable with no extraction rows
+from a function absent within an extracted executable. The latter returns
+`reason="function_not_found"` and `extracted_function_count` instead of the
+false suggestion that the executable needs a backfill.
+
+The PostgreSQL probe behind `bsim_list_databases` now excludes BSim's
+synthetic library records, matching the default semantics of `listexes` and
+`getexecount`. This removes the one-row disagreement with
+`bsim_list_corpus`.
+
+The reference manifest keeps the existing `LFS_NO_ASSERT` littlefs matrix and
+adds a `littlefs-logging` matrix with only `LFS_NO_MALLOC`. Those objects retain
+assertions and `LFS_ERROR` strings for corroboration once the manifest is built
+and ingested.
+
 ### BSim apply previews no longer open a write transaction
 
 `bsim_apply_matches(dry_run=true)` no longer enters the generic Ghidra

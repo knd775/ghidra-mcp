@@ -43,6 +43,9 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
     CorroborationEvidence.FunctionRow lookup(String refExecutable, String refFunction)
             throws Exception;
 
+    /** Number of extracted functions for one executable, selected by MD5 or name. */
+    int executableFunctionCount(String refExecutable) throws Exception;
+
     /** True when this store can hold rows (PostgreSQL). */
     default boolean writable() {
         return true;
@@ -67,6 +70,7 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                                                                   String refFunction) {
             return null;
         }
+        @Override public int executableFunctionCount(String refExecutable) { return 0; }
         @Override public boolean writable() { return false; }
         @Override public int corpusFunctionCount() { return 0; }
         @Override public int constantFrequency(String constant) { return 0; }
@@ -121,6 +125,21 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                 }
             }
             return null;
+        }
+
+        @Override
+        public synchronized int executableFunctionCount(String refExecutable) {
+            String exe = refExecutable == null ? "" : refExecutable.trim();
+            if (exe.isEmpty()) return 0;
+            String md5 = looksLikeMd5(exe) ? exe.toLowerCase(Locale.ROOT) : "";
+            int count = 0;
+            for (CorroborationEvidence.FunctionRow row : rows) {
+                if ((!md5.isEmpty() && md5.equals(row.executableMd5()))
+                        || exe.equalsIgnoreCase(row.executableName())) {
+                    count++;
+                }
+            }
+            return count;
         }
 
         @Override
@@ -236,6 +255,22 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
         }
 
         @Override
+        public int executableFunctionCount(String refExecutable) throws SQLException {
+            ensureSchema();
+            String exe = refExecutable == null ? "" : refExecutable.trim();
+            if (exe.isEmpty()) return 0;
+            byte[] md5 = looksLikeMd5(exe) ? md5Bytes(exe) : null;
+            try (Connection c = connect();
+                 PreparedStatement ps = c.prepareStatement(EXECUTABLE_FUNCTION_COUNT)) {
+                ps.setBytes(1, md5);
+                ps.setString(2, exe);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getInt(1) : 0;
+                }
+            }
+        }
+
+        @Override
         public int corpusFunctionCount() {
             try {
                 ensureSchema();
@@ -332,6 +367,10 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
             + "executable_name, constants, strings, callees, truncated "
             + "FROM corroboration.functions "
             + "WHERE function_name = ? AND (exe_md5 = ? OR lower(executable_name) = lower(?))";
+
+    static final String EXECUTABLE_FUNCTION_COUNT = "SELECT COUNT(*) "
+            + "FROM corroboration.functions "
+            + "WHERE exe_md5 = ? OR lower(executable_name) = lower(?)";
 
     static CorroborationEvidence.FunctionRow readRow(ResultSet rs) throws SQLException {
         return new CorroborationEvidence.FunctionRow(
