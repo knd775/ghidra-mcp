@@ -1,7 +1,8 @@
 #!/bin/bash
-# Daily pg_dump of both BSim databases, plus a tar of ghidra-repos when
-# that volume is mounted read-only at /repos. Rotate dumps older than
-# BACKUP_KEEP_DAYS. SSL is required: this talks to ghidra-bsim over TCP.
+# Daily pg_dump of every non-template BSim database, plus a tar of
+# ghidra-repos when that volume is mounted read-only at /repos. Rotate
+# dumps older than BACKUP_KEEP_DAYS. SSL is required: this talks to
+# ghidra-bsim over TCP.
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
@@ -13,6 +14,10 @@ PGSSLMODE="${PGSSLMODE:-require}"
 export PGHOST PGUSER PGSSLMODE PGPASSWORD
 
 mkdir -p "$BACKUP_DIR"
+
+list_dbs() {
+    psql -d postgres -tAc "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres' ORDER BY 1"
+}
 
 dump_one() {
     db=$1
@@ -43,8 +48,14 @@ rotate() {
 }
 
 while true; do
-    dump_one embedded
-    dump_one userland
+    dbs=$(list_dbs)
+    if [ -z "$dbs" ]; then
+        echo "no user databases yet (bsim_create_db first)"
+    else
+        for db in $dbs; do
+            dump_one "$db"
+        done
+    fi
     dump_repos
     rotate
     echo "next dump in ${INTERVAL}s"

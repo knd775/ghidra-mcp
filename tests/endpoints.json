@@ -383,7 +383,7 @@
         "callgraph",
         "wait_seconds"
       ],
-      "description": "Create a BSim database via `bsim createdatabase`. Default template medium_nosize (every database, unconditionally). medium_nosize beat medium_32 under compiler and optimisation drift and gave up nothing on identical builds. Call-graph data is recorded unless callgraph=false. Compose uses PostgreSQL (postgresql://ghidra-bsim:5432/embedded and .../userland) so GUI clients on the VPN can search the same corpus — those are corpus domains, not a pointer-size split. file: H2 URLs remain for leftover local databases. Writes a <name>.ghidra-mcp.json sidecar with the template so bsim_list_databases can report it. Network db_url values must be on GHIDRA_MCP_BSIM_URLS. The database is empty until bsim_ingest. Returns a job_id instead of a result when the CLI outlives wait_seconds."
+      "description": "Create a BSim database via `bsim createdatabase`. Default template medium_nosize (every database, unconditionally). medium_nosize beat medium_32 under compiler and optimisation drift and gave up nothing on identical builds. Call-graph data is recorded unless callgraph=false. Compose uses PostgreSQL (postgresql://ghidra-bsim:5432/bsim) so GUI clients on the VPN can search the same mixed-arch corpus. ARM firmware and x86-64 userland share one medium_nosize database; bsim_query(arch=...) constrains when you want same-arch only. file: H2 URLs remain for leftover local databases. Writes a <name>.ghidra-mcp.json sidecar with the template so bsim_list_databases can report it. Network db_url values must be on GHIDRA_MCP_BSIM_URLS. The database is empty until bsim_ingest. Returns a job_id instead of a result when the CLI outlives wait_seconds."
     },
     {
       "path": "/bsim_ingest",

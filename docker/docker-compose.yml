@@ -67,10 +67,10 @@ services:
       GHIDRA_MCP_FILE_ROOT: /data
       # file: leftover / sidecars. Network BSim URLs use the allowlist.
       GHIDRA_MCP_BSIM_ROOT: /srv/ghidra/bsim
-      GHIDRA_MCP_BSIM_URLS: "postgresql://ghidra-bsim:5432/embedded,postgresql://ghidra-bsim:5432/userland,postgresql://${BIND_ADDR}:5432/embedded,postgresql://${BIND_ADDR}:5432/userland"
+      GHIDRA_MCP_BSIM_URLS: "postgresql://ghidra-bsim:5432/bsim,postgresql://${BIND_ADDR}:5432/bsim"
       GHIDRA_MCP_BSIM_USER: ${BSIM_DB_USER:-bsim}
       GHIDRA_MCP_BSIM_PASSWORD: ${BSIM_DB_PASSWORD:?set in .env}
-      GHIDRA_MCP_BSIM_TEMPLATES: "embedded:medium_nosize,userland:medium_nosize"
+      GHIDRA_MCP_BSIM_TEMPLATES: "bsim:medium_nosize"
       # One builder, every identity. No docker.sock, no host ports.
       GHIDRA_MCP_BUILDER_URL: "http://ghidra-builder:8092"
       # Stub listing for mode=framework dry_run (builder image also bakes these in).
@@ -109,9 +109,11 @@ services:
   # PostgreSQL for BSim. Not on the tunnel network: cloudflared cannot
   # reach it. Published on BIND_ADDR:5432 like Ghidra Server RMI, so GUI
   # clients on the VPN/LAN can use Find Similar Functions against the
-  # same databases the MCP tools query. A stock postgres image will not
-  # work — BSim needs the lshvector C extension (this image). SSL is on;
-  # Ghidra refuses a non-SSL connection.
+  # same database the MCP tools query. One database: bsim (medium_nosize).
+  # ARM firmware and x86-64 userland share it so cross-arch matches are
+  # queryable; bsim_query(arch=...) constrains when you want same-arch
+  # only. A stock postgres image will not work — BSim needs the lshvector
+  # C extension (this image). SSL is on; Ghidra refuses a non-SSL connection.
   ghidra-bsim:
     image: ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-bsim:${GHIDRA_MCP_VERSION:-dev}
     build:
@@ -139,7 +141,7 @@ services:
     networks:
       - ghidra-db
 
-  # pg_dump both BSim databases on a schedule, and tar ghidra-repos when
+  # pg_dump every BSim database on a schedule, and tar ghidra-repos when
   # that volume is mounted. Same image as ghidra-bsim (has pg_dump + SSL).
   bsim-backup:
     image: ghcr.io/${GHCR_OWNER:-knd775}/ghidra-mcp-bsim:${GHIDRA_MCP_VERSION:-dev}

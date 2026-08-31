@@ -98,10 +98,10 @@ mvn clean package -P docker -DskipTests
 | `GHIDRA_MCP_STUBS` | `/opt/ghidra-builder/stubs` | Framework stub projects for `mode=framework` |
 | `GHIDRA_MCP_BUILDER_URL` | `http://ghidra-builder:8092` | One builder, every identity. Internal network only. |
 | `GHIDRA_MCP_BSIM_ROOT` | `/srv/ghidra/bsim` | Confines leftover `file:` BSim URLs and holds template sidecars. Dedicated volume, not under `/data`. |
-| `GHIDRA_MCP_BSIM_URLS` | compose DNS + `BIND_ADDR` for `embedded` and `userland` | Allowlist of `postgresql://` BSim URLs. Fail-closed: unset rejects every network `db_url`. |
+| `GHIDRA_MCP_BSIM_URLS` | compose DNS + `BIND_ADDR` for `bsim` | Allowlist of `postgresql://` BSim URLs. Fail-closed: unset rejects every network `db_url`. |
 | `GHIDRA_MCP_BSIM_USER` | `BSIM_DB_USER` | PostgreSQL role. Not the Ghidra Server account. |
 | `GHIDRA_MCP_BSIM_PASSWORD` | `BSIM_DB_PASSWORD` | PostgreSQL password. Never put this in `db_url`. |
-| `GHIDRA_MCP_BSIM_TEMPLATES` | `embedded:medium_nosize,userland:medium_nosize` | Name → config template when no sidecar exists. |
+| `GHIDRA_MCP_BSIM_TEMPLATES` | `bsim:medium_nosize` | Name → config template when no sidecar exists. |
 | `BSIM_DB_USER` / `BSIM_DB_PASSWORD` | `bsim` / required | Postgres role for `ghidra-bsim`. |
 | `GHIDRA_SERVER_HOST` | `BIND_ADDR` | RMI address the headless client dials |
 | `BIND_ADDR` | required | Host IP for RMI publish, BSim 5432, and `-ip` |
@@ -119,12 +119,12 @@ mvn clean package -P docker -DskipTests
 | `ghidra-mcp-home` | `/home/ghidra` | `$HOME/.ghidra` settings |
 | `ghidra-mcp-projects` | `/projects` | Local (non-repo) project data |
 | `ghidra-bsim` | `/srv/ghidra/bsim` | Leftover H2 files and `<db>.ghidra-mcp.json` sidecars. Writable by uid 1000. |
-| `ghidra-bsim-pgdata` | `/var/lib/postgresql/data` | PostgreSQL data for `embedded` + `userland`. Hours of ingest; back this up. |
+| `ghidra-bsim-pgdata` | `/var/lib/postgresql/data` | PostgreSQL data for `bsim`. Hours of ingest; back this up. |
 | `ghidra-bsim-certs` | `/var/lib/postgresql/certs` | Self-signed server cert. Key is `0600` `postgres`. |
-| `bsim-backups` | `/backups` (backup sidecar) | `pg_dump -Fc` of both databases, plus `ghidra-repos` tars. |
+| `bsim-backups` | `/backups` (backup sidecar) | `pg_dump -Fc` of every user database, plus `ghidra-repos` tars. |
 | `builder-src-cache` | `/src` (builder) | Bare git clones for `build_reference`. Persists so a second build of the same ref does not re-clone. |
-| `docker/references.yaml` | `/data/references.yaml` | Embedded ARM corpus (`postgresql://ghidra-bsim:5432/embedded`, `medium_nosize`). `build_manifest` with no path reads this. |
-| `docker/references.userland.yaml` | `/data/references.userland.yaml` | x86-64 userland corpus (`.../userland`, `medium_nosize`). `build_manifest(path="references.userland.yaml")`. |
+| `docker/references.yaml` | `/data/references.yaml` | ARM corpus. Ingests into `postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`). `build_manifest` with no path reads this. |
+| `docker/references.userland.yaml` | `/data/references.userland.yaml` | x86-64 userland corpus. Same database. `build_manifest(path="references.userland.yaml")`. |
 | `docker/stubs/` | `/opt/ghidra-builder/stubs` | Framework stub projects (`pico-sdk` shipped). Listed by `mode=framework` validation. |
 
 ## BSim PostgreSQL
@@ -137,17 +137,14 @@ not host or proxy BSim.
 `ghidra-bsim` is PostgreSQL 16 with Ghidra's `lshvector` extension
 compiled in (`docker/Dockerfile.bsim`, sources fetched from the Ghidra
 12.1.2 tag and blob-checked against `docker/bsim/lshvector.lock`). SSL
-is on; `hostnossl` is `reject`. Two databases on the one instance:
+is on; `hostnossl` is `reject`. One database:
 
 | Database | Template | Contents |
 |---|---|---|
-| `embedded` | `medium_nosize` | ARM Cortex-M references |
-| `userland` | `medium_nosize` | x86-64 Linux references |
+| `bsim` | `medium_nosize` | ARM Cortex-M and x86-64 Linux references |
 
-The split is corpus domain, not pointer size. Mixing architectures in one
-`medium_nosize` database is harmless; keep them separate because native
-x86-64 references cannot substitute for ARM ones. Constraining a mixed
-database is `bsim_query(arch=...)`.
+Cross-arch matches happen and are useful. `bsim_query(arch=...)`
+constrains a query when you want same-arch only.
 
 GUI URL: `postgresql://<BIND_ADDR>:5432/<database>`. Login is
 `BSIM_DB_USER` / `BSIM_DB_PASSWORD`, not the Ghidra Server account.
@@ -201,14 +198,12 @@ Corpus updates are MCP tools: `builder_health`, `build_manifest`,
 the Docker host.
 
 `dry_run=true` returns the compiler or cmake command line without cloning
-or compiling. `docker/references.yaml` is the ARM corpus (medium_nosize,
-`postgresql://ghidra-bsim:5432/embedded`).
-`docker/references.userland.yaml` is x86-64 libc and static libs
-(medium_nosize, `postgresql://ghidra-bsim:5432/userland`). Do not ingest
-x86-64 into `embedded`. Each object gets a JSON sidecar (`<artifact>.json`)
-with the resolved commit, compiler `--version`, sha256, and
-`debug_path_prefix`. `build_manifest` skips a job when that hash still
-matches.
+or compiling. `docker/references.yaml` is the ARM corpus.
+`docker/references.userland.yaml` is x86-64 libc and static libs.
+Both ingest into `postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`).
+Each object gets a JSON sidecar (`<artifact>.json`) with the resolved
+commit, compiler `--version`, sha256, and `debug_path_prefix`.
+`build_manifest` skips a job when that hash still matches.
 
 ## API Endpoints
 

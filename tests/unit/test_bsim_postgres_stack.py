@@ -82,16 +82,13 @@ class TestBsimPostgresCompose(unittest.TestCase):
     def test_mcp_allowlist_and_credentials(self):
         env = self.doc["services"]["ghidra-mcp"]["environment"]
         urls = env["GHIDRA_MCP_BSIM_URLS"]
-        self.assertIn("postgresql://ghidra-bsim:5432/embedded", urls)
-        self.assertIn("postgresql://ghidra-bsim:5432/userland", urls)
-        self.assertIn("postgresql://${BIND_ADDR}:5432/embedded", urls)
-        self.assertIn("postgresql://${BIND_ADDR}:5432/userland", urls)
+        self.assertEqual(
+            urls,
+            "postgresql://ghidra-bsim:5432/bsim,postgresql://${BIND_ADDR}:5432/bsim",
+        )
         self.assertIn("BSIM_DB_PASSWORD", str(env["GHIDRA_MCP_BSIM_PASSWORD"]))
         self.assertIn("BSIM_DB_USER", str(env["GHIDRA_MCP_BSIM_USER"]))
-        self.assertEqual(
-            env["GHIDRA_MCP_BSIM_TEMPLATES"],
-            "embedded:medium_nosize,userland:medium_nosize",
-        )
+        self.assertEqual(env["GHIDRA_MCP_BSIM_TEMPLATES"], "bsim:medium_nosize")
         self.assertEqual(env["GHIDRA_MCP_BSIM_ROOT"], "/srv/ghidra/bsim")
 
     def test_backup_service_dumps_both_databases_over_ssl(self):
@@ -223,13 +220,15 @@ class TestBsimPostgresImage(unittest.TestCase):
         self.assertIn("sslmode=require", text)
         self.assertIn("127.0.0.1", text)
 
-    def test_backup_dumps_embedded_and_userland(self):
+    def test_backup_dumps_every_user_database(self):
         text = BACKUP.read_text(encoding="utf-8")
         self.assertIn("pg_dump", text)
-        self.assertIn("embedded", text)
-        self.assertIn("userland", text)
+        self.assertIn("pg_database", text)
+        self.assertIn("datistemplate", text)
         self.assertIn("PGSSLMODE", text)
         self.assertIn("ghidra-repos", text)
+        self.assertNotIn("dump_one embedded", text)
+        self.assertNotIn("dump_one userland", text)
 
     def test_migration_doc_is_reingest_not_h2_convert(self):
         self.assertTrue(MIGRATION.is_file())
@@ -268,10 +267,11 @@ class TestBsimPostgresImage(unittest.TestCase):
         userland = yaml.safe_load(
             (REPO_ROOT / "docker" / "references.userland.yaml").read_text(encoding="utf-8")
         )
-        self.assertEqual(arm["database"], "postgresql://ghidra-bsim:5432/embedded")
+        self.assertEqual(arm["database"], "postgresql://ghidra-bsim:5432/bsim")
         self.assertEqual(arm["config_template"], "medium_nosize")
-        self.assertEqual(userland["database"], "postgresql://ghidra-bsim:5432/userland")
+        self.assertEqual(userland["database"], "postgresql://ghidra-bsim:5432/bsim")
         self.assertEqual(userland["config_template"], "medium_nosize")
+        self.assertEqual(arm["database"], userland["database"])
 
     def test_local_build_script_tags_ghcr_name(self):
         path = REPO_ROOT / "docker" / "build-bsim.sh"
