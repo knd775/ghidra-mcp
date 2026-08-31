@@ -633,6 +633,83 @@ def sidecar_path(artifact: Path) -> Path:
     return artifact.with_name(artifact.name + ".json")
 
 
+def remove_installed_artifacts(paths: list[Path]) -> None:
+    """Delete objects (and sidecars) written by a harvest that later failed.
+
+    A half-written corpus looks current to build_manifest: the sidecar hash
+    matches, the job is skipped, and the caller never learned the paths.
+    """
+    for dest in paths:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            sidecar_path(dest).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def artifact_record(
+    *,
+    path: str,
+    library: str = "",
+    bytes_size: int | None = None,
+    digest: str | None = None,
+    function_count: int | None = None,
+    defined_functions: list[str] | None = None,
+) -> dict[str, Any]:
+    rec: dict[str, Any] = {"path": path, "library": library}
+    if bytes_size is not None:
+        rec["bytes"] = bytes_size
+    if digest is not None:
+        rec["sha256"] = digest
+    if function_count is not None:
+        rec["function_count"] = function_count
+    if defined_functions is not None:
+        rec["defined_functions"] = defined_functions
+    return rec
+
+
+def result_envelope(
+    *,
+    status: str,
+    mode: str,
+    name: str,
+    ref: str,
+    toolchain: str,
+    artifacts: list[dict[str, Any]],
+    command: list[list[str]],
+    failed: list[Any] | None = None,
+    commit_sha: str = "",
+    cc_version: str = "",
+    framework: str = "",
+    board: str = "",
+    prepare: str = "",
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One response shape for sources and framework, success and dry-run."""
+    body: dict[str, Any] = {
+        "ok": status in {"success", "would_execute"},
+        "status": status,
+        "mode": mode,
+        "name": name,
+        "ref": ref,
+        "commit_sha": commit_sha,
+        "toolchain": toolchain,
+        "cc_version": cc_version,
+        "framework": framework,
+        "board": board,
+        "artifacts": artifacts,
+        "failed": list(failed or []),
+        "command": command,
+        "prepare": prepare,
+    }
+    if extra:
+        body.update(dict(extra))
+    return body
+
+
 def write_text_atomic(dest: Path, text: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -830,16 +907,27 @@ def handle_framework_request(
                 cxx=cxx,
             )
             commands = [configure, fw.cmake_build_argv(Path("<build>"))]
-        harvest = [artifact_filename(name, lib, ref, toolchain, opt, board) for lib in libraries]
-        return {
-            "ok": True,
-            "dry_run": True,
-            "mode": "framework",
-            "framework": framework,
-            "command": commands,
-            "harvest": harvest,
-            "board": board,
-        }
+        raw_dir = str(req.get("output_dir") or "").strip()
+        dest_dir = Path(raw_dir) if raw_dir else Path("<uploads>")
+        artifacts = [
+            artifact_record(
+                path=str(dest_dir / artifact_filename(name, lib, ref, toolchain, opt, board)),
+                library=lib,
+            )
+            for lib in libraries
+        ]
+        return result_envelope(
+            status="would_execute",
+            mode="framework",
+            name=name,
+            ref=ref,
+            toolchain=toolchain,
+            artifacts=artifacts,
+            command=commands,
+            framework=framework,
+            board=board,
+            extra={"dry_run": True},
+        )
 
     raw_dir = str(req.get("output_dir") or "").strip()
     if not raw_dir:
@@ -978,69 +1066,77 @@ def handle_framework_request(
 
         staging_dir.mkdir(parents=True, exist_ok=True)
         artifacts: list[dict[str, Any]] = []
+        written: list[Path] = []
         total_fns = 0
         compiler_ver = cc_version(cc, run)
-        for lib in ordered:
-            filename = artifact_filename(name, lib, ref, toolchain, opt, board)
-            staged = staging_dir / filename
-            dest = output_dir / filename
-            combine_cmd = fw.combine_objects(groups[lib], staged, ld, run, env)
-            commands.append(combine_cmd)
-            names = defined_functions(nm_bin, staged, run, env)
-            if not names:
-                raise BuildError(
-                    f"refusing to write: 0 defined functions in harvested {lib} "
-                    "(everything was optimised out or the ELF was harvested)",
-                    status="zero_functions",
-                    extra={"function_count": 0, "library": lib, "commit_sha": sha},
+        try:
+            for lib in ordered:
+                filename = artifact_filename(name, lib, ref, toolchain, opt, board)
+                staged = staging_dir / filename
+                dest = output_dir / filename
+                combine_cmd = fw.combine_objects(groups[lib], staged, ld, run, env)
+                commands.append(combine_cmd)
+                names = defined_functions(nm_bin, staged, run, env)
+                if not names:
+                    raise BuildError(
+                        f"refusing to write: 0 defined functions in harvested {lib} "
+                        "(everything was optimised out or the ELF was harvested)",
+                        status="zero_functions",
+                        extra={"function_count": 0, "library": lib, "commit_sha": sha},
+                    )
+                install_built_object(staged, dest)
+                written.append(dest)
+                digest = sha256_file(dest)
+                write_provenance_sidecar(
+                    dest,
+                    req=req,
+                    commit=sha,
+                    compiler_version=compiler_ver,
+                    function_count=len(names),
+                    digest=digest,
+                    extra={
+                        "framework": framework,
+                        "library": lib,
+                        "board": board,
+                        "config": config,
+                    },
                 )
-            install_built_object(staged, dest)
-            digest = sha256_file(dest)
-            write_provenance_sidecar(
-                dest,
-                req=req,
-                commit=sha,
-                compiler_version=compiler_ver,
-                function_count=len(names),
-                digest=digest,
-                extra={
-                    "framework": framework,
-                    "library": lib,
-                    "board": board,
-                    "config": config,
-                },
-            )
-            total_fns += len(names)
-            artifacts.append(
-                {
-                    "path": str(dest),
-                    "bytes": dest.stat().st_size,
-                    "sha256": digest,
-                    "function_count": len(names),
-                    "defined_functions": names[:200],
-                    "library": lib,
-                }
-            )
+                total_fns += len(names)
+                artifacts.append(
+                    artifact_record(
+                        path=str(dest),
+                        library=lib,
+                        bytes_size=dest.stat().st_size,
+                        digest=digest,
+                        function_count=len(names),
+                        defined_functions=names[:200],
+                    )
+                )
+        except Exception:
+            remove_installed_artifacts(written)
+            raise
 
         if total_fns == 0:
+            remove_installed_artifacts(written)
             raise BuildError(
                 "refusing to write: 0 defined functions harvested",
                 status="zero_functions",
                 extra={"function_count": 0, "commit_sha": sha},
             )
 
-        return {
-            "ok": True,
-            "mode": "framework",
-            "framework": framework,
-            "artifacts": artifacts,
-            "function_count": total_fns,
-            "commit_sha": sha,
-            "command": commands,
-            "cc_version": compiler_ver,
-            "toolchain": toolchain,
-            "board": board,
-        }
+        return result_envelope(
+            status="success",
+            mode="framework",
+            name=name,
+            ref=ref,
+            toolchain=toolchain,
+            artifacts=artifacts,
+            command=commands,
+            commit_sha=sha,
+            cc_version=compiler_ver,
+            framework=framework,
+            board=board,
+        )
     except fw.FrameworkError as exc:
         raise BuildError(str(exc), status=exc.status, extra=exc.extra) from exc
     finally:
@@ -1107,14 +1203,17 @@ def handle_request(
             commands.append([ld, "-r", "--build-id=none", "-o", raw_output, *objects])
         if do_strip:
             commands.append([strip_bin, "--strip-debug", raw_output])
-        return {
-            "ok": True,
-            "dry_run": True,
-            "mode": "sources",
-            "command": commands,
-            "prepare": prepare,
-            "prepare_timeout": prepare_timeout,
-        }
+        return result_envelope(
+            status="would_execute",
+            mode="sources",
+            name=str(req.get("name") or ""),
+            ref=ref,
+            toolchain=toolchain,
+            artifacts=[artifact_record(path=raw_output, library="")],
+            command=commands,
+            prepare=prepare,
+            extra={"dry_run": True, "prepare_timeout": prepare_timeout},
+        )
 
     raw_output = str(req.get("output") or "").strip()
     if not raw_output:
@@ -1163,33 +1262,45 @@ def handle_request(
                 status="zero_functions",
                 extra={"function_count": 0, "commit_sha": sha},
             )
-        install_built_object(staging, output)
-        compiler_ver = cc_version(cc, run)
-        digest = sha256_file(output)
-        write_provenance_sidecar(
-            output,
-            req=req,
-            commit=sha,
-            compiler_version=compiler_ver,
-            function_count=len(names),
-            digest=digest,
+        written: list[Path] = []
+        try:
+            install_built_object(staging, output)
+            written.append(output)
+            compiler_ver = cc_version(cc, run)
+            digest = sha256_file(output)
+            write_provenance_sidecar(
+                output,
+                req=req,
+                commit=sha,
+                compiler_version=compiler_ver,
+                function_count=len(names),
+                digest=digest,
+            )
+        except Exception:
+            remove_installed_artifacts(written)
+            raise
+        return result_envelope(
+            status="success",
+            mode="sources",
+            name=str(req.get("name") or ""),
+            ref=ref,
+            toolchain=toolchain,
+            artifacts=[
+                artifact_record(
+                    path=str(output),
+                    library="",
+                    bytes_size=output.stat().st_size,
+                    digest=digest,
+                    function_count=len(names),
+                    defined_functions=names[:200],
+                )
+            ],
+            command=commands,
+            failed=failed_units,
+            commit_sha=sha,
+            cc_version=compiler_ver,
+            prepare=prepare,
         )
-        result = {
-            "ok": True,
-            "path": str(output),
-            "bytes": output.stat().st_size,
-            "sha256": digest,
-            "function_count": len(names),
-            "defined_functions": names[:200],
-            "commit_sha": sha,
-            "command": commands,
-            "cc_version": compiler_ver,
-            "toolchain": toolchain,
-            "prepare": prepare,
-        }
-        if failed_units:
-            result["failed_units"] = failed_units
-        return result
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 

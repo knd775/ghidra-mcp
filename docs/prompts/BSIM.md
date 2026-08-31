@@ -97,10 +97,11 @@ the same image and a matrix axis, not a new tool. Pins live in
 `docker/builder/toolchains.lock` (ARM GNU 10.3-2021.10 / 12.2.Rel1 /
 13.2.Rel1), not distro `gcc-arm-none-eabi`.
 
-`dry_run=true` returns the gcc or cmake command line and output path. It clones
+`dry_run=true` returns the same envelope as a real build, with
+`status: "would_execute"` and expected artifact paths. It clones
 nothing and compiles nothing. It does ask the builder `GET /health` so the
 command line is for an identity the container actually has. Each artifact gets a `<artifact>.json` sidecar
-(resolved commit SHA, the compiler's own `--version` line, sha256). `build_manifest`
+(resolved commit SHA, the compiler's own `--version` line, sha256, `debug_path_prefix`). `build_manifest`
 skips a job when the artifact exists, that sidecar hash still matches, and
 the recorded `prepare` matches the job; a missing or mismatched sidecar
 (or a changed `prepare`) rebuilds. Compiles that outlive `wait_seconds`
@@ -175,7 +176,7 @@ build_reference(name, repo, ref, sources=[], toolchain="gcc13-arm",
                  prepare_timeout=300, strip_debug=False,
                  output_name=None, dry_run=False,
                  mode="sources", framework=None, libraries=[],
-                 board=None, config={}, wait_seconds=45)
+                 board=None, config={}, wait_seconds=45, force=False)
 ```
 
 `mode="sources"` (default) compiles named `.c` files and writes
@@ -183,36 +184,46 @@ build_reference(name, repo, ref, sources=[], toolchain="gcc13-arm",
 shell command run in the cloned tree after checkout and before compile
 (generated headers, not a substitute for a stub). It comes from this call
 or a manifest, never from repository content. A compile unit that fails is
-named in `failed_units` and the rest still link. `mode="framework"`
+named in `failed` and the rest still link. `mode="framework"`
 ignores `sources`, configures `docker/stubs/<framework>/` against the
 cloned SDK, and harvests **build-tree** `.o`/`.a` files — never the
 linked ELF. Names are
-`<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o`. Returns a list
-of artifacts (path, sha256, function_count, library). `libraries` empty
-is an error. Zero harvested functions is a refuse (usually means the ELF
-was harvested). `strip_debug` is forced false. `toolchain` is
-`<compiler><major>-<target>` (gcc13-arm, clang17-arm). Blank `arch_flags`
-uses the identity default. `ref` must be a tag or commit; `main` is
-refused. Each artifact is written with `<artifact>.json`: resolved
-commit SHA, the compiler's `--version` line, sha256. Framework mode
-writes one sidecar per harvested library (`library`, `board`, `config`).
-`dry_run=true` clones nothing, configures nothing, and compiles
-nothing. It does call `builder_health` (GET /health) so an unknown
-identity fails before a fake command line. A compile that outlives
-`wait_seconds` returns `{status: "started", job_id}` — poll
+`<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o`. Both modes
+return one envelope (`status`, `mode`, `name`, `ref`, `artifacts`,
+`failed`, `command`). Sources emits a one-element `artifacts` array.
+Each artifact carries `path`, `library`, `sha256`, and `function_count`.
+`libraries` empty is an error. Zero harvested functions is a refuse
+(usually means the ELF was harvested). `strip_debug` is forced false.
+`toolchain` is `<compiler><major>-<target>` (gcc13-arm, clang17-arm).
+Blank `arch_flags` uses the identity default. `ref` must be a tag or
+commit; `main` is refused. Each artifact is written with
+`<artifact>.json`: resolved commit SHA, the compiler's `--version`
+line, sha256, `debug_path_prefix`. Framework mode writes one sidecar
+per harvested library (`library`, `board`, `config`). A failed harvest
+removes objects it already wrote so `/data/uploads` never keeps an
+artifact without a sidecar the caller learned about.
+`dry_run=true` returns the same envelope with `status: "would_execute"`
+and expected artifact paths. It clones nothing, configures nothing, and
+compiles nothing. It does call `builder_health` (GET /health) so an
+unknown identity fails before a fake command line. `force=true` deletes
+this spec's existing objects and sidecars before compile so a previous
+(including unreported) build is not reused. Combined with `dry_run` it
+lists `would_replace` and deletes nothing. A compile that
+outlives `wait_seconds` returns `{status: "started", job_id}` — poll
 `build_reference_status`.
 
 ### `build_manifest`
 
 ```
-build_manifest(path="", dry_run=False, wait_seconds=45)
+build_manifest(path="", dry_run=False, wait_seconds=45, force=False)
 ```
 
 Expands `docker/references.yaml` (or a path under FILE_ROOT). Empty
 `path` uses `/data/references.yaml` then the copy baked into the JAR.
 Jobs whose artifact exists, whose sidecar sha256 still matches, and whose
-sidecar `prepare` matches the job are skipped. Delete the sidecar (or
-change `prepare`) to force a rebuild. One shared `wait_seconds`
+sidecar `prepare` matches the job are skipped. `force=true` deletes those
+objects and sidecars and rebuilds. Delete the sidecar (or change
+`prepare`) to force a rebuild without the flag. One shared `wait_seconds`
 covers the matrix; leftovers are tickets. Userland:
 `path="references.userland.yaml"` (mounted at
 `/data/references.userland.yaml`). Both manifests ingest into

@@ -47,18 +47,24 @@ public class ReferenceBuildService {
                     + "it to GHIDRA_MCP_FILE_ROOT/uploads. Never pass object bytes through "
                     + "this tool; the shared volume is the handoff. ref must be a tag or SHA "
                     + "(bare branch names are refused). Compiled with -g; strip_debug=true runs "
-                    + "strip --strip-debug (keeps .symtab) when corpus disk is tight. dry_run "
-                    + "returns the compiler command line, prepare command, and output path without "
-                    + "cloning or compiling. mode=sources accepts prepare (a shell command run in "
+                    + "strip --strip-debug (keeps .symtab) when corpus disk is tight. "
+                    + "mode=sources accepts prepare (a shell command run in "
                     + "the cloned tree after checkout, before compile) so generated headers do not "
                     + "need a framework stub. prepare comes from this call or a manifest, never "
-                    + "from repository content. "
+                    + "from repository content. Both modes return one envelope "
+                    + "({status, mode, name, ref, artifacts, failed, command}); sources "
+                    + "emits a one-element artifacts array. dry_run uses the same envelope "
+                    + "with status would_execute and expected artifact paths; it does not "
+                    + "clone or compile. "
                     + "Output name: <name>-<ref>-<toolchain>-<opt>.o, or in framework mode "
                     + "<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o. mode=framework "
                     + "configures a stub (docker/stubs/<framework>/), builds, and harvests "
                     + "build-tree objects, never the linked ELF. Each artifact is written with "
                     + "a <artifact>.json sidecar (resolved commit SHA, compiler --version, "
-                    + "sha256). Long builds return "
+                    + "sha256, debug_path_prefix). A failed harvest removes objects it wrote. "
+                    + "force=true deletes this spec's existing objects and sidecars before "
+                    + "compile so a previous (including unreported) build is not reused. "
+                    + "dry_run never deletes. Long builds return "
                     + "{status: started, job_id} when they outlive wait_seconds; poll "
                     + "build_reference_status.",
             category = "bsim")
@@ -105,7 +111,8 @@ public class ReferenceBuildService {
                     description = "Override filename. Default <name>-<ref>-<toolchain>-<opt>.o")
                     String outputName,
             @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "false",
-                    description = "Return the command line and output path; do not clone or compile")
+                    description = "Return the envelope with status would_execute and expected "
+                            + "artifact paths; do not clone or compile")
                     boolean dryRun,
             @Param(value = "mode", source = ParamSource.BODY, defaultValue = "sources",
                     description = "sources (named .c files) or framework (stub project + harvest). Default sources.")
@@ -126,7 +133,12 @@ public class ReferenceBuildService {
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = "Seconds to wait inline (max 55). Past that, poll "
                             + "build_reference_status with the returned job_id.")
-                    int waitSeconds) {
+                    int waitSeconds,
+            @Param(value = "force", source = ParamSource.BODY, defaultValue = "false",
+                    description = "Delete this spec's existing objects and sidecars, then "
+                            + "rebuild. Use after an unreported build or to ignore a matching "
+                            + "sidecar. dry_run reports would_replace and deletes nothing.")
+                    boolean force) {
         try {
             ReferenceBuild.Inventory inv = requireInventory();
             ReferenceBuild.Spec spec = ReferenceBuild.parse(
@@ -134,7 +146,7 @@ public class ReferenceBuildService {
                     stripDebug, outputName, inv.identities(),
                     mode, framework, libraries, board, frameworkConfig, inv.stubs(),
                     prepare, prepareTimeout);
-            return runSpec(spec, dryRun, false, waitSeconds);
+            return runSpec(spec, dryRun, false, waitSeconds, force);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
         } catch (IOException e) {
@@ -142,6 +154,21 @@ public class ReferenceBuildService {
         } catch (Exception e) {
             return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    /** Compat for callers that omit force. */
+    public Response buildReference(
+            String name, String repo, String ref, Object sources, String toolchain,
+            String archFlags, String opt, Object defines, Object extraFlags,
+            String prepare, int prepareTimeout,
+            boolean stripDebug, String outputName, boolean dryRun,
+            String mode, String framework, Object libraries, String board,
+            Object frameworkConfig, int waitSeconds) {
+        return buildReference(name, repo, ref, sources, toolchain, archFlags, opt,
+                defines, extraFlags, prepare, prepareTimeout,
+                stripDebug, outputName, dryRun,
+                mode, framework, libraries, board, frameworkConfig,
+                waitSeconds, false);
     }
 
     /** Sources-mode overload used by offline tests (new params default). */
@@ -153,7 +180,7 @@ public class ReferenceBuildService {
                 defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
                 stripDebug, outputName, dryRun,
                 FrameworkBuild.MODE_SOURCES, "", null, "", null,
-                ReferenceBuild.DEFAULT_WAIT_SECONDS);
+                ReferenceBuild.DEFAULT_WAIT_SECONDS, false);
     }
 
     /** Framework-mode overload used by offline tests (wait_seconds default). */
@@ -167,7 +194,7 @@ public class ReferenceBuildService {
                 defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
                 stripDebug, outputName, dryRun,
                 mode, framework, libraries, board, frameworkConfig,
-                ReferenceBuild.DEFAULT_WAIT_SECONDS);
+                ReferenceBuild.DEFAULT_WAIT_SECONDS, false);
     }
 
     /** Framework/sources overload that still defaults prepare. */
@@ -181,7 +208,21 @@ public class ReferenceBuildService {
                 defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
                 stripDebug, outputName, dryRun,
                 mode, framework, libraries, board, frameworkConfig,
-                waitSeconds);
+                waitSeconds, false);
+    }
+
+    /** Test overload that sets force without restating prepare. */
+    public Response buildReference(
+            String name, String repo, String ref, Object sources, String toolchain,
+            String archFlags, String opt, Object defines, Object extraFlags,
+            boolean stripDebug, String outputName, boolean dryRun,
+            String mode, String framework, Object libraries, String board,
+            Object frameworkConfig, int waitSeconds, boolean force) {
+        return buildReference(name, repo, ref, sources, toolchain, archFlags, opt,
+                defines, extraFlags, "", ReferenceBuild.DEFAULT_PREPARE_TIMEOUT,
+                stripDebug, outputName, dryRun,
+                mode, framework, libraries, board, frameworkConfig,
+                waitSeconds, force);
     }
 
     @McpTool(path = "/build_manifest", method = "POST",
@@ -190,8 +231,10 @@ public class ReferenceBuildService {
                     + "board, for framework entries) is how the corpus covers compiler drift. "
                     + "Jobs whose artifact exists, whose sidecar sha256 still matches, and "
                     + "whose sidecar prepare matches the job are skipped; a missing or "
-                    + "mismatched sidecar (or a changed prepare) rebuilds. dry_run returns every "
-                    + "command line without cloning or compiling. One shared wait_seconds "
+                    + "mismatched sidecar (or a changed prepare) rebuilds. force=true skips "
+                    + "that check, deletes the expected objects and sidecars, and rebuilds. "
+                    + "dry_run returns every command line without cloning or compiling "
+                    + "(force still does not delete). One shared wait_seconds "
                     + "deadline covers the whole matrix; unfinished jobs return a job_id for "
                     + "build_reference_status. Userland corpus: path=references.userland.yaml.",
             category = "bsim")
@@ -204,7 +247,11 @@ public class ReferenceBuildService {
                     boolean dryRun,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = "Shared inline wait for the whole matrix (max 55).")
-                    int waitSeconds) {
+                    int waitSeconds,
+            @Param(value = "force", source = ParamSource.BODY, defaultValue = "false",
+                    description = "Rebuild every job even when the sidecar hash matches. "
+                            + "Deletes expected objects first. dry_run still compiles nothing.")
+                    boolean force) {
         try {
             String yaml = readManifest(path);
             ReferenceBuild.Inventory inv;
@@ -220,7 +267,7 @@ public class ReferenceBuildService {
             int failed = 0;
             int skipped = 0;
             for (ReferenceBuild.Spec spec : jobs) {
-                Response r = submitSpec(spec, dryRun, true);
+                Response r = submitSpec(spec, dryRun, true, force);
                 if (isStartedTicket(r)) {
                     pending.add(new Pending(spec, jobIdOf(r), results.size()));
                     results.add(null);
@@ -254,6 +301,7 @@ public class ReferenceBuildService {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("status", failed == 0 ? "success" : "partial");
             body.put("dry_run", dryRun);
+            if (force) body.put("force", true);
             body.put("count", jobs.size());
             body.put("failed", failed);
             body.put("skipped", skipped);
@@ -270,7 +318,12 @@ public class ReferenceBuildService {
 
     /** Overload used by offline tests. */
     public Response buildManifest(String path, boolean dryRun) {
-        return buildManifest(path, dryRun, ReferenceBuild.DEFAULT_WAIT_SECONDS);
+        return buildManifest(path, dryRun, ReferenceBuild.DEFAULT_WAIT_SECONDS, false);
+    }
+
+    /** Overload used by offline tests (force default). */
+    public Response buildManifest(String path, boolean dryRun, int waitSeconds) {
+        return buildManifest(path, dryRun, waitSeconds, false);
     }
 
     @McpTool(path = "/builder_health", method = "GET",
@@ -429,15 +482,20 @@ public class ReferenceBuildService {
     }
 
     Response runSpec(ReferenceBuild.Spec spec, boolean dryRun) {
-        return runSpec(spec, dryRun, false, ReferenceBuild.DEFAULT_WAIT_SECONDS);
+        return runSpec(spec, dryRun, false, ReferenceBuild.DEFAULT_WAIT_SECONDS, false);
     }
 
     Response runSpec(ReferenceBuild.Spec spec, boolean dryRun, boolean incremental) {
-        return runSpec(spec, dryRun, incremental, ReferenceBuild.DEFAULT_WAIT_SECONDS);
+        return runSpec(spec, dryRun, incremental, ReferenceBuild.DEFAULT_WAIT_SECONDS, false);
     }
 
     Response runSpec(ReferenceBuild.Spec spec, boolean dryRun, boolean incremental, int waitSeconds) {
-        Response submitted = submitSpec(spec, dryRun, incremental);
+        return runSpec(spec, dryRun, incremental, waitSeconds, false);
+    }
+
+    Response runSpec(ReferenceBuild.Spec spec, boolean dryRun, boolean incremental, int waitSeconds,
+                      boolean force) {
+        Response submitted = submitSpec(spec, dryRun, incremental, force);
         if (dryRun || submitted instanceof Response.Err || isSkipped(submitted) || !isStartedTicket(submitted)) {
             return submitted;
         }
@@ -454,6 +512,11 @@ public class ReferenceBuildService {
     }
 
     private Response submitSpec(ReferenceBuild.Spec spec, boolean dryRun, boolean incremental) {
+        return submitSpec(spec, dryRun, incremental, false);
+    }
+
+    private Response submitSpec(ReferenceBuild.Spec spec, boolean dryRun, boolean incremental,
+                                 boolean force) {
         if (config.fileRoot() == null) {
             return Response.err("build_reference requires GHIDRA_MCP_FILE_ROOT so the object "
                     + "lands on the shared volume import_file can see");
@@ -463,30 +526,31 @@ public class ReferenceBuildService {
                 : spec.outputPath(config.fileRoot());
         List<List<String>> command = spec.commandLines(output);
         if (dryRun) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("status", "would_execute");
+            Map<String, Object> body = ReferenceBuild.resultEnvelope(
+                    "would_execute", spec, spec.previewArtifacts(config.fileRoot()),
+                    List.of(), command, "", "");
             body.put("dry_run", true);
-            body.put("path", output.toString());
-            body.put("command", command);
-            body.put("toolchain", spec.toolchain());
-            body.put("ref", spec.ref());
-            body.put("name", spec.name());
-            body.put("mode", spec.mode());
-            body.put("prepare", spec.prepare());
             body.put("prepare_timeout", spec.prepareTimeout());
-            if (spec.isFramework()) {
-                body.put("framework", spec.framework());
-                body.put("board", spec.board());
-                List<String> harvest = new ArrayList<>();
-                for (String lib : spec.libraries()) {
-                    harvest.add(spec.artifactName(lib));
+            if (force) {
+                body.put("force", true);
+                List<String> replace = new ArrayList<>();
+                for (Path p : FrameworkBuild.existingExpected(spec, config.fileRoot())) {
+                    replace.add(p.toString());
                 }
-                body.put("harvest", harvest);
+                body.put("would_replace", replace);
             }
             return Response.ok(body);
         }
 
-        if (incremental) {
+        if (force) {
+            try {
+                FrameworkBuild.deleteExpectedArtifacts(spec, config.fileRoot());
+            } catch (IOException e) {
+                return Response.err(
+                        "force could not remove previous artifact: " + e.getMessage(),
+                        "force_failed");
+            }
+        } else if (incremental) {
             if (spec.isFramework() && FrameworkBuild.allOutputsExist(spec, config.fileRoot())) {
                 return skipped(spec, FrameworkBuild.expectedPaths(spec, config.fileRoot()));
             }
@@ -513,7 +577,7 @@ public class ReferenceBuildService {
         if (isPending(built)) {
             return ticket(String.valueOf(built.get("job_id")));
         }
-        return finishBuild(spec, unwrap(built), command);
+        return finishBuild(spec, unwrap(built), command, force);
     }
 
     private Response awaitJob(ReferenceBuild.Spec spec, URI url, String jobId,
@@ -592,6 +656,11 @@ public class ReferenceBuildService {
 
     private Response finishBuild(ReferenceBuild.Spec spec, Map<String, Object> built,
                                 List<List<String>> command) {
+        return finishBuild(spec, built, command, false);
+    }
+
+    private Response finishBuild(ReferenceBuild.Spec spec, Map<String, Object> built,
+                                List<List<String>> command, boolean force) {
         if (built.containsKey("ok") && Boolean.FALSE.equals(asBoolean(built.get("ok")))) {
             String message = String.valueOf(built.getOrDefault("error", "build failed"));
             String status = built.get("status") == null ? "build_failed" : String.valueOf(built.get("status"));
@@ -629,71 +698,53 @@ public class ReferenceBuildService {
                     "builder_http_" + n.intValue());
         }
 
-        if (spec.isFramework()) {
-            return frameworkSuccess(spec, built, command);
-        }
-
-        Object countRaw = built.get("function_count");
-        int count = JsonHelper.getInt(countRaw, -1);
-        if (countRaw == null || count == 0) {
-            return Response.err(
-                    count == 0
-                            ? "refusing to write: 0 defined functions (everything was optimised out "
-                            + "or the wrong file was compiled)"
-                            : "refusing to write: builder omitted function_count",
-                    count == 0 ? "zero_functions" : "missing_function_count");
-        }
-
-        Path output = spec.outputPath(config.fileRoot());
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", "success");
-        body.put("path", built.getOrDefault("path", output.toString()));
-        body.put("bytes", built.get("bytes"));
-        body.put("sha256", built.get("sha256"));
-        body.put("function_count", built.get("function_count"));
-        body.put("defined_functions", built.get("defined_functions"));
-        body.put("commit_sha", built.get("commit_sha"));
-        body.put("command", built.getOrDefault("command", command));
-        body.put("cc_version", built.get("cc_version"));
-        body.put("toolchain", spec.toolchain());
-        body.put("name", spec.name());
-        body.put("ref", spec.ref());
-        body.put("mode", spec.mode());
-        body.put("prepare", spec.prepare());
-        if (built.get("failed_units") != null) {
-            body.put("failed_units", built.get("failed_units"));
-        }
-        return Response.ok(body);
-    }
-
-    private static Response skipped(ReferenceBuild.Spec spec, List<?> paths) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", "skipped");
-        body.put("skipped", true);
-        body.put("reason", "sidecar hash matches");
-        body.put("mode", spec.mode());
-        body.put("toolchain", spec.toolchain());
-        body.put("name", spec.name());
-        body.put("ref", spec.ref());
-        List<String> listed = new ArrayList<>();
-        for (Object p : paths) {
-            listed.add(String.valueOf(p));
-        }
-        body.put("paths", listed);
-        return Response.ok(body);
-    }
-
-    private static Response frameworkSuccess(
-            ReferenceBuild.Spec spec, Map<String, Object> built, List<List<String>> command) {
+        List<Object> artifacts;
         Object arts = built.get("artifacts");
-        if (!(arts instanceof List<?> list) || list.isEmpty()) {
+        if (arts instanceof List<?> list && !list.isEmpty()) {
+            Response bad = rejectBadArtifacts(list);
+            if (bad != null) return bad;
+            artifacts = new ArrayList<>(list);
+        } else if (!spec.isFramework()) {
+            Object countRaw = built.get("function_count");
+            int count = JsonHelper.getInt(countRaw, -1);
+            if (countRaw == null || count == 0) {
+                return Response.err(
+                        count == 0
+                                ? "refusing to write: 0 defined functions (everything was "
+                                + "optimised out or the wrong file was compiled)"
+                                : "refusing to write: builder omitted function_count",
+                        count == 0 ? "zero_functions" : "missing_function_count");
+            }
+            Path output = spec.outputPath(config.fileRoot());
+            Map<String, Object> art = ReferenceBuild.artifactEntry(
+                    String.valueOf(built.getOrDefault("path", output.toString())), "");
+            art.put("bytes", built.get("bytes"));
+            art.put("sha256", built.get("sha256"));
+            art.put("function_count", built.get("function_count"));
+            art.put("defined_functions", built.get("defined_functions"));
+            artifacts = List.of(art);
+        } else {
             return Response.err(
                     "refusing to write: 0 defined functions harvested "
                             + "(0 target objects in the build tree; the linked ELF was not used)",
                     "zero_functions");
         }
-        int total = 0;
-        List<Object> cleaned = new ArrayList<>();
+
+        Object failedRaw = built.get("failed");
+        if (failedRaw == null) {
+            failedRaw = built.get("failed_units");
+        }
+        List<?> failed = failedRaw instanceof List<?> list ? list : List.of();
+        Map<String, Object> body = ReferenceBuild.resultEnvelope(
+                "success", spec, artifacts, failed,
+                built.getOrDefault("command", command),
+                stringOrEmpty(built.get("commit_sha")),
+                stringOrEmpty(built.get("cc_version")));
+        if (force) body.put("force", true);
+        return Response.ok(body);
+    }
+
+    private static Response rejectBadArtifacts(List<?> list) {
         for (Object item : list) {
             if (!(item instanceof Map<?, ?> m)) {
                 return Response.err(
@@ -715,29 +766,28 @@ public class ReferenceBuildService {
                                 + " (the linked ELF was not used)",
                         "zero_functions");
             }
-            total += fc;
-            cleaned.add(item);
         }
-        if (total == 0) {
-            return Response.err(
-                    "refusing to write: 0 defined functions harvested "
-                            + "(the linked ELF was not used)",
-                    "zero_functions");
+        return null;
+    }
+
+    private static Response skipped(ReferenceBuild.Spec spec, List<?> paths) {
+        List<Map<String, Object>> artifacts = new ArrayList<>();
+        List<String> libs = spec.libraries();
+        int i = 0;
+        for (Object p : paths) {
+            String lib = spec.isFramework() && i < libs.size() ? libs.get(i) : "";
+            artifacts.add(ReferenceBuild.artifactEntry(String.valueOf(p), lib));
+            i++;
         }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", "success");
-        body.put("mode", spec.mode());
-        body.put("framework", spec.framework());
-        body.put("board", spec.board());
-        body.put("artifacts", cleaned);
-        body.put("function_count", total);
-        body.put("commit_sha", built.get("commit_sha"));
-        body.put("command", built.getOrDefault("command", command));
-        body.put("cc_version", built.get("cc_version"));
-        body.put("toolchain", spec.toolchain());
-        body.put("name", spec.name());
-        body.put("ref", spec.ref());
+        Map<String, Object> body = ReferenceBuild.resultEnvelope(
+                "skipped", spec, artifacts, List.of(), List.of(), "", "");
+        body.put("skipped", true);
+        body.put("reason", "sidecar hash matches");
         return Response.ok(body);
+    }
+
+    private static String stringOrEmpty(Object raw) {
+        return raw == null ? "" : String.valueOf(raw);
     }
 
     private String readManifest(String path) throws IOException {

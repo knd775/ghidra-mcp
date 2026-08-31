@@ -162,6 +162,36 @@ public final class FrameworkBuild {
         return paths;
     }
 
+    public static List<Path> expectedArtifacts(ReferenceBuild.Spec spec, Path fileRoot) {
+        if (spec.isFramework()) return expectedPaths(spec, fileRoot);
+        return List.of(spec.outputPath(fileRoot));
+    }
+
+    /** Objects that already sit at this spec's expected paths. */
+    public static List<Path> existingExpected(ReferenceBuild.Spec spec, Path fileRoot) {
+        List<Path> out = new ArrayList<>();
+        for (Path p : expectedArtifacts(spec, fileRoot)) {
+            if (Files.isRegularFile(p)) out.add(p);
+        }
+        return out;
+    }
+
+    /**
+     * Remove expected objects and their sidecars. Used by {@code force=true}
+     * so a previous (including unreported) build cannot be treated as cache.
+     *
+     * @return number of files deleted
+     */
+    public static int deleteExpectedArtifacts(ReferenceBuild.Spec spec, Path fileRoot)
+            throws IOException {
+        int n = 0;
+        for (Path p : expectedArtifacts(spec, fileRoot)) {
+            if (Files.deleteIfExists(p)) n++;
+            if (Files.deleteIfExists(sidecarPath(p))) n++;
+        }
+        return n;
+    }
+
     public static boolean allOutputsExist(ReferenceBuild.Spec spec, Path fileRoot) {
         List<Path> paths = expectedPaths(spec, fileRoot);
         if (paths.isEmpty()) return false;

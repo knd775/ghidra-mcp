@@ -27,8 +27,8 @@ retry reaches the endpoint normally.
 | `archive_ingest_function` | Builds the archive payload, returns before HTTP POST | Read-only |
 | `archive_ingest_program` | Builds payloads and counts candidates, skips every HTTP POST | Read-only |
 | `bsim_apply_matches` | Runs the BSim query and match filters, skips `setName` and every write transaction | Read-only |
-| `build_manifest` | Resolves jobs and command lines, submits no builder jobs | Read-only |
-| `build_reference` | Resolves the command and output path, submits no builder job | Read-only |
+| `build_manifest` | Resolves jobs and command lines, submits no builder jobs. `force=true` lists `would_replace` and still deletes nothing | Read-only |
+| `build_reference` | Resolves command lines and expected artifact paths in the shared envelope (`status: would_execute`), submits no builder job. `force=true` lists `would_replace` and still deletes nothing | Read-only |
 | `checkin_program` | Validates state, returns before save, close, or check-in | Read-only |
 | `merge_program_documentation` | Counts merge candidates, never starts its target-program transaction | Read-only |
 | `server/admin/terminate_all_checkouts` | Returns the proposed operation before recursive termination | Read-only |

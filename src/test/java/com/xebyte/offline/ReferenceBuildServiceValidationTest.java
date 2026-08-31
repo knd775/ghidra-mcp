@@ -4,6 +4,7 @@ import com.xebyte.core.AnnotationScanner;
 import com.xebyte.core.BuilderClient;
 import com.xebyte.core.EndpointDef;
 import com.xebyte.core.FrameworkBuild;
+import com.xebyte.core.JsonHelper;
 import com.xebyte.core.ReferenceBuild;
 import com.xebyte.core.ReferenceBuildService;
 import com.xebyte.core.ReferenceManifest;
@@ -80,6 +81,13 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("-DLFS_NO_MALLOC"));
         assertTrue(json, json.contains("littlefs-v2.9.3-gcc13-arm-Os.o"));
         assertTrue("dry_run must not clone or compile", client.calls.isEmpty());
+        assertEnvelope(json, "would_execute", "sources");
+        Map<?, ?> parsed = (Map<?, ?>) JsonHelper.parseJson(json);
+        List<?> artifacts = (List<?>) parsed.get("artifacts");
+        assertEquals(1, artifacts.size());
+        assertTrue(String.valueOf(((Map<?, ?>) artifacts.get(0)).get("path")).endsWith(
+                "littlefs-v2.9.3-gcc13-arm-Os.o"));
+        assertFalse(parsed.containsKey("path"));
     }
 
     public void testScannerDryRunDoesNotCallBuilder() throws Exception {
@@ -309,6 +317,15 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("deadbeef"));
         assertTrue(json, json.contains("\"function_count\":12") || json.contains("\"function_count\": 12"));
         assertTrue(json, json.contains("sha256"));
+        assertEnvelope(json, "success", "sources");
+        Map<?, ?> parsed = (Map<?, ?>) JsonHelper.parseJson(json);
+        List<?> artifacts = (List<?>) parsed.get("artifacts");
+        assertEquals(1, artifacts.size());
+        Map<?, ?> art = (Map<?, ?>) artifacts.get(0);
+        assertEquals(12, JsonHelper.getInt(art.get("function_count"), -1));
+        assertEquals("abc", art.get("sha256"));
+        assertEquals("", art.get("library"));
+        assertFalse("flat sources fields must not sit beside artifacts", parsed.containsKey("path"));
         Map<?, ?> req = (Map<?, ?>) client.calls.get(0).get("request");
         assertEquals("v2.9.3", req.get("ref"));
         assertEquals(Boolean.TRUE, req.get("strip_debug"));
@@ -762,6 +779,14 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o"));
         assertFalse("sources compile must not appear", json.contains("-ffunction-sections"));
         assertTrue("dry_run must not configure or compile", client.calls.isEmpty());
+        assertEnvelope(json, "would_execute", "framework");
+        Object arts = ((Map<?, ?>) JsonHelper.parseJson(json)).get("artifacts");
+        assertTrue(arts instanceof List<?>);
+        assertEquals(2, ((List<?>) arts).size());
+        Map<?, ?> first = (Map<?, ?>) ((List<?>) arts).get(0);
+        assertTrue(String.valueOf(first.get("path")).endsWith(".o"));
+        assertEquals("pico_stdlib", first.get("library"));
+        assertFalse(json.contains("\"harvest\""));
     }
 
     public void testFrameworkUnknownListsInstalledStubs() {
@@ -909,6 +934,14 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertEquals("framework", req.get("mode"));
         assertTrue(r.toJson(), r.toJson().contains("hardware_i2c"));
         assertTrue(r.toJson(), r.toJson().contains("cafebabe"));
+        assertEnvelope(r.toJson(), "success", "framework");
+        Map<?, ?> parsed = (Map<?, ?>) JsonHelper.parseJson(r.toJson());
+        List<?> artifacts = (List<?>) parsed.get("artifacts");
+        assertEquals(1, artifacts.size());
+        Map<?, ?> got = (Map<?, ?>) artifacts.get(0);
+        assertEquals("hardware_i2c", got.get("library"));
+        assertEquals(7, JsonHelper.getInt(got.get("function_count"), -1));
+        assertEquals("abc", got.get("sha256"));
     }
 
     public void testFrameworkZeroFunctionHarvestRefused() {
@@ -1265,6 +1298,98 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertEquals(1, client.calls.size());
     }
 
+    public void testForceDeletesExistingSourceArtifactThenRebuilds() throws Exception {
+        Path existing = tmp.resolve("uploads").resolve("littlefs-v2.9.3-gcc13-arm-Os.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {1, 2, 3});
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of("LFS_NO_ASSERT"),
+                List.of(),
+                true,
+                "",
+                false,
+                FrameworkBuild.MODE_SOURCES,
+                "",
+                null,
+                "",
+                null,
+                ReferenceBuild.DEFAULT_WAIT_SECONDS,
+                true);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertEquals(1, client.calls.size());
+        assertFalse("force must remove the previous object", Files.exists(existing));
+        assertFalse(Files.exists(FrameworkBuild.sidecarPath(existing)));
+        assertTrue(r.toJson(), r.toJson().contains("\"force\":true") || r.toJson().contains("\"force\": true"));
+    }
+
+    public void testForceDryRunDoesNotDelete() throws Exception {
+        Path existing = tmp.resolve("uploads").resolve("littlefs-v2.9.3-gcc13-arm-Os.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {1, 2, 3});
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of("LFS_NO_ASSERT"),
+                List.of(),
+                true,
+                "",
+                true,
+                FrameworkBuild.MODE_SOURCES,
+                "",
+                null,
+                "",
+                null,
+                ReferenceBuild.DEFAULT_WAIT_SECONDS,
+                true);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertTrue("dry_run must not delete", Files.isRegularFile(existing));
+        assertTrue(Files.isRegularFile(FrameworkBuild.sidecarPath(existing)));
+        assertTrue("dry_run must not compile", client.calls.isEmpty());
+        String json = r.toJson();
+        assertTrue(json, json.contains("would_execute"));
+        assertTrue(json, json.contains("would_replace"));
+        assertTrue(json, json.contains("littlefs-v2.9.3-gcc13-arm-Os.o"));
+        assertTrue(json, json.contains("\"force\":true") || json.contains("\"force\": true"));
+    }
+
+    public void testManifestForceRebuildsWhenSidecarMatches() throws Exception {
+        Files.writeString(tmp.resolve("references.yaml"), picoSdkManifestYaml());
+        Path existing = tmp.resolve("uploads")
+                .resolve("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {1, 2, 3});
+        stubFrameworkBuilderResponse(existing);
+        Response r = svc.buildManifest("", false, ReferenceBuild.DEFAULT_WAIT_SECONDS, true);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertEquals(1, client.calls.size());
+        assertFalse(r.toJson(), r.toJson().contains("\"skipped\":true"));
+        assertFalse("force must remove the previous object before submit", Files.exists(existing));
+        assertTrue(r.toJson(), r.toJson().contains("\"force\":true") || r.toJson().contains("\"force\": true"));
+    }
+
+    public void testManifestForceDryRunDoesNotDelete() throws Exception {
+        Files.writeString(tmp.resolve("references.yaml"), picoSdkManifestYaml());
+        Path existing = tmp.resolve("uploads")
+                .resolve("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o");
+        writeArtifactWithMatchingSidecar(existing, new byte[] {1, 2, 3});
+        Response r = svc.buildManifest("", true, ReferenceBuild.DEFAULT_WAIT_SECONDS, true);
+        assertFalse(r.toJson(), r instanceof Response.Err);
+        assertTrue(client.calls.isEmpty());
+        assertTrue("dry_run must not delete", Files.isRegularFile(existing));
+        String json = r.toJson();
+        assertTrue(json, json.contains("would_execute"));
+        assertTrue(json, json.contains("would_replace"));
+    }
+
     private static String picoSdkManifestYaml() {
         return "references:\n"
                 + "  - name: pico-sdk\n"
@@ -1324,6 +1449,23 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 FrameworkBuild.sidecarPath(artifact),
                 "{\"sha256\":\"" + hex + "\"" + extra + "}\n",
                 StandardCharsets.UTF_8);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void assertEnvelope(String json, String status, String mode) {
+        Object parsed = JsonHelper.parseJson(json);
+        assertTrue(json, parsed instanceof Map<?, ?>);
+        Map<String, Object> body = (Map<String, Object>) parsed;
+        assertEquals(json, status, String.valueOf(body.get("status")));
+        assertEquals(json, mode, String.valueOf(body.get("mode")));
+        for (String key : List.of(
+                "name", "ref", "commit_sha", "toolchain", "cc_version",
+                "framework", "board", "artifacts", "failed", "command", "prepare")) {
+            assertTrue(key + " missing from " + json, body.containsKey(key));
+        }
+        assertTrue(json, body.get("artifacts") instanceof List<?>);
+        assertTrue(json, body.get("failed") instanceof List<?>);
+        assertFalse("job tickets must not use this helper", "started".equals(status));
     }
 
     private static void deleteRecursively(Path dir) throws Exception {

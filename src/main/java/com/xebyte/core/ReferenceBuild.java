@@ -212,6 +212,25 @@ public final class ReferenceBuild {
             return steps;
         }
 
+        /**
+         * Expected artifact rows for a dry-run or skip preview. Paths are
+         * absolute under {@code fileRoot}; hashes and function counts are
+         * omitted because nothing was compiled.
+         */
+        public List<Map<String, Object>> previewArtifacts(Path fileRoot) {
+            List<Map<String, Object>> artifacts = new ArrayList<>();
+            if (isFramework()) {
+                Path uploads = uploadsDir(fileRoot);
+                for (String lib : libraries) {
+                    artifacts.add(artifactEntry(
+                            uploads.resolve(artifactName(lib)).toString(), lib));
+                }
+            } else {
+                artifacts.add(artifactEntry(outputPath(fileRoot).toString(), ""));
+            }
+            return artifacts;
+        }
+
         public Map<String, Object> toBuilderRequest(Path output) {
             ToolchainIdentity id = identity();
             if (isFramework()) {
@@ -567,6 +586,43 @@ public final class ReferenceBuild {
     }
 
     /** Recorded DWARF prefix for a corpus entry, e.g. {@code /ref/littlefs}. */
+    /**
+     * One envelope for sources and framework, success and dry-run. Callers
+     * read {@code artifacts}; they do not branch on {@code mode}.
+     */
+    public static Map<String, Object> resultEnvelope(
+            String status,
+            Spec spec,
+            List<?> artifacts,
+            List<?> failed,
+            Object command,
+            String commitSha,
+            String ccVersion
+    ) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", status);
+        body.put("mode", spec.mode());
+        body.put("name", spec.name());
+        body.put("ref", spec.ref());
+        body.put("commit_sha", commitSha == null ? "" : commitSha);
+        body.put("toolchain", spec.toolchain());
+        body.put("cc_version", ccVersion == null ? "" : ccVersion);
+        body.put("framework", spec.framework() == null ? "" : spec.framework());
+        body.put("board", spec.board() == null ? "" : spec.board());
+        body.put("artifacts", artifacts);
+        body.put("failed", failed == null ? List.of() : failed);
+        body.put("command", command);
+        body.put("prepare", spec.prepare() == null ? "" : spec.prepare());
+        return body;
+    }
+
+    public static Map<String, Object> artifactEntry(String path, String library) {
+        Map<String, Object> art = new LinkedHashMap<>();
+        art.put("path", path);
+        art.put("library", library == null ? "" : library);
+        return art;
+    }
+
     public static String debugPathPrefix(String name) {
         String n = filenameSafe(name == null ? "" : name.trim());
         if (n.isEmpty()) n = "unnamed";

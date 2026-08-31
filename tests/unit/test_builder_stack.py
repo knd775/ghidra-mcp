@@ -666,8 +666,15 @@ class TestBuilderInstallAndRefs(unittest.TestCase):
                 extract=extract,
             )
             self.assertTrue(result["ok"])
-            self.assertEqual(result["function_count"], 1)
-            self.assertEqual(result["defined_functions"], ["lfs_bd_read"])
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["mode"], "sources")
+            self.assertEqual(len(result["artifacts"]), 1)
+            art = result["artifacts"][0]
+            self.assertEqual(art["function_count"], 1)
+            self.assertEqual(art["defined_functions"], ["lfs_bd_read"])
+            self.assertEqual(art["library"], "")
+            self.assertEqual(art["path"], str(dest))
+            self.assertEqual(result["failed"], [])
             self.assertEqual(
                 result["commit_sha"], "9c7e232086f865cff0bb96fe753deb66431d91fd"
             )
@@ -775,7 +782,7 @@ class TestPrepare(unittest.TestCase):
             self.assertEqual(order, ["prepare", "compile"])
             self.assertEqual(result["prepare"], "make src/common/defs.h")
             self.assertEqual(result["command"][0], ["/bin/sh", "-c", "make src/common/defs.h"])
-            self.assertIn("interpret", result["defined_functions"])
+            self.assertIn("interpret", result["artifacts"][0]["defined_functions"])
             meta = json.loads((dest.with_name(dest.name + ".json")).read_text())
             self.assertEqual(meta["prepare"], "make src/common/defs.h")
             self.assertNotIn("prepare", meta["sha256"])
@@ -842,12 +849,17 @@ class TestPrepare(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["dry_run"])
+        self.assertEqual(result["status"], "would_execute")
+        self.assertEqual(result["mode"], "sources")
         self.assertEqual(result["prepare"], "make src/common/defs.h src/common/hash.h")
         self.assertEqual(
             result["command"][0],
             ["/bin/sh", "-c", "make src/common/defs.h src/common/hash.h"],
         )
         self.assertEqual(result["command"][1][0], "arm-none-eabi-gcc")
+        self.assertEqual(len(result["artifacts"]), 1)
+        self.assertEqual(result["artifacts"][0]["library"], "")
+        self.assertEqual(result["failed"], [])
 
     def test_failed_unit_is_named_and_build_continues(self):
         with tempfile.TemporaryDirectory() as td:
@@ -891,10 +903,10 @@ class TestPrepare(unittest.TestCase):
                 extract=extract,
             )
             self.assertTrue(result["ok"])
-            self.assertEqual(result["defined_functions"], ["interpret"])
-            self.assertEqual(len(result["failed_units"]), 1)
-            self.assertEqual(result["failed_units"][0]["source"], "bad.c")
-            self.assertIn("unistd.h", result["failed_units"][0]["stderr"])
+            self.assertEqual(result["artifacts"][0]["defined_functions"], ["interpret"])
+            self.assertEqual(len(result["failed"]), 1)
+            self.assertEqual(result["failed"][0]["source"], "bad.c")
+            self.assertIn("unistd.h", result["failed"][0]["stderr"])
 
     def test_prepare_timeout_rejects_bool_and_fractional(self):
         with self.assertRaises(gbr.BuildError) as ctx:
@@ -1362,8 +1374,17 @@ class TestFrameworkHarvest(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["dry_run"])
+        self.assertEqual(result["status"], "would_execute")
+        self.assertEqual(result["mode"], "framework")
         self.assertEqual(result["command"][0][0], "cmake")
-        self.assertIn("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o", result["harvest"])
+        names = [Path(a["path"]).name for a in result["artifacts"]]
+        self.assertIn("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-Os-pico.o", names)
+        self.assertEqual(
+            {a["library"] for a in result["artifacts"]},
+            {"hardware_i2c", "pico_stdlib"},
+        )
+        self.assertEqual(result["failed"], [])
+        self.assertNotIn("harvest", result)
 
     def test_zero_harvest_refuses_and_names_elf(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1493,6 +1514,9 @@ class TestFrameworkHarvest(unittest.TestCase):
                 extract=extract,
             )
             self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["mode"], "framework")
+            self.assertEqual(result["failed"], [])
             libs = {a["library"] for a in result["artifacts"]}
             self.assertEqual({"hardware_i2c", "pico_stdlib", "tinyusb"}, libs)
             names = {Path(a["path"]).name for a in result["artifacts"]}
@@ -1526,6 +1550,80 @@ class TestFrameworkHarvest(unittest.TestCase):
                 )
                 self.assertEqual(meta["artifact"], path.name)
                 self.assertEqual(meta["debug_path_prefix"], "/ref/pico-sdk")
+
+    def test_failed_harvest_removes_written_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "uploads"
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                (dest_dir / "pico_sdk_init.cmake").write_text("# stub\n")
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    if "clone" in argv:
+                        Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    if "show-ref" in argv and "refs/tags/" in argv[-1]:
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    if "show-ref" in argv:
+                        return subprocess.CompletedProcess(argv, 1, "", "")
+                    if "rev-parse" in argv:
+                        return subprocess.CompletedProcess(argv, 0, "abc123\n", "")
+                    if "log" in argv:
+                        return subprocess.CompletedProcess(argv, 0, "1\n", "")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "cmake" and "--build" in argv:
+                    build_dir = Path(argv[argv.index("--build") + 1])
+                    _write(
+                        build_dir / "CMakeFiles/ghidra_stub.dir/src/rp2_common/hardware_i2c/i2c.c.o",
+                        _arm_elf32(),
+                    )
+                    _write(
+                        build_dir / "CMakeFiles/ghidra_stub.dir/src/common/pico_stdlib/stdlib.c.o",
+                        _arm_elf32(),
+                    )
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "cmake":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-nm":
+                    obj = argv[-1]
+                    if "i2c" in obj:
+                        return subprocess.CompletedProcess(
+                            argv, 0, "00000000 T hardware_i2c_init\n", ""
+                        )
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-gcc" and "--version" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "gcc 13.2.1\n", "")
+                if argv[0] == "arm-none-eabi-ld":
+                    Path(argv[argv.index("-o") + 1]).write_bytes(_arm_elf32())
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.handle_request(
+                    {
+                        "mode": "framework",
+                        "name": "pico-sdk",
+                        "repo": "https://github.com/raspberrypi/pico-sdk.git",
+                        "ref": "2.1.0",
+                        "framework": "pico-sdk",
+                        "libraries": ["hardware_i2c", "pico_stdlib"],
+                        "board": "pico",
+                        "toolchain": "gcc13-arm",
+                        "opt": "-Os",
+                        "cc": "arm-none-eabi-gcc",
+                        "ld": "arm-none-eabi-ld",
+                        "nm": "arm-none-eabi-nm",
+                        "output_dir": str(dest),
+                    },
+                    run=run,
+                    src_cache=Path(td) / "src",
+                    extract=extract,
+                )
+            self.assertEqual(ctx.exception.status, "zero_functions")
+            leftovers = list(dest.glob("pico-sdk-*")) if dest.is_dir() else []
+            self.assertEqual(leftovers, [], leftovers)
 
     def test_combine_identical_inputs_same_sha256(self):
         with tempfile.TemporaryDirectory() as td:
