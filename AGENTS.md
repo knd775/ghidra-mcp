@@ -191,7 +191,9 @@ Find the file(s) you edited; run everything in that row. Unit + Offline is the f
 
 ### Reference builder invariants
 
-- `dry_run=true` must not `POST /build` (no clone, no compile). It does `GET /health`, and that list is what unknown names quote.
+- `dry_run=true` must not `POST /build` (no clone, no compile). It does `GET /health`, and that list is what unknown names quote. Both modes return one envelope (`artifacts` array; sources emits one entry). `dry_run` uses that envelope with `status: "would_execute"` and expected paths.
+- A failed harvest must delete objects (and sidecars) it already wrote so `build_manifest` cannot treat an unreported build as cached.
+- `force=true` deletes this spec's expected objects and sidecars, then rebuilds. It is how an unreported or sidecar-matching previous build is overwritten. `dry_run` plus `force` lists `would_replace` and deletes nothing. `build_manifest(force=true)` bypasses the sidecar skip.
 - `docker/references.yaml` expands to eighteen littlefs jobs, twelve pico-sdk framework jobs (gcc10-arm/gcc12-arm/gcc13-arm across opt levels and boards), and two frotz 2.54 sources jobs (gcc13-arm × `-O2`/`-Os`) and names `postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`). `docker/references.userland.yaml` is a separate 24-job x86-64 corpus pointing at the same database.
 - `mode=framework` harvests build-tree objects, never the linked ELF.
 - `mode=sources` accepts `prepare` (operator-supplied shell command in the cloned tree before compile; never read from the repo). Frotz uses `make src/common/defs.h src/common/hash.h`. Rejected in `mode=framework`.

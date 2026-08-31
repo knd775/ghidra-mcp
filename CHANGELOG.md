@@ -6,6 +6,30 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### `build_reference` / `build_manifest` `force` flag
+
+`force=true` deletes this spec's existing objects and sidecars, then
+rebuilds. That is how an unreported framework build (or any sidecar that
+still matches) is overwritten instead of treated as cache.
+`build_manifest` skips matching sidecars unless `force` is set.
+`dry_run` plus `force` lists `would_replace` and deletes nothing.
+
+### `build_reference` one envelope for sources and framework
+
+Framework mode used to return a different object than sources (a list of
+harvested libraries vs a single `path` / `sha256` / `function_count`).
+MCP clients that cached an `outputSchema` from the sources shape then
+discarded the framework response — including `dry_run`, which never
+reached the builder. Both modes now return
+
+`{status, mode, name, ref, commit_sha, toolchain, cc_version, framework,
+board, artifacts, failed, command}`. Sources emits a one-element
+`artifacts` array. `dry_run` uses the same envelope with
+`status: "would_execute"` and expected paths; it still compiles nothing.
+A harvest that fails after writing some objects deletes those objects
+and their sidecars so `build_manifest` cannot treat an unreported build
+as cached.
+
 ### `build_reference` `prepare` step (sources mode)
 
 Libraries whose build generates a header no longer need a framework stub.
@@ -20,7 +44,7 @@ Frotz 2.54 is now an ordinary ARM corpus entry: `make src/common/defs.h
 src/common/hash.h` plus the interpreter-core sources under `src/common/`,
 compiled with `-std=gnu11` so `typedef int bool` is legal (host GCC 15
 defaults to C23 and rejects it). Units that fail to cross-compile are
-named in `failed_units` and the build still succeeds if anything compiled.
+named in `failed` and the build still succeeds if anything compiled.
 
 Existing framework stubs were checked against this. None collapsed.
 `pico-sdk` stays: its sources follow from the libraries the stub links.
