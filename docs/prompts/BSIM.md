@@ -186,12 +186,10 @@ Jobs whose artifact exists and whose sidecar sha256 still matches are
 skipped. Delete the sidecar to force a rebuild. One shared `wait_seconds`
 covers the matrix; leftovers are tickets. Userland:
 `path="references.userland.yaml"` (mounted at
-`/data/references.userland.yaml`). That file's `database:` field is
-`postgresql://ghidra-bsim:5432/userland` (`medium_nosize`). Do not ingest
-x86-64 into `embedded` (ARM). The two databases share one
-PostgreSQL instance; both use `medium_nosize`. The split is corpus
-domain, not pointer size. Mixing architectures is harmless; native
-x86-64 references cannot substitute for ARM ones.
+`/data/references.userland.yaml`). Both manifests ingest into
+`postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`). ARM and x86-64
+share that database so cross-arch matches are queryable.
+`bsim_query(arch=...)` constrains when you want same-arch only.
 
 DWARF paths are `/ref/<name>/...`. In Ghidra, one Source Files transform
 covers the corpus: `/ref/` -> `<local checkout root>/`. Sidecars record
@@ -225,9 +223,9 @@ bsim_create_db(db_url, config_template="medium_nosize", name=None, description=N
                callgraph=True, wait_seconds=45)
 ```
 
-`postgresql://ghidra-bsim:5432/embedded` (ARM, `medium_nosize`) and
-`.../userland` (x86-64, `medium_nosize`) are the compose databases. GUI
-clients on the VPN use `postgresql://<BIND_ADDR>:5432/<name>` with
+`postgresql://ghidra-bsim:5432/bsim` (`medium_nosize`) is the compose
+database. ARM firmware and x86-64 userland share it. GUI clients on the
+VPN use `postgresql://<BIND_ADDR>:5432/bsim` with
 `BSIM_DB_USER` / `BSIM_DB_PASSWORD`. `file:` H2 URLs remain for leftover
 local files. Network URLs must be on
 `GHIDRA_MCP_BSIM_URLS` (fail-closed). `medium_nosize` is the template for
@@ -401,19 +399,18 @@ call abandoned by an upstream gateway still leaves evidence in the
 
 ## Deployment
 
-PostgreSQL, one instance, two databases. H2 `file:` URLs cannot be opened
-from a Ghidra GUI on another machine; the interactive search dialog needs
-a network service. A stock `postgres` image will not work — BSim's schema
-needs the `lshvector` C extension (image `ghidra-mcp-bsim`, sources
-pinned in `docker/bsim/lshvector.lock` to Ghidra 12.1.2). Do not use
-`support/bsim_ctl`. SSL is mandatory: Ghidra refuses a non-SSL connection.
-The service is on `BIND_ADDR:5432` (VPN/LAN, same posture as Ghidra
-Server RMI) and on the compose network as `ghidra-bsim`. It is not on
-the Cloudflare tunnel.
+PostgreSQL, one instance, one database (`bsim`). H2 `file:` URLs cannot
+be opened from a Ghidra GUI on another machine; the interactive search
+dialog needs a network service. A stock `postgres` image will not work —
+BSim's schema needs the `lshvector` C extension (image `ghidra-mcp-bsim`,
+sources pinned in `docker/bsim/lshvector.lock` to Ghidra 12.1.2). Do not
+use `support/bsim_ctl`. SSL is mandatory: Ghidra refuses a non-SSL
+connection. The service is on `BIND_ADDR:5432` (VPN/LAN, same posture as
+Ghidra Server RMI) and on the compose network as `ghidra-bsim`. It is
+not on the Cloudflare tunnel.
 
 ```
-postgresql://<BIND_ADDR>:5432/embedded   # medium_nosize, ARM firmware
-postgresql://<BIND_ADDR>:5432/userland   # medium_nosize, x86-64 Linux
+postgresql://<BIND_ADDR>:5432/bsim   # medium_nosize, ARM and x86-64
 ```
 
 Login is `BSIM_DB_USER` / `BSIM_DB_PASSWORD` in `docker/.env`. Not the
@@ -422,8 +419,8 @@ Ghidra Server account. `GHIDRA_MCP_BSIM_URLS` is the allowlist; a
 connection. Passwords stay in the environment, never in the URL.
 
 `GHIDRA_MCP_BSIM_ROOT=/srv/ghidra/bsim` still confines leftover `file:`
-URLs and holds template sidecars. `bsim-backup` runs `pg_dump` of both
-databases and tars `ghidra-repos`.
+URLs and holds template sidecars. `bsim-backup` runs `pg_dump` of every
+user database and tars `ghidra-repos`.
 
 Migration (stand up → `bsim_create_db` → re-ingest artifacts →
 `bsim_list_corpus` → retire H2): `docker/bsim/MIGRATION.md`. Do not

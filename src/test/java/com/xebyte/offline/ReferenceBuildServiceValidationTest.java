@@ -441,6 +441,8 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         long boards = pico.stream().map(ReferenceBuild.Spec::board).distinct().count();
         assertEquals(2, boards);
         assertFalse("DWARF is the default", littlefs.get(0).stripDebug());
+        assertEquals("postgresql://ghidra-bsim:5432/bsim",
+                ReferenceManifest.databaseUrl(Files.readString(manifest)));
     }
 
     public void testUserlandManifestExpandsSeparately() throws Exception {
@@ -449,7 +451,7 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         List<ReferenceBuild.Spec> jobs = ReferenceManifest.load(
                 manifest, List.of("gcc13-x86_64"));
         assertEquals(24, jobs.size());
-        assertEquals("postgresql://ghidra-bsim:5432/userland",
+        assertEquals("postgresql://ghidra-bsim:5432/bsim",
                 ReferenceManifest.databaseUrl(Files.readString(manifest)));
         assertTrue(jobs.stream().allMatch(s -> "gcc13-x86_64".equals(s.toolchain())));
         assertTrue(jobs.stream().noneMatch(ReferenceBuild.Spec::stripDebug));

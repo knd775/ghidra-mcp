@@ -41,12 +41,12 @@ with Ghidra's `lshvector` C extension (`ghcr.io/<owner>/ghidra-mcp-bsim`,
 `docker/Dockerfile.bsim`; sources fetched from the Ghidra 12.1.2 tag and
 blob-checked against `docker/bsim/lshvector.lock`). Do not use
 `support/bsim_ctl`. SSL is on (`hostnossl reject`); Ghidra refuses a
-non-SSL connection. Two databases on the one instance: `embedded`
-(`medium_nosize`, ARM) and `userland` (`medium_nosize`, x86-64) — corpus
-domains, not a pointer-size split. `medium_nosize` beat `medium_32` under
+non-SSL connection. One database on the instance: `bsim`
+(`medium_nosize`). ARM firmware and x86-64 userland share it so
+cross-arch matches are queryable; `bsim_query(arch=...)` constrains when
+you want same-arch only. `medium_nosize` beat `medium_32` under
 compiler and optimisation drift and gave up nothing on identical builds.
-Mixing architectures in one database is harmless; native x86-64 references
-still cannot substitute for ARM ones. Published on
+Published on
 `BIND_ADDR:5432` (VPN/LAN, same posture as Ghidra Server RMI), never the
 Cloudflare tunnel. `GHIDRA_MCP_BSIM_URLS` is a fail-closed allowlist of
 host plus database; a password in `db_url` is rejected. Credentials are
@@ -54,7 +54,7 @@ host plus database; a password in `db_url` is rejected. Credentials are
 `.env`), not the Ghidra Server login. Dual ingest (`ghidra://` +
 `postgresql://`) feeds both passwords on stdin. Query's helper JVM is
 stock Ghidra — `BSim_McpQuery` reads the BSim password from the
-environment. `bsim-backup` `pg_dump`s both databases and tars
+environment. `bsim-backup` `pg_dump`s every user database and tars
 `ghidra-repos`. Migration is re-ingest, not H2 conversion:
 `docker/bsim/MIGRATION.md`. Operator guide: `docs/prompts/BSIM.md`.
 
@@ -93,8 +93,8 @@ would keep only what the stub's `main.c` referenced). Compile keeps DWARF
 (`-g`; `strip_debug` defaults false). Recorded paths use `/ref/<name>/...`
 via `-fdebug-prefix-map`; sidecars include `debug_path_prefix`. x86-64
 userland (musl, glibc, zlib, OpenSSL, libsodium, SQLite) lives in
-`docker/references.userland.yaml` and ingests into a separate `medium_nosize`
-database (`postgresql://ghidra-bsim:5432/userland`). `bsim_list_databases`
+`docker/references.userland.yaml` and ingests into the same `medium_nosize`
+database (`postgresql://ghidra-bsim:5432/bsim`). `bsim_list_databases`
 lists allowlisted PostgreSQL URLs and leftover H2 files. `source_read` returns a numbered span from
 the builder source cache, resolved by function (DWARF) or path.
 

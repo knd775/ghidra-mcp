@@ -1,22 +1,21 @@
 # GUI / MCP BSim access (PostgreSQL, not Ghidra Server)
 #
-#   URL (VPN/LAN):  postgresql://<BIND_ADDR>:5432/embedded
-#   URL (compose):  postgresql://ghidra-bsim:5432/embedded
+#   URL (VPN/LAN):  postgresql://<BIND_ADDR>:5432/bsim
+#   URL (compose):  postgresql://ghidra-bsim:5432/bsim
 #   Template:       medium_nosize — every database, unconditionally.
 #                   medium_nosize beat medium_32 under compiler and
 #                   optimisation drift and gave up nothing on identical
-#                   builds. Mixing ARM with x86-64 in one database is
-#                   harmless; keep this file ARM because native x86-64
-#                   references cannot substitute for ARM ones. Use
+#                   builds. ARM firmware and x86-64 userland share this
+#                   database so cross-arch matches are queryable. Use
 #                   bsim_query(arch=...) to constrain.
 #   Login:          BSIM_DB_USER / BSIM_DB_PASSWORD in docker/.env
 #                   These are not the Ghidra Server account.
 #
-# The database is derived from this file and should be rebuildable from
-# scratch: build_manifest → import_file → bsim_ingest. Do not convert H2
-# files; re-ingest the artifacts already on /data.
+# The database is derived from the manifests and should be rebuildable
+# from scratch: build_manifest → import_file → bsim_ingest. Do not
+# convert H2 files; re-ingest the artifacts already on /data.
 
-database: postgresql://ghidra-bsim:5432/embedded
+database: postgresql://ghidra-bsim:5432/bsim
 config_template: medium_nosize
 
 # One entry expands through its matrix. littlefs × {gcc10-arm,gcc12-arm,
@@ -37,8 +36,8 @@ config_template: medium_nosize
 #
 # littlefs × 3 toolchains × 3 opt = 9. pico-sdk × 3 toolchains × 2 opt ×
 # 2 boards = 12. build_manifest skips jobs whose outputs already exist.
-# x86-64 userland lives in docker/references.userland.yaml (also medium_nosize;
-# the split is corpus domain, not pointer size).
+# x86-64 userland lives in docker/references.userland.yaml (same
+# database, different build matrix).
 
 references:
   - name: littlefs
