@@ -337,6 +337,28 @@ public class BSimCliParserTest extends TestCase {
                 src.contains("\\\"score\\\":") || src.contains("\"score\":"));
     }
 
+    public void testExtractScriptResourceMatchesGhidraScriptsCopy() throws Exception {
+        byte[] resource = BSimService.class.getResourceAsStream("/bsim/BSim_McpExtract.java").readAllBytes();
+        Path copy = Path.of("ghidra_scripts", "BSim_McpExtract.java");
+        assertTrue("ghidra_scripts/BSim_McpExtract.java missing", Files.isRegularFile(copy));
+        assertEquals(new String(resource, StandardCharsets.UTF_8),
+                Files.readString(copy));
+        String src = new String(resource, StandardCharsets.UTF_8);
+        assertTrue(src.contains("CAP = 64"));
+        assertTrue(src.contains("getCalledFunctions"));
+        assertTrue(src.contains("0x"));
+        assertFalse("extract must not walk into callees",
+                src.contains("getCalledFunctions") && src.contains("getInstructions(callee"));
+        assertFalse(src.contains("\"score\":"));
+    }
+
+    public void testJdbcUrlUsesSslRequireAndNoPassword() {
+        BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        String jdbc = BSimUrls.toJdbcUrl("postgresql://ghidra-bsim:5432/embedded");
+        assertEquals("jdbc:postgresql://ghidra-bsim:5432/embedded?sslmode=require", jdbc);
+        assertEquals("bsim", BSimUrls.postgresUser("postgresql://bsim@ghidra-bsim:5432/embedded"));
+    }
+
     public void testSimilarityThresholdWarningFiresAboveHalf() {
         assertNull(BSimMatches.similarityThresholdWarning(0.0));
         assertNull(BSimMatches.similarityThresholdWarning(0.5));

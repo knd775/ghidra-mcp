@@ -131,6 +131,11 @@ public class BSimCli {
 
     public Result analyzeHeadless(Duration timeout, List<String> args)
             throws IOException, InterruptedException {
+        return analyzeHeadless(timeout, args, stdinForBsimArgs(args));
+    }
+
+    public Result analyzeHeadless(Duration timeout, List<String> args, String stdinData)
+            throws IOException, InterruptedException {
         File bin = analyzeHeadlessBinary();
         if (bin == null || !bin.isFile()) {
             throw new IOException(missingToolMessage("analyzeHeadless"));
@@ -138,7 +143,7 @@ public class BSimCli {
         List<String> cmd = new ArrayList<>();
         cmd.add(bin.getAbsolutePath());
         cmd.addAll(args);
-        return runner.run(cmd, timeout, null);
+        return runner.run(cmd, timeout, stdinData);
     }
 
     private File supportTool(String name) {

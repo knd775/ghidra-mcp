@@ -28,6 +28,15 @@ degrade results, so ingest refuses it.
 Templates are fixed at `createdatabase` time. Querying the wrong *domain*
 returns low-confidence cross-architecture hits, not a broken tool.
 
+Corroboration evidence (`constants`, strings, direct callees) lives in
+schema `corroboration` in the same database. `bsim createdatabase` does
+not create or drop it. `pg_dump` of `embedded` / `userland` includes it.
+Existing corpus rows ingested before this feature have no extract; a
+lookup is `no_evidence`, not an error. Re-ingest of the same MD5 is
+refused by BSim, so backfill is: open the program and call `bsim_ingest`
+again (the skip path still writes corroboration), or start a fresh
+database before the corpus grows.
+
 Same URLs in Window → BSim → Manage Servers (or the search dialog) as
 the MCP tools use. SSL is required; Ghidra hard-codes `sslmode=require`.
 A self-signed cert is enough **unless** `ghidra.cacerts` is already set

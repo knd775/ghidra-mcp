@@ -176,6 +176,57 @@ def test_apply_dry_run_does_not_rename(http_client, fixture_dir):
     assert before.text == after.text
 
 
+def test_corroborate_match_does_not_require_a_reference_program(http_client, fixture_dir):
+    """Acceptance: evidence comes from the corpus; only the query program is open."""
+    spec_path = fixture_dir / "corroboration.json"
+    if not spec_path.is_file():
+        pytest.skip("optional corroboration.json not in GHIDRA_BSIM_FIXTURE")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    data = _post(
+        http_client,
+        "/corroborate_match",
+        {
+            "db_url": _db_url(fixture_dir),
+            "function": spec["function"],
+            "ref_executable": spec["ref_executable"],
+            "ref_function": spec["ref_function"],
+            "string_normalisation": spec.get("string_normalisation", "auto"),
+        },
+    )
+    assert "score" not in data, data
+    assert "corroboration_score" not in data, data
+    if data.get("status") == "no_evidence":
+        assert data.get("reason") in {"not_extracted", "unsupported_backend"}
+        return
+    assert "shared_constants" in data, data
+    assert "shared_strings" in data, data
+    assert "notes" in data, data
+
+
+def test_query_corroborate_preserves_match_order(http_client, fixture_dir):
+    spec = json.loads((fixture_dir / "distinctive.json").read_text(encoding="utf-8"))
+    plain = _post(
+        http_client,
+        "/bsim_query",
+        {"db_url": _db_url(fixture_dir), "function": spec["function"], "max_matches": 5},
+    )
+    corroborated = _post(
+        http_client,
+        "/bsim_query",
+        {
+            "db_url": _db_url(fixture_dir),
+            "function": spec["function"],
+            "max_matches": 5,
+            "corroborate": True,
+            "corroborate_max_candidates": 3,
+        },
+    )
+    names = [m.get("name") for m in (plain.get("matches") or [])]
+    names2 = [m.get("name") for m in (corroborated.get("matches") or [])]
+    assert names == names2, (names, names2)
+    assert "score" not in json.dumps(corroborated)
+
+
 def test_apply_without_min_confidence_is_an_error(http_client, fixture_dir):
     response = http_client.post(
         "/bsim_apply_matches",

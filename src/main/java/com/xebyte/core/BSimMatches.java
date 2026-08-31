@@ -125,6 +125,27 @@ public final class BSimMatches {
         }
     }
 
+    /**
+     * Opt-in corroboration attaches evidence to results that BSim cannot
+     * settle: ambiguous, unidentifiable, or a best hit still under this
+     * ceiling. High-confidence unique hits are left alone. The ceiling sits
+     * above the default query floor (10) so a 12-confidence stub still gets
+     * constants checked, while a 40+ library function does not.
+     */
+    public static final double CORROBORATE_BELOW_CONFIDENCE = 20.0;
+
+    public static boolean needsCorroboration(FunctionResult fr) {
+        return needsCorroboration(fr, CORROBORATE_BELOW_CONFIDENCE);
+    }
+
+    public static boolean needsCorroboration(FunctionResult fr, double belowConfidence) {
+        if (fr == null) return false;
+        if (!fr.identifiable) return true;
+        if (fr.ambiguous) return true;
+        Hit best = fr.best();
+        return best != null && best.confidence < belowConfidence;
+    }
+
     private BSimMatches() {}
 
     public static String similarityThresholdWarning(double similarity) {
