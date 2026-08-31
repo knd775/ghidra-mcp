@@ -143,7 +143,7 @@ TYPE: char[6] (6 bytes) - Null-terminated ASCII string
 VALUE: "VIDEO" (0x56 0x49 0x44 0x45 0x4F 0x00)
 
 PURPOSE:
-INI section name used to read video configuration settings from D2Server.ini file.
+INI section name used to read video configuration settings from the server INI file.
 Passed to GetPrivateProfileIntA/GetPrivateProfileStringA for retrieving video-related
 configuration keys from the VIDEO section.
 
@@ -327,7 +327,7 @@ apply_function_documentation(
 ```python
 # Build index from documented functions across programs
 build_function_hash_index(
-    programs=["D2Client.dll 1.07", "D2Client.dll 1.08"],
+    programs=["example.dll 1.0", "example.dll 1.1"],
     filter="documented",
     index_file="function_hash_index.json"
 )
@@ -339,7 +339,7 @@ matches = lookup_function_by_hash(hash="abc123...")
 # Propagate documentation to all matching functions
 propagate_documentation(
     source_address="0x6FAB1234",
-    target_programs=["D2Client.dll 1.08", "D2Client.dll 1.09"],
+    target_programs=["example.dll 1.1", "example.dll 1.2"],
     dry_run=True  # Preview changes without applying
 )
 ```

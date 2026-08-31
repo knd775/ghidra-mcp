@@ -32,7 +32,7 @@ public class FunctionServiceClassMembersTest extends TestCase {
     }
 
     public void testDegradesGracefullyWithNoProgram() {
-        Response r = functions.listClassMembers("UnitAny", 0, 200, "");
+        Response r = functions.listClassMembers("PacketHeader", 0, 200, "");
         assertNotNull(r);
         assertTrue("expected 'No program loaded', got: " + r.toJson(),
                 r.toJson().contains("No program loaded"));

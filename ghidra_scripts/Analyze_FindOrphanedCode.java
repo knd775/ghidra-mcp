@@ -6,9 +6,8 @@
 // Output: Creates functions at discovered code locations with triage comments.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Discover orphaned code and create functions automatically
-// @menupath Diablo 2.Analysis.Find Orphaned Code
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.*;

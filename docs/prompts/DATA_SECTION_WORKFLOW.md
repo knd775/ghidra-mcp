@@ -17,7 +17,7 @@ Targeted pass for .data/.rdata: enumerate, type, rename, and document globals an
 ### 2) Type First, Then Name
 - Apply data types before renaming: apply_data_type (or create_struct when needed)
 - For pointers/tables: follow pointer chains; type both the pointer and the target; set correct stride for arrays
-- For function pointers/import tables: resolve ordinals using docs/KNOWN_ORDINALS.md; set function pointer types where possible
+- For function pointers/import tables: resolve ordinals against the exporting module's export list; set function pointer types where possible
 
 ### 3) Structs and Ownership
 - When globals point to structured data: infer layout from usage (xrefs, offsets, stride) or create_struct
@@ -33,7 +33,7 @@ Targeted pass for .data/.rdata: enumerate, type, rename, and document globals an
 
 ### 5) Inline Context and Comments
 - Add concise inline comments where globals are heavily used to explain key fields, invariants, or role
-- For function-pointer tables or ordinals, add brief purpose comments (e.g., /* D2Common.GetUnitStat */)
+- For function-pointer tables or ordinals, add brief purpose comments (e.g., /* example.GetConfigValue */)
 
 ### 6) Validation Pass
 - get_xrefs_to each renamed symbol to confirm usage matches type (stride, deref width, const-ness)

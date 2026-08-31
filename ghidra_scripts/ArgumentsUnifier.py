@@ -8,10 +8,9 @@
 #Ensures consistent type sizes regardless of platform or compiler settings.
 #
 #@author Ben Ethington
-#@category Diablo 2
+#@category Utility
 #@description Standardizes function parameter and return types to fixed-width equivalents (int32_t, uint16_t, etc.)
 #@keybinding
-#@menupath Diablo II.Arguments Unifier
 
 import json
 

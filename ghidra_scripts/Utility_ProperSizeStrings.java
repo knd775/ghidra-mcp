@@ -6,9 +6,8 @@
 // Output: Resizes all string definitions to their proper length.
 //
 // @author Ben Ethington
-// @category Diablo 2.Utility
+// @category Utility
 // @description Resize string data types to include null terminators
-// @menupath Diablo 2.Utility.Proper Size Strings
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;

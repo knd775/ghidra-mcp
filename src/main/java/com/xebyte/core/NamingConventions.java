@@ -45,13 +45,13 @@ public final class NamingConventions {
     );
 
     private static final Pattern PASCAL_CASE = Pattern.compile("^[A-Z][a-zA-Z0-9]+$");
-    // Digits are allowed after the first letter so D2-era prefixes are actually
-    // recognised. The original `^[A-Z]+_[A-Z].*` could not match `PD2_`,
-    // `PD2EXT_` or `D2CLIENT_`: `[A-Z]+` stops at the digit, so the whole name
-    // was treated as having NO module prefix -- which then failed the
-    // PascalCase check on the full string and emitted "contains underscores.
-    // Use PascalCase after the module prefix" for names that were already
-    // correct. Every `PD2_*` function in ProjectDiablo.dll was affected.
+    // Digits are allowed after the first letter so digit-bearing prefixes are
+    // actually recognised. The original `^[A-Z]+_[A-Z].*` could not match
+    // `MOD2_`, `MOD2EXT_` or `MOD2CLIENT_`: `[A-Z]+` stops at the digit, so the
+    // whole name was treated as having NO module prefix -- which then failed
+    // the PascalCase check on the full string and emitted "contains
+    // underscores. Use PascalCase after the module prefix" for names that were
+    // already correct. Every `MOD2_*`-style function in a corpus DLL was affected.
     private static final Pattern MODULE_PREFIX = Pattern.compile("^[A-Z][A-Z0-9]*_[A-Z].*");
     // Built-in minimum function-name length; the active value flows through
     // ConventionConfig.FunctionNamingRules.minLength() so projects can override.
@@ -485,8 +485,8 @@ public final class NamingConventions {
      * byte-identical everywhere — one such name spreads corpus-wide. Measured
      * before this gate existed: 143 FID-identified functions had been renamed
      * this way, including {@code ___acrt_locale_free_numeric} to
-     * {@code DATATBLS_FreeUnitResourceArray}, a name asserting D2 units and
-     * resource arrays that appear nowhere in that function.
+     * {@code DATATBLS_FreeUnitResourceArray}, a name asserting domain objects
+     * and resource arrays that appear nowhere in that function.
      *
      * Demangling a mangled FID name is an improvement, not an override, so a
      * FID name starting with '?' never triggers this.
@@ -872,13 +872,13 @@ public final class NamingConventions {
      * cosmetic. {@code audit_global} reported ZERO issues and
      * {@code fully_documented: true} for a bare {@code pointer *}, so the
      * globals worker filed it as `already_clean` and wrote it into the clean
-     * cache — while fun-doc's own type validator (d2moo_types.PLACEHOLDERS)
-     * counted the same global as untyped on the dashboard's types bar. The bar
-     * therefore demanded an action that structurally could not change its own
-     * count: measured on PD2_EXT.dll (2 of the 5 it flagged) and ~180 globals
-     * corpus-wide. Two oracles for one question is the bug; this method is the
-     * single Java-side answer, and d2moo_types.PLACEHOLDERS is its Python twin.
-     * Keep the two sets in step.
+     * cache — while the doc pipeline's own type validator (its Python
+     * PLACEHOLDERS set) counted the same global as untyped on the dashboard's
+     * types bar. The bar therefore demanded an action that structurally could
+     * not change its own count: measured on a corpus DLL (2 of the 5 it
+     * flagged) and ~180 globals corpus-wide. Two oracles for one question is
+     * the bug; this method is the single Java-side answer, and the Python
+     * PLACEHOLDERS set is its twin. Keep the two sets in step.
      *
      * Decoration is stripped first: {@code getName()} on a pointer-to-pointer
      * returns {@code "pointer *"}, and an array of placeholders returns
@@ -896,7 +896,7 @@ public final class NamingConventions {
      * refused rather than performed quietly.
      *
      * The distinction earned its keep on 2026-08-03. {@code set_global} cleared
-     * its whole extent with the exception swallowed, so in one PD2_EXT.dll pass:
+     * its whole extent with the exception swallowed, so in one corpus DLL pass:
      * a `float10` at 0x10012e18 swallowed `g_dwPosInfBits` at 0x10012e20; a
      * `byte[256]` at 0x10015179 swallowed `g_abUppercaseCharTbl2_end`; and three
      * 4-byte slot writes destroyed the 32-slot `g_apfnApiSlots` array they sat
@@ -912,13 +912,13 @@ public final class NamingConventions {
      * An export that arrived with a real name in the export name table is a
      * public ABI contract: `GetFileVersionInfoA`, `NvOptimusEnablement`. The
      * consuming loader resolves against that exact string, so renaming it to
-     * `g_` + Hungarian form destroys the symbol's identity — measured on
-     * PD2_EXT.dll (a `version.dll` proxy) where a globals pass renamed all 12
+     * `g_` + Hungarian form destroys the symbol's identity — measured on a
+     * corpus DLL (a `version.dll` proxy) where a globals pass renamed all 12
      * forwarder exports, one of them to a name for the wrong export entirely.
      *
      * An ordinal-only export is the opposite: `Ordinal_10001` carries no
-     * identity worth keeping, and renaming it is the core of this project's D2
-     * workflow, since D2's own DLLs export almost everything by ordinal. A
+     * identity worth keeping, and renaming it is the core of this project's
+     * workflow, since many corpus DLLs export almost everything by ordinal. A
      * blanket "exports are untouchable" rule would break that outright.
      */
     public static boolean isOrdinalExportName(String name) {
@@ -1050,8 +1050,8 @@ public final class NamingConventions {
     /**
      * Does a plate's stated count contradict the applied type's real extent?
      *
-     * CALIBRATED against 6,434 live globals across PD2_EXT / D2Common /
-     * D2Client / Fog, because this is a MEDIUM issue — it blocks
+     * CALIBRATED against 6,434 live globals across four corpus DLLs,
+     * because this is a MEDIUM issue — it blocks
      * `fully_documented` and pulls the worker back to the global, so the
      * project's guard-first rule applies: a false accusation costs more than a
      * miss. The first cut fired on 153 globals and hand-review put roughly 40%

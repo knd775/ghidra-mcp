@@ -6,9 +6,8 @@
 // Output: Checks in all modified files to the version control server.
 //
 // @author Ben Ethington
-// @category Diablo 2.Project
+// @category Project
 // @description Batch check in all files in a project folder
-// @menupath Diablo 2.Project.Batch Checkin Folder
 
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.model.*;

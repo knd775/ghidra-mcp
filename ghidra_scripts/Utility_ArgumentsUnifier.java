@@ -6,9 +6,8 @@
 // Output: Converts all parameter types to fixed-width equivalents.
 //
 // @author Ben Ethington
-// @category Diablo 2.Utility
+// @category Utility
 // @description Standardize parameters to fixed-width types
-// @menupath Diablo 2.Utility.Arguments Unifier
 
 import ghidra.app.script.GhidraScript;
 import ghidra.app.services.DataTypeManagerService;

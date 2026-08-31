@@ -6,9 +6,8 @@
 // Output: Console JSON summary of BSim matches per function.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Bulk query undocumented functions against a BSim database
-// @menupath Diablo 2.Analysis.BSim Bulk Query
 
 import java.net.URL;
 import java.util.ArrayList;

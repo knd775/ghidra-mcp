@@ -3,12 +3,11 @@
 // Exports all function names, addresses, and basic metadata to a simple JSON format suitable for anchor-based cross-version matching algorithms.
 //
 // Usage: Run from Script Manager on any program.
-// Output: JSON file at F:/D2VersionChanger/data/anchor/{program}.json.
+// Output: JSON file at C:/tmp/anchor/{program}.json.
 //
 // @author Ben Ethington
-// @category Diablo 2.Export
+// @category Export
 // @description Export all functions to JSON for anchor matching
-// @menupath Diablo 2.Export.Functions To JSON
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.*;
@@ -26,7 +25,7 @@ public class Export_FunctionsToJSON extends GhidraScript {
         String baseName = programName.replace(".dll", "").replace(".exe", "");
 
         // Output file path - save next to the program or in a known location
-        File outputDir = new File("F:/D2VersionChanger/data/anchor");
+        File outputDir = new File("C:/tmp/anchor");
         outputDir.mkdirs();
         File outputFile = new File(outputDir, programName + ".json");
 

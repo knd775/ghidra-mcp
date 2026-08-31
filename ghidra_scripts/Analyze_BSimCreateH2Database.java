@@ -6,9 +6,8 @@
 // Output: Creates H2 database file at the specified path.
 //
 // @author Ben Ethington
-// @category Diablo 2.Analysis
+// @category Analysis
 // @description Create an H2 file-based BSim database without GUI dialogs
-// @menupath Diablo 2.Analysis.BSim Create H2 Database
 
 import java.io.File;
 import java.io.IOException;
@@ -31,9 +30,9 @@ public class Analyze_BSimCreateH2Database extends GhidraScript {
         String[] args = getScriptArgs();
 
         // Parse args
-        String dbPath = "C:/tmp/bsim_diablo2";
+        String dbPath = "C:/tmp/bsim_db";
         String template = "medium_nosize";
-        String dbName = "Diablo2_BSim";
+        String dbName = "BSim_DB";
 
         if (args != null && args.length > 0 && !args[0].isEmpty()) {
             dbPath = args[0].trim();

@@ -149,7 +149,7 @@ public class ProjectMoveEndpointsOfflineTest extends TestCase {
         try {
             Response moved = (Response) svc.getClass()
                 .getMethod("moveFile", String.class, String.class)
-                .invoke(svc, "/Vanilla/1.00/D2Server.dll", "/Mods/PD2-S12");
+                .invoke(svc, "/folder/program.dll", "/folder/subfolder");
             assertTrue("move_file must fail closed with Response.Err when no project is open, got: "
                 + moved.toJson(), moved instanceof Response.Err);
 

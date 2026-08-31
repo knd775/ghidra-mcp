@@ -120,14 +120,14 @@ public class SecurityConfigCrossOriginTest extends TestCase {
     }
 
     public void testPathWithinScopeExactAndChild() {
-        assertTrue(SecurityConfig.pathWithinScope("/Mods/PD2-S12", "/Mods/PD2-S12"));
-        assertTrue(SecurityConfig.pathWithinScope("/Mods/PD2-S12/Bnclient.dll", "/Mods/PD2-S12"));
+        assertTrue(SecurityConfig.pathWithinScope("/folder/subfolder", "/folder/subfolder"));
+        assertTrue(SecurityConfig.pathWithinScope("/folder/subfolder/program.dll", "/folder/subfolder"));
     }
 
     public void testPathWithinScopeRejectsPrefixCollision() {
         // The whole point: a sibling that shares a string prefix must NOT match.
-        assertFalse(SecurityConfig.pathWithinScope("/Mods/PD2-S12-OTHER/x.dll", "/Mods/PD2-S12"));
-        assertFalse(SecurityConfig.pathWithinScope("/Vanilla/1.00/D2Common.dll", "/Mods/PD2-S12"));
+        assertFalse(SecurityConfig.pathWithinScope("/folder/subfolder-OTHER/x.dll", "/folder/subfolder"));
+        assertFalse(SecurityConfig.pathWithinScope("/other/1.00/program.dll", "/folder/subfolder"));
     }
 
     // ---- exceedsMaxBody (request-body cap) -------------------------------

@@ -156,12 +156,12 @@ class TestTcpPortScan(unittest.TestCase):
 
         FakeConn = self._make_fake_conn(
             {
-                8089: (200, json.dumps({"project": "Diablo2Mod"})),  # substring of "Diablo2"
-                8091: (200, json.dumps({"project": "Diablo2"})),  # exact match
+                8089: (200, json.dumps({"project": "MyRepoMod"})),  # substring of "MyRepo"
+                8091: (200, json.dumps({"project": "MyRepo"})),  # exact match
             }
         )
         with patch("http.client.HTTPConnection", FakeConn):
-            result = bridge._scan_tcp_for_project("Diablo2", start_port=8089, range_size=4, timeout=0.5)
+            result = bridge._scan_tcp_for_project("MyRepo", start_port=8089, range_size=4, timeout=0.5)
         self.assertEqual(result, "http://127.0.0.1:8091")
 
     def test_scan_unwraps_data_wrapper(self):
@@ -480,7 +480,7 @@ class TestConnectInstanceTcpFallback(unittest.TestCase):
             {
                 "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
                 "pid": 9020,
-                "project": "diablo2",
+                "project": "myrepo",
                 "url": "http://127.0.0.1:8089",
             }
         ]
@@ -498,13 +498,13 @@ class TestConnectInstanceTcpFallback(unittest.TestCase):
             bridge.state._full_schema = []
             bridge.state._loaded_groups.clear()
 
-            result = asyncio.run(bridge.connect_instance("diablo2"))
+            result = asyncio.run(bridge.connect_instance("myrepo"))
 
         data = json.loads(result)
         self.assertTrue(data["connected"])
         self.assertEqual(data["transport"], "tcp")
         self.assertEqual(data["url"], "http://127.0.0.1:8089")
-        self.assertEqual(bridge.state._connected_project, "diablo2")
+        self.assertEqual(bridge.state._connected_project, "myrepo")
         scan.assert_not_called()
 
     def test_windows_uds_match_without_url_falls_back_to_scan(self):
@@ -517,7 +517,7 @@ class TestConnectInstanceTcpFallback(unittest.TestCase):
             {
                 "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
                 "pid": 9020,
-                "project": "diablo2",
+                "project": "myrepo",
             }
         ]
 
@@ -534,13 +534,13 @@ class TestConnectInstanceTcpFallback(unittest.TestCase):
             bridge.state._full_schema = []
             bridge.state._loaded_groups.clear()
 
-            result = asyncio.run(bridge.connect_instance("diablo2"))
+            result = asyncio.run(bridge.connect_instance("myrepo"))
 
         data = json.loads(result)
         self.assertTrue(data["connected"])
         self.assertEqual(data["transport"], "tcp")
         self.assertEqual(data["url"], "http://127.0.0.1:8093")
-        scan.assert_called_once_with("diablo2")
+        scan.assert_called_once_with("myrepo")
 
 
 class TestAutoConnectWindowsTcp(unittest.TestCase):
@@ -563,7 +563,7 @@ class TestAutoConnectWindowsTcp(unittest.TestCase):
             {
                 "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
                 "pid": 9020,
-                "project": "diablo2",
+                "project": "myrepo",
                 "url": "http://127.0.0.1:8089",
             }
         ]
@@ -581,7 +581,7 @@ class TestAutoConnectWindowsTcp(unittest.TestCase):
 
         self.assertEqual(bridge.state._transport_mode, "tcp")
         self.assertEqual(bridge.state._active_tcp, "http://127.0.0.1:8089")
-        self.assertEqual(bridge.state._connected_project, "diablo2")
+        self.assertEqual(bridge.state._connected_project, "myrepo")
         self.assertIsNone(bridge.state._active_socket)
 
 
@@ -597,7 +597,7 @@ class TestTryReconnectTransportRouting(unittest.TestCase):
         bridge.state._active_socket = None
         bridge.state._active_tcp = None
         bridge.state._transport_mode = "none"
-        bridge.state._connected_project = "diablo2"
+        bridge.state._connected_project = "myrepo"
 
     def tearDown(self):
         import bridge_mcp_ghidra as bridge
@@ -611,7 +611,7 @@ class TestTryReconnectTransportRouting(unittest.TestCase):
         return {
             "socket": r"F:\tmp\ghidra-mcp-benam\ghidra-9020.sock",
             "pid": 9020,
-            "project": "diablo2",
+            "project": "myrepo",
             **extra,
         }
 
@@ -667,7 +667,7 @@ class TestTryReconnectTransportRouting(unittest.TestCase):
         previous = bridge.state.set_connection_snapshot(
             "tcp",
             active_tcp="http://127.0.0.1:8089",
-            connected_project="diablo2",
+            connected_project="myrepo",
         )
         bridge.state.set_connection_snapshot(
             "tcp",
@@ -1028,7 +1028,7 @@ class TestDiscoverInstancesWindowsTcpEnrichment(unittest.TestCase):
                 pid_alive: {
                     "url": "http://127.0.0.1:8089",
                     "pid": pid_alive,
-                    "project": "diablo2",
+                    "project": "myrepo",
                 }
             }
             with (
@@ -1060,7 +1060,7 @@ class TestDiscoverInstancesWindowsTcpEnrichment(unittest.TestCase):
                 instances = bridge.discover_instances()
 
         self.assertEqual(len(instances), 1)
-        self.assertEqual(instances[0]["project"], "diablo2")
+        self.assertEqual(instances[0]["project"], "myrepo")
         self.assertEqual(instances[0]["url"], "http://127.0.0.1:8089")
         self.assertEqual(instances[0]["pid"], pid_alive)
         uds_req.assert_not_called()
@@ -1089,7 +1089,7 @@ class TestDiscoverInstancesWindowsTcpEnrichment(unittest.TestCase):
                 patch.object(
                     bridge.transport,
                     "uds_request",
-                    return_value=(json.dumps({"project": "diablo2"}), 200),
+                    return_value=(json.dumps({"project": "myrepo"}), 200),
                 ),
                 patch.object(
                     bridge.discovery,
@@ -1104,7 +1104,7 @@ class TestDiscoverInstancesWindowsTcpEnrichment(unittest.TestCase):
                 instances = bridge.discover_instances()
 
         self.assertEqual(len(instances), 1)
-        self.assertEqual(instances[0]["project"], "diablo2")
+        self.assertEqual(instances[0]["project"], "myrepo")
         tcp_scan.assert_not_called()
 
     def test_unenriched_when_pid_not_in_tcp_scan(self):
@@ -1725,7 +1725,7 @@ class TestUnixHTTPConnection(unittest.TestCase):
 class TestDebuggerEnabled(unittest.TestCase):
     """_debugger_enabled gates the WinDbg debugger proxy tools.
 
-    The standalone debugger server (d2-game-exe repo) wraps dbgeng and only
+    The standalone debugger server wraps dbgeng and only
     runs on Windows, so a *local* debugger URL can never serve on a non-Windows
     host. Registration is gated accordingly to keep the tool list uncluttered.
     """

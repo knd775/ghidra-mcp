@@ -2,14 +2,13 @@
 #
 #This script reads an array of function pointers starting at the current address,
 #disassembles each target address, and creates a function at each location.
-#Useful for processing function pointer tables or vtables in Diablo 2.
+#Useful for processing function pointer tables or vtables.
 #Place cursor at the start of the array before running.
 #
 #@author Ben Ethington
-#@category Diablo 2
+#@category Utility
 #@description Creates functions at addresses stored in function pointer arrays and vtables
 #@keybinding
-#@menupath Diablo II.Create Functions From Array
 
 from ghidra.app.cmd.function import CreateFunctionCmd
 from ghidra.app.cmd.disassemble import DisassembleCommand

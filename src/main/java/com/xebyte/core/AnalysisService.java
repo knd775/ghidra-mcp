@@ -3103,7 +3103,7 @@ public class AnalysisService {
             recommendations.add("   - byte -> b/by | char -> c/ch | bool -> f | short -> n/s | ushort -> w");
             recommendations.add("   - int -> n/i | uint -> dw | long -> l | ulong -> dw");
             recommendations.add("   - longlong -> ll | ulonglong -> qw | float -> fl | double -> d");
-            recommendations.add("   - void* -> p | typed pointers -> p+StructName (pUnitAny)");
+            recommendations.add("   - void* -> p | typed pointers -> p+StructName (pPacketHeader)");
             recommendations.add("   - byte[N] -> ab | ushort[N] -> aw | uint[N] -> ad");
             recommendations.add("   - char* -> sz/lpsz | wchar_t* -> wsz");
             recommendations.add("2. First set correct type with set_variable_type() using lowercase builtin");
@@ -3132,7 +3132,7 @@ public class AnalysisService {
                     recommendations.add("2. Either fix the type with set_function_prototype() to match plate, or correct plate comment");
                 } else if (issue.contains("Generic void*")) {
                     recommendations.add("1. Replace generic void* parameters with specific structure types using set_function_prototype()");
-                    recommendations.add("   Example: void ProcessData(void* pData) -> void ProcessData(UnitAny* pUnit)");
+                    recommendations.add("   Example: void ProcessData(void* pData) -> void ProcessData(PacketHeader* pHeader)");
                 } else if (issue.contains("Generic int* parameter")) {
                     recommendations.add("GENERIC INT* PARAMETER - p-prefix parameter typed as int* instead of struct pointer:");
                     recommendations.add("1. " + issue);
@@ -3538,7 +3538,6 @@ public class AnalysisService {
         // Try exact name and common suffixed variants in root category
         String[] candidates = {
             baseName,            // Unit
-            baseName + "Any",    // UnitAny (Diablo 2 convention)
             baseName + "Data",   // UnitData
             baseName + "Info",   // UnitInfo
             baseName + "Rec",    // UnitRec
@@ -3561,7 +3560,7 @@ public class AnalysisService {
         }
 
         // Fallback: search ALL categories for structs matching candidate names
-        // This catches structs in subcategories like /windows/UnitAny
+        // This catches structs in subcategories like /windows/PacketHeader
         for (String candidate : candidates) {
             DataType dt = ServiceUtils.findDataTypeByNameInAllCategories(dtm, candidate);
             if (dt != null && (dt instanceof ghidra.program.model.data.Structure ||
@@ -3808,7 +3807,7 @@ public class AnalysisService {
             }
 
             // Check 1a: Generic int* pointers with p-prefix names (should be struct pointers)
-            // e.g., pUnit typed as int* but plate says "Unit receiving drops" → should be UnitAny*
+            // e.g., pUnit typed as int* but plate says "Unit receiving drops" → should be PacketHeader*
             if (paramType instanceof Pointer) {
                 Pointer ptrType = (Pointer) paramType;
                 DataType pointedTo = ptrType.getDataType();
@@ -4204,7 +4203,7 @@ public class AnalysisService {
 
         // --- High-value check 4: Source file reference ---
         if (!hasSource) {
-            issues.add("Missing Source file reference (e.g., Source: ..\\Source\\D2Common\\DATATBLS\\DataTbls.cpp)");
+            issues.add("Missing Source file reference (e.g., Source: ..\\Source\\Module\\Subsystem\\File.cpp)");
         }
     }
 

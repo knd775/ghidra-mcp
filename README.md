@@ -397,9 +397,8 @@ model **discover** the rest on demand instead of registering everything:
 
 #### Optional: Connect a standalone debugger server
 
-The debugger server itself moved to the `d2-game-exe` repository on 2026-08-11
-(its D2 calling-convention layer made it game-specific). Start it there, then
-point this bridge at it:
+The debugger server is external to this repo. Start it, then point this
+bridge at it:
 
 ```bash
 export GHIDRA_DEBUGGER_URL=http://127.0.0.1:8099
@@ -571,10 +570,9 @@ bridge-mcp-ghidra
 ### The `debugger_*` tools do not appear
 
 **Cause:** They are registered only when `GHIDRA_DEBUGGER_URL` is set, and only
-on Windows. The debugger server they proxy to lives in the `d2-game-exe`
-repository since 2026-08-11 — this repo ships the proxies, not the server.
+on Windows. This repo ships the proxies, not the server.
 
-**Solution:** start the debugger server from that repo, then set the URL before
+**Solution:** start the external debugger server, then set the URL before
 launching the bridge:
 
 ```text

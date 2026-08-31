@@ -258,7 +258,7 @@ public class GhidraServerManager {
     /**
      * List files and folders in a repository path.
      * 
-     * @param repoName Repository name (e.g., "pd2")
+     * @param repoName Repository name (e.g., "myrepo")
      * @param path Folder path (e.g., "/Classic/1.00" or "/" for root)
      * @return JSON string with file/folder listing
      */

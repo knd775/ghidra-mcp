@@ -463,7 +463,7 @@ public class NamingConventionsTest extends TestCase {
         // dw + uint = match (pure uint check)
         assertTrue(NamingConventions.checkGlobalNameQuality("g_dwActiveQuestState", "uint").ok);
         // p + ptr-typed = match
-        assertTrue(NamingConventions.checkGlobalNameQuality("g_pUnitList", "UnitAny *").ok);
+        assertTrue(NamingConventions.checkGlobalNameQuality("g_pUnitList", "PacketHeader *").ok);
         // sz + char* = match
         assertTrue(NamingConventions.checkGlobalNameQuality("g_szPlayerName", "char *").ok);
     }
@@ -697,17 +697,17 @@ public class NamingConventionsTest extends TestCase {
      * Module prefixes containing digits must be recognised.
      *
      * The original pattern was {@code ^[A-Z]+_[A-Z].*}, where {@code [A-Z]+}
-     * stops dead at a digit -- so `PD2_`, `PD2EXT_` and `D2CLIENT_` were seen
-     * as having NO prefix at all. The name then failed the PascalCase check as
-     * a whole and every such function drew "contains underscores. Use
+     * stops dead at a digit -- so `MOD2_`, `MOD2EXT_` and `MOD2CLIENT_` were
+     * seen as having NO prefix at all. The name then failed the PascalCase
+     * check as a whole and every such function drew "contains underscores. Use
      * PascalCase after the module prefix", despite already being correct.
-     * `PD2_*` is used throughout ProjectDiablo.dll, so this was noisy on real
-     * data while `CRT_*` (no digits) validated silently.
+     * Digit-bearing prefixes were used throughout a real corpus DLL, so this
+     * was noisy on real data while `CRT_*` (no digits) validated silently.
      */
     public void testExtractPrefixHandlesDigitsInModulePrefix() {
-        assertEquals("PD2", NamingConventions.extractModulePrefix("PD2_AllocItemExtraData"));
-        assertEquals("PD2EXT", NamingConventions.extractModulePrefix("PD2EXT_InstallBootstrapHook"));
-        assertEquals("D2CLIENT", NamingConventions.extractModulePrefix("D2CLIENT_DrawUnit"));
+        assertEquals("MOD2", NamingConventions.extractModulePrefix("MOD2_AllocItemExtraData"));
+        assertEquals("MOD2EXT", NamingConventions.extractModulePrefix("MOD2EXT_InstallBootstrapHook"));
+        assertEquals("MOD2CLIENT", NamingConventions.extractModulePrefix("MOD2CLIENT_DrawSprite"));
         // Digit-free prefixes keep working.
         assertEquals("CRT", NamingConventions.extractModulePrefix("CRT_CloseFileStream"));
         // A leading digit is still not a module prefix.
@@ -730,8 +730,8 @@ public class NamingConventionsTest extends TestCase {
 
     /**
      * The measured contamination shape: FID says the function is
-     * {@code ___acrt_locale_free_numeric}; the rename asserts D2 units and
-     * resource arrays that appear nowhere in it.
+     * {@code ___acrt_locale_free_numeric}; the rename asserts domain objects
+     * and resource arrays that appear nowhere in it.
      */
     public void testOverridesFidNameRejectsSubsystemPrefix() {
         assertTrue(NamingConventions.overridesFidName(
@@ -772,7 +772,7 @@ public class NamingConventionsTest extends TestCase {
         // this, `pointer *` audited clean, so the globals worker skipped it as
         // `already_clean` while the dashboard's types bar counted it untyped:
         // the bar told you to run a worker that could never change its count
-        // (2 of PD2_EXT.dll's 5, ~180 globals corpus-wide).
+        // (2 of one corpus DLL's 5, ~180 globals corpus-wide).
         assertTrue(NamingConventions.isPlaceholderTypeName("pointer"));
         assertTrue(NamingConventions.isPlaceholderTypeName("pointer32"));
         assertTrue(NamingConventions.isPlaceholderTypeName("pointer64"));
@@ -791,7 +791,7 @@ public class NamingConventionsTest extends TestCase {
     public void testRealTypesAreNotPlaceholders() {
         // A typed pointer is the whole point of the fix -- it must NOT trip.
         assertFalse(NamingConventions.isPlaceholderTypeName("uint32_t *"));
-        assertFalse(NamingConventions.isPlaceholderTypeName("UnitAny *"));
+        assertFalse(NamingConventions.isPlaceholderTypeName("PacketHeader *"));
         assertFalse(NamingConventions.isPlaceholderTypeName("void *"));
         assertFalse(NamingConventions.isPlaceholderTypeName("char *"));
         assertFalse(NamingConventions.isPlaceholderTypeName("dword"));
@@ -971,17 +971,17 @@ public class NamingConventionsTest extends TestCase {
     // ---------- isOrdinalExportName (the audit's export-name gate) ----------
 
     public void testOrdinalOnlyExportsAreRenameable() {
-        // D2's DLLs export almost everything by ordinal and renaming those is
-        // the core workflow -- a blanket "exports are untouchable" rule would
-        // break it. 7,172 named CODE exports and 28 named DATA exports exist
-        // across the PD2-S12 corpus; the ordinal ones must stay renameable.
+        // Many corpus DLLs export almost everything by ordinal and renaming
+        // those is the core workflow -- a blanket "exports are untouchable"
+        // rule would break it. 7,172 named CODE exports and 28 named DATA
+        // exports exist across the corpus; the ordinal ones must stay renameable.
         assertTrue(NamingConventions.isOrdinalExportName("Ordinal_1"));
         assertTrue(NamingConventions.isOrdinalExportName("Ordinal_10001"));
     }
 
     public void testRealExportNamesAreProtected() {
         // These names ARE the ABI contract -- a consuming loader resolves
-        // against the exact string. PD2_EXT.dll is a version.dll proxy whose
+        // against the exact string. One corpus DLL is a version.dll proxy whose
         // 12 forwarder exports were all renamed to g_* by a globals pass,
         // including GetFileVersionInfoW -> g_szVerFileVersionApi, which does
         // not even name the right export.
@@ -1001,7 +1001,7 @@ public class NamingConventionsTest extends TestCase {
         // `Install` is a tier-1 verb and `BootstrapHook` supplies the specifier,
         // so the only thing that could reject this name is the prefix bug.
         NameQualityResult r =
-                NamingConventions.checkFunctionNameQuality("PD2EXT_InstallBootstrapHook");
+                NamingConventions.checkFunctionNameQuality("MOD2EXT_InstallBootstrapHook");
         String msg = r.message == null ? "" : r.message;
         assertFalse("digit-bearing module prefix read as an underscore violation: " + msg,
                 msg.contains("contains underscores"));
