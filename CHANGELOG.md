@@ -6,6 +6,23 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim apply previews no longer open a write transaction
+
+`bsim_apply_matches(dry_run=true)` no longer enters the generic Ghidra
+transaction wrapper. That wrapper held the program lock on the request thread
+while the endpoint ran its BSim query on a job thread, so the first preview
+failed with `Unable to lock due to active transaction`. Declared dry-run
+handlers now run without a wrapper transaction and must return before their own
+mutation. Undeclared POST handlers still short-circuit without invocation.
+
+Apply responses now include a `counts` object for renamed or proposed names and
+every skip or failure category. The existing detailed `renamed`,
+`would_rename`, and `skipped` rows remain unchanged. A failed preview followed
+by an immediate retry is covered by the scanner regression test.
+
+All endpoints that advertise `dry_run` were audited. The results are recorded
+in `docs/project-management/DRY_RUN_AUDIT.md`.
+
 ### BSim PostgreSQL ingest: fixed the credential order on the CLI's stdin
 
 `bsim_ingest` into a `postgresql://` database always failed with
