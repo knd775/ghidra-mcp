@@ -98,4 +98,34 @@ public class ProgramImporterTest extends TestCase {
         assertFalse(r.success());
         assertTrue(r.error.contains("Unknown format"));
     }
+
+    public void testSuggestedElfCompilerSpecIsPerLanguage() {
+        assertEquals("default", ProgramImporter.suggestedElfCompilerSpec("ARM:LE:32:Cortex"));
+        assertEquals("default", ProgramImporter.suggestedElfCompilerSpec("AARCH64:LE:64:v8A"));
+        assertEquals("gcc", ProgramImporter.suggestedElfCompilerSpec("x86:LE:64:default"));
+        assertEquals("gcc", ProgramImporter.suggestedElfCompilerSpec("x86:LE:32:default"));
+    }
+
+    public void testUnknownGccOnArmNamesDefault() {
+        String msg = ProgramImporter.unknownCompilerSpecMessage("ARM:LE:32:Cortex", "gcc");
+        assertTrue(msg, msg.contains("default"));
+        assertTrue(msg, msg.contains("gcc"));
+        assertFalse("must not suggest gcc for ARM", msg.contains("use gcc"));
+    }
+
+    public void testElfWindowsCompilerWarning() {
+        String warn = ProgramImporter.elfWindowsCompilerWarning(
+                "Executable and Linking Format (ELF)", "windows", "x86:LE:64:default");
+        assertNotNull(warn);
+        assertTrue(warn, warn.contains("windows"));
+        assertTrue(warn, warn.contains("gcc"));
+        assertNull(ProgramImporter.elfWindowsCompilerWarning(
+                "Portable Executable (PE)", "windows", "x86:LE:64:default"));
+        assertNull(ProgramImporter.elfWindowsCompilerWarning(
+                "Executable and Linking Format (ELF)", "gcc", "x86:LE:64:default"));
+        String arm = ProgramImporter.elfWindowsCompilerWarning(
+                "ELF", "windows", "ARM:LE:32:Cortex");
+        assertNotNull(arm);
+        assertTrue(arm, arm.contains("default"));
+    }
 }

@@ -29,6 +29,15 @@ public final class BSimMatches {
      */
     public static final double CROSS_BUILD_SIMILARITY_WARN = 0.5;
 
+    /**
+     * Feature-count floor below which cosine similarity is not meaningful.
+     * A 24-byte wrapper produced a near-empty vector that matched every
+     * trivial stub at similarity 1.0, confidence ~9. Measured: junk sat at
+     * 9.2, a correct {@code lfs_dir_traverse} at 9.82 — no global confidence
+     * floor separates them. Flag on query, skip on apply.
+     */
+    public static final int DEFAULT_MIN_FEATURE_COUNT = 8;
+
     public enum ApplyAction {
         APPLY,
         SKIP_AMBIGUOUS,
@@ -36,7 +45,8 @@ public final class BSimMatches {
         SKIP_SIMILARITY,
         SKIP_CONFIDENCE,
         SKIP_NO_MATCH,
-        SKIP_SELF
+        SKIP_SELF,
+        SKIP_UNIDENTIFIABLE
     }
 
     public static final class Hit {
@@ -77,18 +87,32 @@ public final class BSimMatches {
         public final String address;
         public final List<Hit> matches;
         public final boolean ambiguous;
+        public final boolean identifiable;
+        public final String reason;
+        public final int featureCount;
 
         public FunctionResult(String function, String address, List<Hit> matches, boolean ambiguous) {
+            this(function, address, matches, ambiguous, true, "", -1);
+        }
+
+        public FunctionResult(String function, String address, List<Hit> matches, boolean ambiguous,
+                              boolean identifiable, String reason, int featureCount) {
             this.function = function;
             this.address = address;
             this.matches = matches;
             this.ambiguous = ambiguous;
+            this.identifiable = identifiable;
+            this.reason = reason == null ? "" : reason;
+            this.featureCount = featureCount;
         }
 
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("function", function);
             if (address != null && !address.isEmpty()) m.put("address", address);
+            m.put("identifiable", identifiable);
+            if (!identifiable && !reason.isEmpty()) m.put("reason", reason);
+            if (featureCount >= 0) m.put("feature_count", featureCount);
             List<Map<String, Object>> hits = new ArrayList<>();
             for (Hit h : matches) hits.add(h.toMap());
             m.put("matches", hits);
@@ -151,6 +175,15 @@ public final class BSimMatches {
 
     public static ApplyAction decide(FunctionResult result, String currentName,
                                      boolean skipNamed, double minSimilarity, double minConfidence) {
+        return decide(result, currentName, skipNamed, minSimilarity, minConfidence, false);
+    }
+
+    public static ApplyAction decide(FunctionResult result, String currentName,
+                                     boolean skipNamed, double minSimilarity, double minConfidence,
+                                     boolean applyUnidentifiable) {
+        if (result != null && !result.identifiable && !applyUnidentifiable) {
+            return ApplyAction.SKIP_UNIDENTIFIABLE;
+        }
         if (result == null || result.matches.isEmpty()) return ApplyAction.SKIP_NO_MATCH;
         if (result.ambiguous) return ApplyAction.SKIP_AMBIGUOUS;
         if (skipNamed && currentName != null && !currentName.isEmpty()
@@ -172,6 +205,7 @@ public final class BSimMatches {
             case SKIP_CONFIDENCE -> "below_confidence";
             case SKIP_NO_MATCH -> "no_matches";
             case SKIP_SELF -> "self_match";
+            case SKIP_UNIDENTIFIABLE -> "unidentifiable";
         };
     }
 
@@ -220,11 +254,25 @@ public final class BSimMatches {
                         str(hit.get("address"))));
             }
         }
-        return finalizeResult(function, address, hits, queryMd5);
+        FunctionResult scored = finalizeResult(function, address, hits, queryMd5);
+        boolean identifiable = true;
+        if (m.containsKey("identifiable")) {
+            identifiable = bool(m.get("identifiable"));
+        }
+        String reason = str(m.get("reason"));
+        int featureCount = m.containsKey("feature_count") ? (int) num(m.get("feature_count")) : -1;
+        return new FunctionResult(scored.function, scored.address, scored.matches, scored.ambiguous,
+                identifiable, reason, featureCount);
     }
 
     private static String str(Object o) {
         return o == null ? "" : String.valueOf(o);
+    }
+
+    private static boolean bool(Object o) {
+        if (o instanceof Boolean b) return b;
+        if (o == null) return false;
+        return Boolean.parseBoolean(String.valueOf(o));
     }
 
     private static double num(Object o) {

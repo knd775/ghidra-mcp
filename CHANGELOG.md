@@ -17,6 +17,30 @@ Query has no CLI command, so `bsim_query` runs `BSim_McpQuery.java` in a helper
 `analyzeHeadless` JVM and reads JSON back. `bsim_apply_matches` uses those
 scores and renames in the open program.
 
+**PostgreSQL, not H2.** H2 `file:/srv/ghidra/bsim/<db>` is local and
+single-writer: a Ghidra GUI on the VPN has no path to that file, and
+Ghidra Server does not host or proxy BSim. Compose runs PostgreSQL 16
+with Ghidra's `lshvector` C extension (`ghcr.io/<owner>/ghidra-mcp-bsim`,
+`docker/Dockerfile.bsim`; sources fetched from the Ghidra 12.1.2 tag and
+blob-checked against `docker/bsim/lshvector.lock`). Do not use
+`support/bsim_ctl`. SSL is on (`hostnossl reject`); Ghidra refuses a
+non-SSL connection. Two databases on the one instance: `embedded`
+(`medium_nosize`, ARM) and `userland` (`medium_nosize`, x86-64) — corpus
+domains, not a pointer-size split. `medium_nosize` beat `medium_32` under
+compiler and optimisation drift and gave up nothing on identical builds.
+Mixing architectures in one database is harmless; native x86-64 references
+still cannot substitute for ARM ones. Published on
+`BIND_ADDR:5432` (VPN/LAN, same posture as Ghidra Server RMI), never the
+Cloudflare tunnel. `GHIDRA_MCP_BSIM_URLS` is a fail-closed allowlist of
+host plus database; a password in `db_url` is rejected. Credentials are
+`GHIDRA_MCP_BSIM_USER` / `GHIDRA_MCP_BSIM_PASSWORD` (`BSIM_DB_*` in
+`.env`), not the Ghidra Server login. Dual ingest (`ghidra://` +
+`postgresql://`) feeds both passwords on stdin. Query's helper JVM is
+stock Ghidra — `BSim_McpQuery` reads the BSim password from the
+environment. `bsim-backup` `pg_dump`s both databases and tars
+`ghidra-repos`. Migration is re-ingest, not H2 conversion:
+`docker/bsim/MIGRATION.md`. Operator guide: `docs/prompts/BSIM.md`.
+
 **Reference corpus builds (`build_reference`, `build_manifest`).** BSim can
 only match what is in the corpus, and for embedded targets nothing is
 downloadable. The Ghidra container cannot compile (uid 1000, no compiler),
@@ -29,8 +53,8 @@ names at 0.27–0.35 similarity because the firmware was built with GCC 10–12;
 `lfs_dir_fetchmatch` was ~300 bytes larger than any GCC-13 object. One
 image holds gcc10-arm, gcc12-arm, gcc13-arm, and gcc13-x86_64; the identity string
 selects the binary, not a compose service. The image is
-`ghcr.io/<owner>/ghidra-mcp-builder` (same owner and tag as headless and
-bridge). Compose DNS stays `ghidra-builder`. There is no Docker socket
+`ghcr.io/<owner>/ghidra-mcp-builder` (same owner and tag as headless,
+bridge, and bsim). Compose DNS stays `ghidra-builder`. There is no Docker socket
 anywhere: `ghidra-mcp` POSTs to `http://ghidra-builder:8092/build` and
 gets a job id back; `GET /build/{id}` (MCP: `build_reference_status`)
 retrieves a compile that outlives the ~60s MCP hop. Clang later is a
@@ -52,9 +76,9 @@ would keep only what the stub's `main.c` referenced). Compile keeps DWARF
 (`-g`; `strip_debug` defaults false). Recorded paths use `/ref/<name>/...`
 via `-fdebug-prefix-map`; sidecars include `debug_path_prefix`. x86-64
 userland (musl, glibc, zlib, OpenSSL, libsodium, SQLite) lives in
-`docker/references.userland.yaml` and ingests into a separate `medium_64`
-database (`file:/srv/ghidra/bsim/userland`). `bsim_list_databases` lists
-H2 databases and templates. `source_read` returns a numbered span from
+`docker/references.userland.yaml` and ingests into a separate `medium_nosize`
+database (`postgresql://ghidra-bsim:5432/userland`). `bsim_list_databases`
+lists allowlisted PostgreSQL URLs and leftover H2 files. `source_read` returns a numbered span from
 the builder source cache, resolved by function (DWARF) or path.
 
 Every match carries separate numeric `similarity` and `confidence`. The top two
@@ -65,8 +89,23 @@ and confidence is the discriminating signal (measured: correct littlefs hits at
 31–35, chance matches at 0.17–3.6, a generic `lfs_deinit` at 12.8 just above
 the floor). The previous 0.7 similarity default returned nothing against a
 differently-compiled reference. Passing `similarity_threshold` above 0.5 adds
-a warning. `min_confidence` on apply still has no default. `dry_run` defaults
+a warning. Whole-program query used to ignore the threshold entirely: a bare
+`-` function sentinel was eaten by `analyzeHeadless` and `QueryNearest` kept
+its 0.7 default. The sentinel is now `ALL`. Optional `arch` / `executable` /
+`compiler` / `exclude_md5` are server-side `BSimFilter` atoms (not
+post-processed). Functions whose LSH vector has fewer than
+`min_feature_count` (default 8) features are returned with
+`identifiable=false` — query never drops them; `bsim_apply_matches` skips
+them unless `apply_unidentifiable=true`. `min_confidence` on apply still has
+no default. Apply's query-time `similarity_threshold` now defaults to 0.0,
+same as query. `dry_run` defaults
 to true and does not call `setName`. `skip_named` defaults to true.
+Identical-MD5 re-ingest is skipped rather than failing as "different
+repository"; the ingest response records `executable_md5` on the artifact
+sidecar. Corpus entries keep the program name through GZF staging (no more
+`"program"`). `import_file` warns when an ELF auto-imports as
+`compiler: windows`; ARM uses `compiler_spec=default`, not `gcc`. POST
+`program` in the JSON body is accepted as well as `?program=`.
 
 Each `build_reference` artifact is written with a JSON sidecar
 (`<artifact>.json`): resolved commit SHA (even when `ref` was a tag), the
@@ -94,10 +133,11 @@ query `dry_run=true` returns `would_execute` and creates nothing. Bridge
 handler exceptions return type, message, and traceback instead of a bare
 JSON-RPC Internal Error.
 
-H2 `file:/srv/ghidra/bsim/<db>` for a single writer. Compose mounts a dedicated
-volume there (`GHIDRA_MCP_BSIM_ROOT`); it is not under `GHIDRA_MCP_FILE_ROOT`.
-The tools do not invent a corpus — compile the library at several GCC /
-opt-levels and ingest with symbols. Operator guide: `docs/prompts/BSIM.md`.
+Leftover H2 `file:/srv/ghidra/bsim/<db>` stays confined by
+`GHIDRA_MCP_BSIM_ROOT`; the live corpus is PostgreSQL. Compose still
+mounts that volume for template sidecars. The tools do not invent a
+corpus — compile the library at several GCC / opt-levels and ingest with
+symbols. Operator guide: `docs/prompts/BSIM.md`.
 
 **BSim calls run as background jobs (`bsim_job_status`, tool #261).** Every
 BSim tool spawns at least one fresh JVM, so ingest/query run minutes while the
@@ -221,10 +261,12 @@ fork tests the Python bridge on 3.12 only (Ubuntu 24.04, the Docker base).
 
 `docker/Dockerfile.bridge` builds the Python MCP bridge on `python:3.12-slim`.
 `.github/workflows/ghcr.yml` pushes `ghidra-mcp-headless`,
-`ghidra-mcp-bridge`, and `ghidra-mcp-builder` to GHCR on push to
-`main`/`dev`/`develop` and on version tags. Compose is Ghidra Server +
-headless + bridge (shared netns, loopback `GHIDRA_MCP_URL`) + builder
-(compose DNS `ghidra-builder`) + a Cloudflare Tunnel. Env for that file is
+`ghidra-mcp-bridge`, `ghidra-mcp-builder`, and `ghidra-mcp-bsim` to GHCR
+on push to `main`/`dev`/`develop` and on version tags. Compose is Ghidra
+Server + headless + bridge (shared netns, loopback `GHIDRA_MCP_URL`) +
+builder (compose DNS `ghidra-builder`) + BSim PostgreSQL (compose DNS
+`ghidra-bsim`, `lshvector` + SSL, `BIND_ADDR:5432`) + a Cloudflare
+Tunnel (which cannot reach Postgres). Env for that file is
 `docker/.env.template`. 8089/8081 are published on loopback only. There is
 no Traefik.
 

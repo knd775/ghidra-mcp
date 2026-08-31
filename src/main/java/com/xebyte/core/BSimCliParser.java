@@ -106,6 +106,30 @@ public final class BSimCliParser {
         return lastError;
     }
 
+    /**
+     * BSim keys on executable MD5 but records the ingest URL. MCP staging uses
+     * a throwaway project, so a second pass of identical bytes looks like
+     * "same MD5, different repository". {@code overwrite=true} does not help.
+     * A compiler-spec fix (windows → gcc) on the same bytes is the same
+     * collision — that needs a new database, not a re-ingest.
+     */
+    public static String rewriteIngestError(String output) {
+        if (output == null) return null;
+        if (output.contains("already ingested from a different repository")
+                || output.contains("program already ingested")) {
+            return "BSim refused this ingest because an executable with the same MD5 is "
+                    + "already in the database (possibly under a different repository URL "
+                    + "or compiler spec). MCP ingest uses a throwaway project path each "
+                    + "time, so a second pass of identical bytes looks like a different "
+                    + "repository rather than a no-op. overwrite=true does not replace "
+                    + "the existing entry. Skip by MD5 before calling bsim_ingest. If you "
+                    + "changed compiler_spec (e.g. windows → gcc) on the same bytes, BSim "
+                    + "still keys on MD5 and will not replace the old entry — create a "
+                    + "new database.";
+        }
+        return extractError(output);
+    }
+
     static String stripLogPrefix(String line) {
         if (line == null) return "";
         String s = line.strip();

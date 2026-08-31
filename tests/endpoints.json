@@ -361,9 +361,15 @@
         "similarity_threshold",
         "max_matches",
         "program",
+        "arch",
+        "executable",
+        "compiler",
+        "exclude_md5",
+        "min_feature_count",
+        "apply_unidentifiable",
         "wait_seconds"
       ],
-      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default. dry_run defaults to true and does not write. skip_named defaults to true. Ambiguous matches are never applied."
+      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default — there is no universally safe value. dry_run defaults to true and does not write. skip_named defaults to true (never overwrite an analyst name). Ambiguous matches are never applied. Functions flagged unidentifiable (too few LSH features) are skipped unless apply_unidentifiable=true. Optional arch / executable / compiler / exclude_md5 are the same server-side filters as bsim_query. Applied names are the BSim hit names as-is (C linkage, not PascalCase). Runs a full-program BSim query first, which takes minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/bsim_create_db",
@@ -377,7 +383,7 @@
         "callgraph",
         "wait_seconds"
       ],
-      "description": "Create a BSim database via bsim createdatabase. Default template medium_32. Call-graph data is recorded unless callgraph=false. Empty until bsim_ingest."
+      "description": "Create a BSim database via `bsim createdatabase`. Default template medium_nosize (every database, unconditionally). medium_nosize beat medium_32 under compiler and optimisation drift and gave up nothing on identical builds. Call-graph data is recorded unless callgraph=false. Compose uses PostgreSQL (postgresql://ghidra-bsim:5432/embedded and .../userland) so GUI clients on the VPN can search the same corpus — those are corpus domains, not a pointer-size split. file: H2 URLs remain for leftover local databases. Writes a <name>.ghidra-mcp.json sidecar with the template so bsim_list_databases can report it. Network db_url values must be on GHIDRA_MCP_BSIM_URLS. The database is empty until bsim_ingest. Returns a job_id instead of a result when the CLI outlives wait_seconds."
     },
     {
       "path": "/bsim_ingest",
@@ -392,7 +398,7 @@
         "program",
         "wait_seconds"
       ],
-      "description": "Generate BSim signatures from a ghidraURL or open program and commit them. Refuses a source with no functions and a pointer-size mismatch against the existing corpus. Warns when the source has few user-defined names."
+      "description": "Generate BSim signatures from a ghidraURL (or an open program) and commit them with `bsim generatesigs --bsim --commit`. Refuses a source with no functions, and a pointer-size mismatch against a sized template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but records the throwaway project URL, so a second pass is not a no-op). The ingest response carries executable_md5 for the artifact sidecar. Warns when the source has few user-defined names. Ingest with symbols. Ingest takes minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/bsim_job_status",
@@ -421,7 +427,7 @@
       "method": "GET",
       "category": "bsim",
       "params": [],
-      "description": "List H2 BSim databases under GHIDRA_MCP_BSIM_ROOT and the known config templates. Templates (medium_32, medium_64, ...) are fixed at createdatabase time. Sidecars written by bsim_create_db report which template each file: database used. Does not spawn the bsim CLI."
+      "description": "List BSim databases: allowlisted postgresql:// URLs (GHIDRA_MCP_BSIM_URLS) and any leftover H2 files under GHIDRA_MCP_BSIM_ROOT. Templates (medium_nosize, medium_32, ...) are fixed at createdatabase time. Sidecars written by bsim_create_db, or GHIDRA_MCP_BSIM_TEMPLATES, report which template each database used. Does not spawn the bsim CLI."
     },
     {
       "path": "/bsim_query",
@@ -434,9 +440,15 @@
         "confidence_threshold",
         "max_matches",
         "program",
+        "arch",
+        "executable",
+        "compiler",
+        "exclude_md5",
+        "min_feature_count",
+        "min_function_size",
         "wait_seconds"
       ],
-      "description": "Query one function or the whole open program against a BSim database. Filter on confidence, not similarity. Cross-compiler matches legitimately score 0.2-0.4 similarity; confidence indicates whether that overlap is meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 (a starting floor, not a calibration). Each match has separate numeric similarity and confidence, plus the source executable name and architecture. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity. A similarity_threshold above 0.5 silently drops cross-compiler matches and adds a warning. Queries run a helper analyzeHeadless JVM and can take minutes: expect a job_id, then poll bsim_job_status."
+      "description": "Query one function or the whole open program against a BSim database. Filter on confidence, not similarity. Cross-compiler matches legitimately score 0.2-0.4 similarity; confidence indicates whether that overlap is meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 (a starting floor, not a calibration). Optional arch / executable / compiler / exclude_md5 are server-side BSimFilter atoms (not post-processed; max_matches applies after the filter). Functions whose feature vector is too small to identify are returned with identifiable=false, never dropped. Each match has separate numeric similarity and confidence, plus the source executable name and architecture. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity. A similarity_threshold above 0.5 silently drops cross-compiler matches and adds a warning. Queries run a helper analyzeHeadless JVM and can take minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/build_manifest",

@@ -3,6 +3,7 @@ package com.xebyte.offline;
 import com.xebyte.core.BSimCliParser;
 import com.xebyte.core.BSimMatches;
 import com.xebyte.core.BSimService;
+import com.xebyte.core.BSimTestEnv;
 import com.xebyte.core.BSimUrls;
 import junit.framework.TestCase;
 
@@ -20,6 +21,19 @@ import java.util.Set;
  * Parser / scoring / URL tests for the BSim CLI wrapper. No Ghidra process.
  */
 public class BSimCliParserTest extends TestCase {
+
+    @Override
+    protected void setUp() {
+        BSimTestEnv.setAllowlist("");
+        BSimTestEnv.setRoot("");
+        BSimTestEnv.setUser("");
+        BSimTestEnv.setPassword("");
+    }
+
+    @Override
+    protected void tearDown() {
+        BSimTestEnv.clear();
+    }
 
     public void testParseListexesPlain() {
         String out = "aabbccddeeff00112233445566778899 littlefs-2.9.3-gcc13-Os ARM:LE:32:Cortex gcc\n"
@@ -94,6 +108,51 @@ public class BSimCliParserTest extends TestCase {
                 BSimMatches.decide(fr, "FUN_1", true, 0.8, 20.0));
     }
 
+    public void testUnidentifiableSkippedOnApplyUnlessOverridden() {
+        BSimMatches.FunctionResult fr = new BSimMatches.FunctionResult(
+                "cmd_healthgood", "0x1000",
+                List.of(hit("lfs_dir_fetch", 1.0, 9.2)),
+                false, false,
+                "feature_count=3 below threshold 8; similarity is not meaningful at this size",
+                3);
+        assertEquals(BSimMatches.ApplyAction.SKIP_UNIDENTIFIABLE,
+                BSimMatches.decide(fr, "cmd_healthgood", true, 0.0, 10.0, false));
+        assertEquals(BSimMatches.ApplyAction.SKIP_CONFIDENCE,
+                BSimMatches.decide(fr, "FUN_1", true, 0.0, 10.0, true));
+        assertEquals("unidentifiable", BSimMatches.reason(BSimMatches.ApplyAction.SKIP_UNIDENTIFIABLE));
+        Map<String, Object> asMap = fr.toMap();
+        assertEquals(Boolean.FALSE, asMap.get("identifiable"));
+        assertTrue(String.valueOf(asMap.get("reason")), String.valueOf(asMap.get("reason")).contains("feature_count=3"));
+    }
+
+    public void testParseQueryPayloadPreservesIdentifiable() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        Map<String, Object> fn = new LinkedHashMap<>();
+        fn.put("function", "cmd_healthgood");
+        fn.put("identifiable", false);
+        fn.put("reason", "feature_count=3 below threshold 8");
+        fn.put("feature_count", 3);
+        fn.put("matches", List.of(hitMap("lfs_dir_fetch", 1.0, 9.2, "littlefs.o", "ARM:LE:32:Cortex")));
+        payload.put("results", List.of(fn));
+        List<BSimMatches.FunctionResult> parsed = BSimMatches.parseQueryPayload(payload, null);
+        assertEquals(1, parsed.size());
+        assertFalse(parsed.get(0).identifiable);
+        assertEquals(3, parsed.get(0).featureCount);
+        assertEquals(BSimMatches.ApplyAction.SKIP_UNIDENTIFIABLE,
+                BSimMatches.decide(parsed.get(0), "FUN_1", true, 0.0, 0.0));
+    }
+
+    public void testRewriteIngestErrorNamesMd5AndCompiler() {
+        String raw = "Fatal error during -insert- : program already ingested from a different "
+                + "repository: ghidra:/tmp/bsim-xml-123/BSimIngest\n";
+        String msg = BSimCliParser.rewriteIngestError(raw);
+        assertNotNull(msg);
+        assertTrue(msg, msg.contains("MD5"));
+        assertTrue(msg, msg.contains("overwrite"));
+        assertTrue(msg, msg.contains("compiler_spec") || msg.contains("windows"));
+        assertTrue(msg, msg.contains("new database"));
+    }
+
     public void testDropSelfMatchesByMd5() {
         BSimMatches.Hit self = new BSimMatches.Hit(
                 "FUN_1", 1.0, 99.0, "firmware.elf", "ARM:LE:32:Cortex", "abc", "0x1");
@@ -161,11 +220,73 @@ public class BSimCliParserTest extends TestCase {
         assertEquals("file:/srv/ghidra/bsim/lfs", BSimUrls.requireBsimUrl("file:/srv/ghidra/bsim/lfs"));
     }
 
+    public void testPostgresUrlFailClosedWithoutAllowlist() {
+        try {
+            BSimUrls.requireBsimUrl("postgresql://ghidra-bsim:5432/embedded");
+            fail("expected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("GHIDRA_MCP_BSIM_URLS"));
+        }
+    }
+
+    public void testPostgresUrlMustMatchAllowlist() {
+        BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded,postgresql://ghidra-bsim:5432/userland");
+        String embedded = BSimUrls.requireBsimUrl("postgresql://ghidra-bsim:5432/embedded");
+        assertTrue(embedded.contains("embedded"));
+        assertEquals("postgresql://ghidra-bsim/userland",
+                BSimUrls.requireBsimUrl("postgresql://ghidra-bsim/userland"));
+        try {
+            BSimUrls.requireBsimUrl("postgresql://evil.example:5432/embedded");
+            fail("expected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("GHIDRA_MCP_BSIM_URLS"));
+            assertTrue(e.getMessage(), e.getMessage().contains("evil.example"));
+        }
+        try {
+            BSimUrls.requireBsimUrl("postgresql://ghidra-bsim:5432/not_a_db");
+            fail("expected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("not_a_db"));
+        }
+    }
+
+    public void testPostgresUrlRejectsEmbeddedPassword() {
+        BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        try {
+            BSimUrls.requireBsimUrl("postgresql://bsim:hunter2@ghidra-bsim:5432/embedded");
+            fail("expected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("password"));
+            assertFalse(e.getMessage().contains("hunter2"));
+        }
+    }
+
+    public void testPostgresUrlIgnoresUserinfoWhenMatching() {
+        BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        BSimTestEnv.setUser("bsim");
+        String url = BSimUrls.requireBsimUrl("postgresql://ghidra-bsim:5432/embedded");
+        assertEquals("postgresql://bsim@ghidra-bsim:5432/embedded", url);
+    }
+
+    public void testFileUrlStillConfinedToRoot() throws Exception {
+        Path root = Files.createTempDirectory("bsim-root-");
+        BSimTestEnv.setRoot(root.toString());
+        String ok = "file:" + root.resolve("embedded").toAbsolutePath();
+        assertEquals(ok, BSimUrls.requireBsimUrl(ok));
+        try {
+            BSimUrls.requireBsimUrl("file:/etc/passwd");
+            fail("expected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("GHIDRA_MCP_BSIM_ROOT"));
+        }
+    }
+
     public void testConfigTemplateAllowlist() {
         assertEquals("medium_32", BSimUrls.requireConfigTemplate("medium_32"));
         assertEquals(32, BSimUrls.templatePointerBits("medium_32"));
         assertEquals(64, BSimUrls.templatePointerBits("medium_64"));
         assertEquals(0, BSimUrls.templatePointerBits("medium_nosize"));
+        assertEquals(0, BSimUrls.templatePointerBits("medium_cpool"));
         try {
             BSimUrls.requireConfigTemplate("huge_128");
             fail("expected");
@@ -204,6 +325,14 @@ public class BSimCliParserTest extends TestCase {
         // \"confidence\": rather than the raw JSON token "confidence":
         assertTrue(src.contains("confidence"));
         assertTrue(src.contains("similarity"));
+        assertTrue(src.contains("GHIDRA_MCP_BSIM_PASSWORD"));
+        assertTrue(src.contains("applyPostgresCredentials"));
+        assertTrue("whole-program sentinel must not be a bare '-'", src.contains("ALL"));
+        assertTrue(src.contains("ArchitectureBSimFilterType"));
+        assertTrue(src.contains("NotMd5BSimFilterType"));
+        assertTrue(src.contains("identifiable"));
+        assertTrue(src.contains("feature_count"));
+        assertTrue(src.contains("bsimFilter"));
         assertFalse("script must not emit a combined score field",
                 src.contains("\\\"score\\\":") || src.contains("\"score\":"));
     }

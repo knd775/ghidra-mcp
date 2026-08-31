@@ -22,9 +22,10 @@ import java.util.logging.Logger;
  * this is the only way to reach it without putting GUI-adjacent classes on
  * the server classpath.
  *
- * <p>H2 backends are single-writer. Callers should hold {@link #LOCK} across
- * a logical operation (create, ingest, query) so two requests cannot open the
- * same {@code file:} database at once.
+ * <p>H2 {@code file:} backends are single-writer. Callers should hold
+ * {@link #LOCK} across a logical operation that uses a {@code file:} URL so
+ * two requests cannot open the same database at once. PostgreSQL does not
+ * need that lock; GUI clients and the MCP tools share the instance.
  */
 public class BSimCli {
 
@@ -213,7 +214,7 @@ public class BSimCli {
             throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
-        forwardServerCredentials(pb.environment());
+        forwardChildCredentials(pb.environment());
         long startMs = System.currentTimeMillis();
         LOG.info(() -> "BSim CLI start (timeout " + timeout.toSeconds() + "s): "
                 + String.join(" ", command));
@@ -296,6 +297,46 @@ public class BSimCli {
             password = System.getenv("GHIDRA_PASS");
         }
         return (password == null || password.isBlank()) ? null : password;
+    }
+
+    /**
+     * Stdin payload for a {@code bsim} invocation: Ghidra Server password first
+     * (when a {@code ghidra://} argument is present), then the PostgreSQL
+     * password (when a {@code postgresql://} argument is present). Stock Ghidra
+     * prompts in that order; an open pipe with nothing written blocks for the
+     * whole process timeout.
+     */
+    public static String stdinForBsimArgs(List<String> args) {
+        if (args == null) return null;
+        boolean ghidraServer = false;
+        boolean postgres = false;
+        for (String a : args) {
+            if (BSimUrls.isServerGhidraUrl(a)) ghidraServer = true;
+            if (BSimUrls.isPostgresUrl(a)) postgres = true;
+        }
+        StringBuilder sb = new StringBuilder();
+        if (ghidraServer) {
+            String password = resolvedServerPassword();
+            if (password != null) sb.append(password).append('\n');
+        }
+        if (postgres) {
+            String password = BSimUrls.resolvedBsimPassword();
+            if (password != null) sb.append(password).append('\n');
+        }
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
+    static void forwardChildCredentials(java.util.Map<String, String> env) {
+        forwardServerCredentials(env);
+        if (env == null) return;
+        String user = BSimUrls.resolvedBsimUser();
+        if (user != null && !user.isBlank()) {
+            env.putIfAbsent("GHIDRA_MCP_BSIM_USER", user);
+        }
+        String password = BSimUrls.resolvedBsimPassword();
+        if (password != null && !password.isBlank()) {
+            env.putIfAbsent("GHIDRA_MCP_BSIM_PASSWORD", password);
+        }
     }
 
     /**

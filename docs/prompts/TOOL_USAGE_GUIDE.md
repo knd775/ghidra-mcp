@@ -498,7 +498,9 @@ GhidraMCP defaults to localhost-unauthenticated — safe on a single-user dev bo
 | `GHIDRA_MCP_AUTH_TOKEN` | When set, every HTTP request must carry `Authorization: Bearer <token>`. Timing-safe comparison. `/mcp/health`, `/health`, `/check_connection` are always exempt. |
 | `GHIDRA_MCP_ALLOW_SCRIPTS` | Set to `1`, `true`, or `yes` to enable `/run_script_inline` and `/run_ghidra_script`. **Off by default as of v5.4.1** (breaking change — these endpoints execute arbitrary Java against the Ghidra process). The server logs a warning at startup when this is set. |
 | `GHIDRA_MCP_FILE_ROOT` | When set, filesystem-path endpoints (`/load_program`, `/import_file`, `/open_project`, `/delete_file`, `/upload_file`, etc.) canonicalize the input and require it to fall under this root. `/upload_file` writes only to `<root>/uploads/`. |
-| `GHIDRA_MCP_BSIM_ROOT` | When set, `file:` BSim URLs must resolve under this directory. Compose default: `/srv/ghidra/bsim`. |
+| `GHIDRA_MCP_BSIM_ROOT` | When set, `file:` BSim URLs must resolve under this directory. Compose default: `/srv/ghidra/bsim` (leftover H2 + template sidecars). |
+| `GHIDRA_MCP_BSIM_URLS` | Comma-separated allowlist of `postgresql://host[:port]/database`. Fail-closed if unset. |
+| `GHIDRA_MCP_BSIM_USER` / `GHIDRA_MCP_BSIM_PASSWORD` | PostgreSQL BSim credentials. Not the Ghidra Server login. Never in `db_url`. |
 | `GHIDRA_MCP_MAX_UPLOAD_BYTES` | Decoded-size ceiling for `/upload_file` (default 16 MiB). Independent of the 64 MiB JSON body cap. |
 
 The headless server refuses to start on a non-loopback bind address (`0.0.0.0`, explicit external IP) unless `GHIDRA_MCP_AUTH_TOKEN` is set.
@@ -517,7 +519,7 @@ java -jar GhidraMCPHeadless.jar --bind 0.0.0.0 --port 8089
 
 ---
 
-See `docs/prompts/BSIM.md` for the BSim tools (`builder_health`, `build_reference`, `build_manifest`, `build_reference_status`, `bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`, `bsim_list_corpus`). Query defaults to `similarity_threshold=0.0` and `confidence_threshold=10.0` — filter on confidence; cross-compiler matches sit at 0.2–0.4 similarity. `min_confidence` on apply has no default; `dry_run` defaults to true and does not rename. `builder_health` lists packed identities and stubs from the container. `build_reference(dry_run=true)` clones nothing and compiles nothing; it does ask `/health`. Each artifact gets a JSON sidecar; `build_manifest` skips when that sidecar hash still matches. `mode="framework"` harvests per-library objects from a stub CMake build, never the linked ELF. Long compiles return a job id; poll `build_reference_status`.
+See `docs/prompts/BSIM.md` for the BSim tools (`builder_health`, `build_reference`, `build_manifest`, `build_reference_status`, `bsim_create_db`, `bsim_ingest`, `bsim_query`, `bsim_apply_matches`, `bsim_list_corpus`). Query defaults to `similarity_threshold=0.0` and `confidence_threshold=10.0` — filter on confidence; cross-compiler matches sit at 0.2–0.4 similarity. Optional `arch` / `executable` / `compiler` / `exclude_md5` are server-side filters. Functions too small to identify return `identifiable=false`; apply skips them by default. `min_confidence` on apply has no default; `dry_run` defaults to true and does not rename. Databases use `medium_nosize`. `builder_health` lists packed identities and stubs from the container. `build_reference(dry_run=true)` clones nothing and compiles nothing; it does ask `/health`. Each artifact gets a JSON sidecar; `build_manifest` skips when that sidecar hash still matches. `mode="framework"` harvests per-library objects from a stub CMake build, never the linked ELF. Long compiles return a job id; poll `build_reference_status`.
 
 ---
 

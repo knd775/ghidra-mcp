@@ -180,7 +180,7 @@ public class AnnotationScanner {
                 if (isWrite && isDryRunRequested(query, body)) {
                     if (hasParam(bindings, "dry_run")) {
                         Program program = (programProvider != null && hasParam(bindings, "program"))
-                                ? resolveProgramForDryRun(bindings, query) : null;
+                                ? resolveProgramForDryRun(bindings, query, body) : null;
                         if (program != null) {
                             int tx = program.startTransaction("[DRY RUN] " + tool.path());
                             try {
@@ -225,12 +225,17 @@ public class AnnotationScanner {
     /**
      * Resolve the Program for dry-run wrapping by finding the "program" param binding.
      */
-    private Program resolveProgramForDryRun(ParamBinding[] bindings, Map<String, String> query) {
+    private Program resolveProgramForDryRun(ParamBinding[] bindings, Map<String, String> query,
+            Map<String, Object> body) {
         // Look for a @Param(value = "program") binding
         for (ParamBinding binding : bindings) {
             if (binding != null && "program".equals(binding.param.value())) {
                 String programName = query.get("program");
-                if (programName != null && !programName.isEmpty()) {
+                if (programName == null || programName.isBlank()) {
+                    Object raw = body != null ? body.get("program") : null;
+                    if (raw != null) programName = String.valueOf(raw);
+                }
+                if (programName != null && !programName.isBlank()) {
                     return programProvider.getProgram(programName);
                 }
                 break;
@@ -290,10 +295,26 @@ public class AnnotationScanner {
     private static Object resolveParam(ParamBinding binding, Map<String, String> query,
             Map<String, Object> body) {
         if (binding.param.source() == ParamSource.QUERY) {
-            return resolveQueryParam(binding, query);
+            Object fromQuery = resolveQueryParam(binding, query);
+            if ("program".equals(binding.param.value())) {
+                if (!isBlankParam(fromQuery)) return fromQuery;
+                Object fromBody = resolveBodyParam(binding, body);
+                if (!isBlankParam(fromBody)) return fromBody;
+            }
+            return fromQuery;
         } else {
-            return resolveBodyParam(binding, body);
+            Object fromBody = resolveBodyParam(binding, body);
+            if ("program".equals(binding.param.value())) {
+                if (!isBlankParam(fromBody)) return fromBody;
+                Object fromQuery = resolveQueryParam(binding, query);
+                if (!isBlankParam(fromQuery)) return fromQuery;
+            }
+            return fromBody;
         }
+    }
+
+    private static boolean isBlankParam(Object value) {
+        return value == null || (value instanceof String s && s.isBlank());
     }
 
     private static Object resolveQueryParam(ParamBinding binding, Map<String, String> query) {

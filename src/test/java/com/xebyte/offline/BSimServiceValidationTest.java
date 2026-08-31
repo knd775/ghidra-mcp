@@ -56,6 +56,8 @@ public class BSimServiceValidationTest extends TestCase {
     @Override
     protected void setUp() throws Exception {
         tmp = Files.createTempDirectory("bsim-test-");
+        com.xebyte.core.BSimTestEnv.setAllowlist("");
+        com.xebyte.core.BSimTestEnv.setRoot("");
         File home = tmp.resolve("ghidra").toFile();
         File support = new File(home, "support");
         assertTrue(support.mkdirs());
@@ -81,6 +83,7 @@ public class BSimServiceValidationTest extends TestCase {
     @Override
     protected void tearDown() throws Exception {
         BSimTestCredentials.clear();
+        com.xebyte.core.BSimTestEnv.clear();
         if (tmp != null) {
             deleteRecursively(tmp);
         }
@@ -127,10 +130,100 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(json, json.contains("config_templates"));
     }
 
+    public void testListDatabasesIncludesAllowlistedPostgres() {
+        com.xebyte.core.BSimTestEnv.setAllowlist(
+                "postgresql://ghidra-bsim:5432/embedded,postgresql://ghidra-bsim:5432/userland");
+        com.xebyte.core.BSimTestEnv.setTemplates("embedded:medium_32,userland:medium_64");
+        Response r = svc.listDatabases();
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("postgresql://ghidra-bsim:5432/embedded"));
+        assertTrue(json, json.contains("postgresql://ghidra-bsim:5432/userland"));
+        assertTrue(json, json.contains("medium_32"));
+        assertTrue(json, json.contains("medium_64"));
+        assertTrue(json, json.contains("\"backend\":\"postgresql\""));
+    }
+
+    public void testCreateDbPostgresRejectedOffAllowlist() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setPassword("secret");
+        Response r = svc.createDb("postgresql://evil.example/other", "medium_32", "", "", true, WAIT);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("GHIDRA_MCP_BSIM_URLS"));
+        assertTrue(json, json.contains("evil.example") || json.contains("other"));
+        assertNull(findCommand("createdatabase"));
+    }
+
+    public void testCreateDbPostgresRejectedWithoutAllowlist() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("");
+        com.xebyte.core.BSimTestEnv.setPassword("secret");
+        Response r = svc.createDb("postgresql://ghidra-bsim:5432/embedded", "medium_32", "", "", true, WAIT);
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson().contains("GHIDRA_MCP_BSIM_URLS"));
+        assertNull(findCommand("createdatabase"));
+    }
+
+    public void testCreateDbPostgresRejectedWithoutPassword() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setPassword("");
+        Response r = svc.createDb("postgresql://ghidra-bsim:5432/embedded", "medium_32", "", "", true, WAIT);
+        assertTrue(r instanceof Response.Err);
+        assertTrue(r.toJson().contains("GHIDRA_MCP_BSIM_PASSWORD"));
+        assertNull(findCommand("createdatabase"));
+    }
+
+    public void testCreateDbPostgresRunsWhenAllowlisted() throws Exception {
+        Path root = tmp.resolve("sidecars");
+        Files.createDirectories(root);
+        com.xebyte.core.BSimTestEnv.setRoot(root.toString());
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setUser("bsim");
+        com.xebyte.core.BSimTestEnv.setPassword("secret");
+        Response r = svc.createDb("postgresql://ghidra-bsim:5432/embedded", "medium_32",
+                "embedded", "ARM refs", true, WAIT);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        List<String> created = findCommand("createdatabase");
+        assertNotNull(created);
+        assertTrue(created.contains("postgresql://bsim@ghidra-bsim:5432/embedded")
+                || created.stream().anyMatch(s -> s.contains("ghidra-bsim") && s.contains("embedded")));
+        assertFalse("password must not appear in argv", created.contains("secret"));
+        assertTrue("postgres password on stdin", stdins.contains("secret\n"));
+        Path sidecar = root.resolve("embedded.ghidra-mcp.json");
+        assertTrue("create writes a template sidecar under ROOT", Files.isRegularFile(sidecar));
+        assertTrue(Files.readString(sidecar).contains("medium_32"));
+    }
+
+    public void testIngestPostgresAndGhidraServerFeedsBothPasswords() {
+        com.xebyte.core.BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/embedded");
+        com.xebyte.core.BSimTestEnv.setUser("bsim");
+        com.xebyte.core.BSimTestEnv.setPassword("bsim-secret");
+        BSimTestCredentials.install("5n4ck3y", "ghidra-secret");
+        Response r = svc.ingest(
+                "postgresql://ghidra-bsim:5432/embedded",
+                "ghidra://172.16.1.104/general/5n4ck3y/nullcog-v2",
+                "", true, false, "", WAIT);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertTrue("Ghidra Server then BSim postgres on stdin",
+                stdins.contains("ghidra-secret\nbsim-secret\n"));
+        List<String> gen = findCommand("generatesigs");
+        assertNotNull(gen);
+        assertFalse(gen.contains("bsim-secret"));
+        assertFalse(gen.contains("ghidra-secret"));
+    }
+
     public void testPointerSizeQueryWarningIsAdvisory() {
         assertNotNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(64, "medium_32"));
         assertNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(32, "medium_32"));
         assertNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(64, "medium_64"));
+        assertNull(com.xebyte.core.BSimUrls.pointerSizeQueryWarning(64, "medium_nosize"));
+        assertNull(com.xebyte.core.BSimUrls.pointerSizeIngestError(32, "ARM:LE:32:Cortex", "medium_nosize"));
+        assertNull(com.xebyte.core.BSimUrls.pointerSizeIngestError(64, "x86:LE:64:default", "medium_nosize"));
+        String sized = com.xebyte.core.BSimUrls.pointerSizeIngestError(
+                64, "x86:LE:64:default", "medium_32");
+        assertNotNull(sized);
+        assertTrue(sized, sized.contains("medium_32"));
+        assertTrue(sized, sized.contains("medium_nosize"));
         Path root = tmp.resolve("bsimroot");
         try {
             Files.createDirectories(root);
@@ -283,7 +376,8 @@ public class BSimServiceValidationTest extends TestCase {
     }
 
     public void testApplyRequiresMinConfidence() {
-        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, true, 0.7, 10, "", WAIT);
+        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, true, 0.7, 10, "",
+                "", "", "", "", 8, false, WAIT);
         assertTrue(r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("min_confidence"));
@@ -294,17 +388,26 @@ public class BSimServiceValidationTest extends TestCase {
     public void testQueryThresholdDefaultsAreConfidenceFirst() throws Exception {
         java.lang.reflect.Method query = BSimService.class.getMethod(
                 "query", String.class, String.class, double.class, double.class,
-                int.class, String.class, int.class);
+                int.class, String.class, String.class, String.class, String.class,
+                String.class, int.class, int.class, int.class);
         Param similarity = paramNamed(query, "similarity_threshold");
         Param confidence = paramNamed(query, "confidence_threshold");
         assertEquals("0.0", similarity.defaultValue());
         assertEquals("10.0", confidence.defaultValue());
+        Param minFeat = paramNamed(query, "min_feature_count");
+        assertEquals("8", minFeat.defaultValue());
 
         java.lang.reflect.Method apply = BSimService.class.getMethod(
                 "applyMatches", String.class, Double.class, double.class, boolean.class,
-                boolean.class, double.class, int.class, String.class, int.class);
+                boolean.class, double.class, int.class, String.class,
+                String.class, String.class, String.class, String.class, int.class,
+                boolean.class, int.class);
         Param minConfidence = paramNamed(apply, "min_confidence");
         assertEquals("apply still has no default floor", Param.NO_DEFAULT, minConfidence.defaultValue());
+        Param applySim = paramNamed(apply, "similarity_threshold");
+        assertEquals("0.0", applySim.defaultValue());
+        Param applyUnident = paramNamed(apply, "apply_unidentifiable");
+        assertEquals("false", applyUnident.defaultValue());
     }
 
     private static Param paramNamed(java.lang.reflect.Method method, String name) {
@@ -320,7 +423,8 @@ public class BSimServiceValidationTest extends TestCase {
     }
 
     public void testQueryRequiresProgram() {
-        Response r = svc.query("file:/tmp/db", "FUN_1", 0.7, 0.0, 10, "", WAIT);
+        Response r = svc.query("file:/tmp/db", "FUN_1", 0.7, 0.0, 10, "",
+                "", "", "", "", 8, 0, WAIT);
         assertTrue(r instanceof Response.Err);
         assertTrue(r.toJson().contains("No program loaded"));
     }
@@ -334,7 +438,8 @@ public class BSimServiceValidationTest extends TestCase {
 
     public void testDryRunDefaultDoesNotNeedAProgramWhenConfidenceMissing() {
         // The confidence check must run before any write or query.
-        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, 0.7, 10, "", WAIT);
+        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, 0.7, 10, "",
+                "", "", "", "", 8, false, WAIT);
         assertTrue(r instanceof Response.Err);
         assertTrue(commands.isEmpty());
     }
@@ -408,6 +513,147 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(BSimJobs.MAX_WAIT_SECONDS < 60);
     }
 
+    public void testCreateDbBlankTemplateDefaultsToMediumNosize() throws Exception {
+        Path dbDir = tmp.resolve("nosize-db");
+        Response r = svc.createDb("file:" + dbDir.resolve("lfs"), "", "", "", true, WAIT);
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("medium_nosize"));
+        List<String> created = findCommand("createdatabase");
+        assertNotNull(created);
+        assertTrue(created.contains("medium_nosize"));
+        java.lang.reflect.Method create = BSimService.class.getMethod(
+                "createDb", String.class, String.class, String.class, String.class,
+                boolean.class, int.class);
+        Param template = paramNamed(create, "config_template");
+        assertEquals("medium_nosize", template.defaultValue());
+    }
+
+    public void testPointerSizeIngestGatesOnTemplateNotCorpus() throws Exception {
+        Path db = tmp.resolve("mixdb");
+        Files.writeString(Path.of(db.toString() + ".ghidra-mcp.json"),
+                "{\"config_template\":\"medium_nosize\"}\n");
+        // 32-bit program; listexes reports a 64-bit executable. The old guard
+        // compared against corpus contents and refused. medium_nosize must not.
+        BSimCli mixCli = new BSimCli((cmd, timeout) -> {
+            commands.add(List.copyOf(cmd));
+            if (cmd.contains("listexes")) {
+                return new BSimCli.Result(0,
+                        "ffff0000ffff0000ffff0000ffff0000 userland.o x86:LE:64:default gcc\n"
+                                + "1 executables found\n", cmd);
+            }
+            return new BSimCli.Result(0, canned(cmd), cmd);
+        }, tmp.resolve("ghidra").toFile());
+        Program program = noClobberProgram("firmware.elf", new java.util.concurrent.CopyOnWriteArrayList<>());
+        BSimService mix = new BSimService(providerOf(program), new NoopThreadingStrategy(), mixCli);
+        Response r = mix.ingest("file:" + db, "firmware.elf", "", true, false, "", WAIT);
+        assertFalse("medium_nosize must accept mixed pointer sizes: " + r.toJson(),
+                r instanceof Response.Err);
+        assertNotNull(findCommand("generatesigs"));
+    }
+
+    public void testPointerSizeIngestRefusesSizedTemplateMismatch() throws Exception {
+        Path db = tmp.resolve("sized32");
+        Files.writeString(Path.of(db.toString() + ".ghidra-mcp.json"),
+                "{\"config_template\":\"medium_32\"}\n");
+        Program program = noClobberProgram("userland.elf",
+                new java.util.concurrent.CopyOnWriteArrayList<>(), 64);
+        BSimService sized = new BSimService(providerOf(program), new NoopThreadingStrategy(),
+                recordingCli(false));
+        Response r = sized.ingest("file:" + db, "userland.elf", "", true, false, "", WAIT);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("medium_32"));
+        assertTrue(json, json.contains("64-bit"));
+        assertNull(findCommand("generatesigs"));
+    }
+
+    public void testIngestSkipsIdenticalMd5() throws Exception {
+        Path db = tmp.resolve("dupdb");
+        BSimCli skipCli = new BSimCli((cmd, timeout) -> {
+            commands.add(List.copyOf(cmd));
+            if (cmd.contains("listexes")) {
+                return new BSimCli.Result(0,
+                        "00112233445566778899aabbccddeeff nullcog.elf ARM:LE:32:Cortex gcc\n"
+                                + "1 executables found\n", cmd);
+            }
+            return new BSimCli.Result(0, canned(cmd), cmd);
+        }, tmp.resolve("ghidra").toFile());
+        Program program = noClobberProgram("nullcog.elf",
+                new java.util.concurrent.CopyOnWriteArrayList<>());
+        BSimService skip = new BSimService(providerOf(program), new NoopThreadingStrategy(), skipCli);
+        Response r = skip.ingest("file:" + db, "nullcog.elf", "", true, false, "", WAIT);
+        assertFalse(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("already_ingested"));
+        assertTrue(json, json.contains("00112233445566778899aabbccddeeff"));
+        assertNull(findCommand("generatesigs"));
+    }
+
+    public void testIngestSameMd5DifferentCompilerIsExplicit() throws Exception {
+        Path db = tmp.resolve("compilerdb");
+        BSimCli skipCli = new BSimCli((cmd, timeout) -> {
+            commands.add(List.copyOf(cmd));
+            if (cmd.contains("listexes")) {
+                return new BSimCli.Result(0,
+                        "00112233445566778899aabbccddeeff nullcog.elf x86:LE:64:default windows\n"
+                                + "1 executables found\n", cmd);
+            }
+            return new BSimCli.Result(0, canned(cmd), cmd);
+        }, tmp.resolve("ghidra").toFile());
+        Program program = noClobberProgram("nullcog.elf",
+                new java.util.concurrent.CopyOnWriteArrayList<>(), 32, "gcc");
+        BSimService skip = new BSimService(providerOf(program), new NoopThreadingStrategy(), skipCli);
+        Response r = skip.ingest("file:" + db, "nullcog.elf", "", true, false, "", WAIT);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("MD5"));
+        assertTrue(json, json.contains("windows"));
+        assertTrue(json, json.contains("new database"));
+        assertNull(findCommand("generatesigs"));
+    }
+
+    public void testQueryWholeProgramPassesAllSentinelNotDash() throws Exception {
+        List<Path> saved = new java.util.concurrent.CopyOnWriteArrayList<>();
+        BSimService qsvc = queryService(saved, true);
+        Response r = qsvc.query("file:" + tmp.resolve("qdb"), "", 0.05, 0.0, 10, "",
+                "", "", "", "", 8, 0, WAIT);
+        assertFalse(r instanceof Response.Err);
+        List<String> cmd = null;
+        for (List<String> c : commands) {
+            if (c.contains("-postScript")) cmd = c;
+        }
+        assertNotNull(cmd);
+        int ps = cmd.indexOf("-postScript");
+        assertEquals("ALL", cmd.get(ps + 4));
+        assertEquals("0.05", cmd.get(ps + 5));
+        assertTrue(cmd.contains("min_feature_count=8"));
+    }
+
+    public void testQueryPassesServerSideFilters() throws Exception {
+        List<Path> saved = new java.util.concurrent.CopyOnWriteArrayList<>();
+        BSimService qsvc = queryService(saved, true);
+        Response r = qsvc.query("file:" + tmp.resolve("qdb"), "lfs_bd_read", 0.0, 10.0, 10, "",
+                "ARM:LE:32:Cortex", "littlefs.o", "gcc", "aabbccddeeff00112233445566778899",
+                8, 0, WAIT);
+        assertFalse("query failed: " + r.toJson(), r instanceof Response.Err);
+        List<String> cmd = null;
+        for (List<String> c : commands) {
+            if (c.contains("-postScript")) cmd = c;
+        }
+        assertNotNull(cmd);
+        assertTrue(cmd.contains("arch=ARM:LE:32:Cortex"));
+        assertTrue(cmd.contains("executable=littlefs.o"));
+        assertTrue(cmd.contains("compiler=gcc"));
+        assertTrue(cmd.contains("exclude_md5=aabbccddeeff00112233445566778899"));
+    }
+
+    public void testPackedProgramFileNamePreservesIdentity() {
+        assertEquals("littlefs-v2.9.3-gcc13-arm-Os.o.gzf",
+                BSimService.packedProgramFileName("littlefs-v2.9.3-gcc13-arm-Os.o"));
+        assertEquals("program.gzf", BSimService.packedProgramFileName(""));
+        assertEquals("weird_name.gzf", BSimService.packedProgramFileName("weird name"));
+    }
+
     // ------------------------------------------------------------------
     // Temp-file staging: saveToPackedFile refuses to overwrite, so the gzf
     // handed to it must not exist yet. File.createTempFile pre-created it and
@@ -422,9 +668,9 @@ public class BSimServiceValidationTest extends TestCase {
         Set<String> before = tmpEntries("bsim-query-");
 
         Response single = qsvc.query("file:" + tmp.resolve("qdb"), "blake2b_compress",
-                0.7, 0.0, 10, "", WAIT);
+                0.7, 0.0, 10, "", "", "", "", "", 8, 0, WAIT);
         Response whole = qsvc.query("file:" + tmp.resolve("qdb"), "",
-                0.9, 0.0, 3, "", WAIT);
+                0.9, 0.0, 3, "", "", "", "", "", 8, 0, WAIT);
 
         assertFalse("single-function query failed: " + single.toJson(),
                 single instanceof Response.Err);
@@ -433,6 +679,7 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(single.toJson(), single.toJson().contains("blake2b_compress"));
         assertEquals("both queries must export the program", 2, saved.size());
         for (Path gzf : saved) {
+            assertEquals("nullcog.elf.gzf", gzf.getFileName().toString());
             assertFalse("gzf must be cleaned up: " + gzf, Files.exists(gzf));
             assertFalse("query work dir must be cleaned up: " + gzf.getParent(),
                     Files.exists(gzf.getParent()));
@@ -446,7 +693,8 @@ public class BSimServiceValidationTest extends TestCase {
         BSimService qsvc = queryService(saved, false); // runner writes no JSON
         Set<String> before = tmpEntries("bsim-query-");
 
-        Response r = qsvc.query("file:" + tmp.resolve("qdb"), "", 0.7, 0.0, 10, "", WAIT);
+        Response r = qsvc.query("file:" + tmp.resolve("qdb"), "", 0.7, 0.0, 10, "",
+                "", "", "", "", 8, 0, WAIT);
 
         assertTrue(r instanceof Response.Err);
         assertTrue(r.toJson(), r.toJson().contains("produced no JSON"));
@@ -469,6 +717,7 @@ public class BSimServiceValidationTest extends TestCase {
         assertFalse("ingest of an open program failed: " + r.toJson(),
                 r instanceof Response.Err);
         assertEquals("staging must export the program once", 1, saved.size());
+        assertEquals("nullcog.elf.gzf", saved.get(0).getFileName().toString());
         assertFalse("staged gzf must be cleaned up", Files.exists(saved.get(0)));
         assertEquals("temp signature-xml dirs must not leak",
                 beforeXml, tmpEntries("bsim-xml-"));
@@ -499,7 +748,8 @@ public class BSimServiceValidationTest extends TestCase {
                 if (writeQueryJson && ps >= 0) {
                     // args after -postScript: scriptName, dbUrl, outJson, func, ...
                     Path outJson = Path.of(cmd.get(ps + 3));
-                    boolean wholeProgram = "-".equals(cmd.get(ps + 4));
+                    boolean wholeProgram = "ALL".equals(cmd.get(ps + 4))
+                            || "-".equals(cmd.get(ps + 4));
                     try {
                         Files.writeString(outJson, wholeProgram
                                 ? "{\"program\":\"nullcog.elf\",\"results\":["
@@ -531,14 +781,25 @@ public class BSimServiceValidationTest extends TestCase {
         };
     }
 
+    private static Program noClobberProgram(String name, List<Path> saved) {
+        return noClobberProgram(name, saved, 32, "gcc");
+    }
+
+    private static Program noClobberProgram(String name, List<Path> saved, int bits) {
+        return noClobberProgram(name, saved, bits, "gcc");
+    }
+
     /** A Program that, like real Ghidra, refuses to saveToPackedFile onto an
      *  existing file — the exact behavior the temp staging must respect. */
-    private static Program noClobberProgram(String name, List<Path> saved) {
+    private static Program noClobberProgram(String name, List<Path> saved, int bits, String compiler) {
         return (Program) Proxy.newProxyInstance(
                 Program.class.getClassLoader(), new Class<?>[] {Program.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "getName" -> name;
                     case "getExecutableMD5" -> "00112233445566778899aabbccddeeff";
+                    case "getExecutablePath" -> "";
+                    case "getCompilerSpec" -> compilerSpec(compiler);
+                    case "getLanguageID" -> languageId(bits);
                     case "saveToPackedFile" -> {
                         File f = (File) args[0];
                         if (f.exists()) {
@@ -549,7 +810,7 @@ public class BSimServiceValidationTest extends TestCase {
                         yield null;
                     }
                     case "getFunctionManager" -> emptyFunctionManager();
-                    case "getLanguage" -> language32();
+                    case "getLanguage" -> languageOf(bits);
                     case "getDomainFile" -> localDomainFile();
                     case "toString" -> name;
                     case "hashCode" -> System.identityHashCode(proxy);
@@ -577,18 +838,35 @@ public class BSimServiceValidationTest extends TestCase {
                 });
     }
 
-    private static Language language32() {
+    private static Language languageOf(int bits) {
         LanguageDescription desc = (LanguageDescription) Proxy.newProxyInstance(
                 LanguageDescription.class.getClassLoader(),
                 new Class<?>[] {LanguageDescription.class},
                 (prox, m, a) -> switch (m.getName()) {
-                    case "getSize" -> 32;
+                    case "getSize" -> bits;
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
         return (Language) Proxy.newProxyInstance(
                 Language.class.getClassLoader(), new Class<?>[] {Language.class},
                 (prox, m, a) -> switch (m.getName()) {
                     case "getLanguageDescription" -> desc;
+                    default -> throw new UnsupportedOperationException(m.getName());
+                });
+    }
+
+    private static ghidra.program.model.lang.LanguageID languageId(int bits) {
+        String id = bits == 64 ? "x86:LE:64:default" : "ARM:LE:32:Cortex";
+        return new ghidra.program.model.lang.LanguageID(id);
+    }
+
+    private static ghidra.program.model.lang.CompilerSpec compilerSpec(String id) {
+        ghidra.program.model.lang.CompilerSpecID specId =
+                new ghidra.program.model.lang.CompilerSpecID(id);
+        return (ghidra.program.model.lang.CompilerSpec) Proxy.newProxyInstance(
+                ghidra.program.model.lang.CompilerSpec.class.getClassLoader(),
+                new Class<?>[] {ghidra.program.model.lang.CompilerSpec.class},
+                (prox, m, a) -> switch (m.getName()) {
+                    case "getCompilerSpecID" -> specId;
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
     }

@@ -1,0 +1,14 @@
+# lshvector source pin. Copied out of Ghidra at image build time.
+# Ghidra 12.1.2 / tag Ghidra_12.1.2_build / commit below.
+# Columns: path  git-blob-sha1
+commit c0f584bf229fffba61b36431f3ce30c0c3e4e682
+tag Ghidra_12.1.2_build
+ghidra 12.1.2
+Makefile.lshvector 13069f6335a997835cb16796577bf4d1191ab077
+lshvector.control 7f58d8616487aa5c69d4679bfbdbf6da01beb11a
+lshvector--1.0.sql ce1ee6a3d94e8763aa78cfece12f685d8cc55013
+c/binhash.c 8dba3403051811e7291cf4e24e9189706953e22f
+c/crc32.c cd9b717269d77673673c053326cf83ca4455e43f
+c/lsh.c ac362f66a7409c977a65c09220bb442c3a9ffccb
+c/lsh.h 18c47128efa87fb44559cf6c3cb03c8a94c235ba
+c/weights.c 556e0415adffb8f924243238a6a73b59e399cd30

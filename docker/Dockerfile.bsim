@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1
+# PostgreSQL for Ghidra BSim. A stock postgres image is not enough: BSim's
+# schema needs the lshvector C extension Ghidra ships under
+# Ghidra/Features/BSim/src/lshvector/. Without it `bsim createdatabase`
+# fails because the type does not exist.
+#
+# Do not use support/bsim_ctl. That builds PostgreSQL from the copy Ghidra
+# bundles. Compile the one extension against upstream postgres:16 instead.
+#
+#   docker build -f docker/Dockerfile.bsim \
+#     -t ghcr.io/knd775/ghidra-mcp-bsim:dev .
+#
+# lshvector source is fetched at build time from the Ghidra tag that matches
+# GHIDRA_VERSION (same pin as docker/Dockerfile), then blob-checked against
+# docker/bsim/lshvector.lock.
+
+ARG PG_MAJOR=16
+ARG GHIDRA_VERSION=12.1.2
+ARG GHIDRA_TAG=Ghidra_12.1.2_build
+ARG LSHVECTOR_COMMIT=c0f584bf229fffba61b36431f3ce30c0c3e4e682
+
+FROM postgres:${PG_MAJOR}-bookworm AS build
+ARG PG_MAJOR
+ARG GHIDRA_VERSION
+ARG GHIDRA_TAG
+ARG LSHVECTOR_COMMIT
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        git \
+        postgresql-server-dev-${PG_MAJOR} \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/bsim/lshvector.lock /tmp/lshvector.lock
+COPY docker/bsim/fetch_lshvector.sh /tmp/fetch_lshvector.sh
+RUN sed -i 's/\r$//' /tmp/fetch_lshvector.sh /tmp/lshvector.lock \
+    && chmod 0755 /tmp/fetch_lshvector.sh \
+    && grep -q "$LSHVECTOR_COMMIT" /tmp/lshvector.lock \
+    && grep -q "$GHIDRA_TAG" /tmp/lshvector.lock \
+    && grep -q "$GHIDRA_VERSION" /tmp/lshvector.lock \
+    && /tmp/fetch_lshvector.sh /tmp/lshvector.lock /tmp/lshvector \
+    && make -C /tmp/lshvector -f Makefile.lshvector PG_CONFIG=pg_config \
+    && make -C /tmp/lshvector -f Makefile.lshvector PG_CONFIG=pg_config install \
+    && pkglib="$(pg_config --pkglibdir)" \
+    && sharedir="$(pg_config --sharedir)" \
+    && mkdir -p /out"$pkglib" /out"$sharedir/extension" \
+    && cp "$pkglib"/lshvector.so /out"$pkglib"/ \
+    && cp "$sharedir"/extension/lshvector* /out"$sharedir/extension"/
+
+FROM postgres:${PG_MAJOR}-bookworm
+ARG PG_MAJOR
+ARG GHIDRA_VERSION
+ARG GHIDRA_TAG
+ARG LSHVECTOR_COMMIT
+LABEL org.ghidra-mcp.bsim.ghidra="${GHIDRA_VERSION}" \
+      org.ghidra-mcp.bsim.ghidra-tag="${GHIDRA_TAG}" \
+      org.ghidra-mcp.bsim.lshvector-commit="${LSHVECTOR_COMMIT}" \
+      org.ghidra-mcp.bsim.postgres="${PG_MAJOR}"
+# openssl: self-signed cert at start. The official image does not ship it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/ /
+COPY docker/bsim/pg_hba.conf /etc/postgresql/pg_hba.conf
+COPY docker/bsim/entrypoint.sh /usr/local/bin/bsim-entrypoint.sh
+COPY docker/bsim/backup.sh /usr/local/bin/bsim-backup.sh
+RUN sed -i 's/\r$//' \
+        /usr/local/bin/bsim-entrypoint.sh \
+        /usr/local/bin/bsim-backup.sh \
+        /etc/postgresql/pg_hba.conf \
+    && chmod 0755 /usr/local/bin/bsim-entrypoint.sh \
+                  /usr/local/bin/bsim-backup.sh \
+    && chmod 0644 /etc/postgresql/pg_hba.conf
+ENV BSIM_SSL_CERT_DIR=/var/lib/postgresql/certs
+ENTRYPOINT ["/usr/local/bin/bsim-entrypoint.sh"]

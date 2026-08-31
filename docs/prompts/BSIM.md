@@ -12,7 +12,9 @@ rename safe.
 The CLI is on disk in Ghidra 12.1.2 (`support/bsim`). It is not on the
 headless server's module classpath, so these tools spawn `bsim` (and, for
 query, `analyzeHeadless`) as a separate JVM. That cannot knock over the
-server. H2 databases are single-writer; the server serialises BSim calls.
+server. Compose stores the corpus in PostgreSQL so GUI clients on the
+VPN can use the same database; leftover H2 `file:` databases remain
+single-writer and are serialised.
 
 ## The tools are not the work
 
@@ -185,8 +187,11 @@ skipped. Delete the sidecar to force a rebuild. One shared `wait_seconds`
 covers the matrix; leftovers are tickets. Userland:
 `path="references.userland.yaml"` (mounted at
 `/data/references.userland.yaml`). That file's `database:` field is
-`file:/srv/ghidra/bsim/userland` (`medium_64`). Do not ingest x86-64 into
-the existing ARM `file:/srv/ghidra/bsim/re` database.
+`postgresql://ghidra-bsim:5432/userland` (`medium_nosize`). Do not ingest
+x86-64 into `embedded` (ARM). The two databases share one
+PostgreSQL instance; both use `medium_nosize`. The split is corpus
+domain, not pointer size. Mixing architectures is harmless; native
+x86-64 references cannot substitute for ARM ones.
 
 DWARF paths are `/ref/<name>/...`. In Ghidra, one Source Files transform
 covers the corpus: `/ref/` -> `<local checkout root>/`. Sidecars record
@@ -216,19 +221,25 @@ Poll a builder job. Blank `job_id` lists retained jobs.
 ### `bsim_create_db`
 
 ```
-bsim_create_db(db_url, config_template="medium_32", name=None, description=None,
+bsim_create_db(db_url, config_template="medium_nosize", name=None, description=None,
                callgraph=True, wait_seconds=45)
 ```
 
-`file:/srv/ghidra/bsim/littlefs` is an H2 file. No extra service, one
-writer. Use PostgreSQL when two processes need to write. `medium_32` is
-the template for 32-bit ARM firmware. `callgraph=True` is the default
-because call-graph data is the one thing that actually helped in the
-failed littlefs attempt. `dry_run=true` returns `would_execute` and does
-not create the database. Writes `<name>.ghidra-mcp.json` next to an H2
-`file:` database so `bsim_list_databases` can report the template.
-`medium_64` is required for x86-64 userland; 32-bit and 64-bit cannot
-share a database.
+`postgresql://ghidra-bsim:5432/embedded` (ARM, `medium_nosize`) and
+`.../userland` (x86-64, `medium_nosize`) are the compose databases. GUI
+clients on the VPN use `postgresql://<BIND_ADDR>:5432/<name>` with
+`BSIM_DB_USER` / `BSIM_DB_PASSWORD`. `file:` H2 URLs remain for leftover
+local files. Network URLs must be on
+`GHIDRA_MCP_BSIM_URLS` (fail-closed). `medium_nosize` is the template for
+every database, unconditionally: it beat `medium_32` under compiler and
+optimisation drift and gave up nothing on identical builds. `callgraph=True`
+is the default because call-graph data is the one thing that actually helped
+in the failed littlefs attempt. `dry_run=true` returns `would_execute` and
+does not create the database. Writes `<name>.ghidra-mcp.json` (next to an H2
+file, or under `GHIDRA_MCP_BSIM_ROOT` for postgres) so `bsim_list_databases`
+can report the template. Sized templates (`medium_32` / `medium_64`) still
+exist; ingest refuses a pointer-size mismatch against those because Ghidra
+will otherwise accept it and silently degrade results.
 
 ### `bsim_list_databases`
 
@@ -236,9 +247,11 @@ share a database.
 bsim_list_databases()
 ```
 
-Lists H2 databases under `GHIDRA_MCP_BSIM_ROOT` and the known config
-templates. Does not spawn the bsim CLI. Querying an x86-64 program
-against a `medium_32` database returns a warning, not a confusing error.
+Lists allowlisted `postgresql://` URLs (`GHIDRA_MCP_BSIM_URLS`) and any
+leftover H2 files under `GHIDRA_MCP_BSIM_ROOT`, plus the known config
+templates. Does not spawn the bsim CLI. Querying a sized template
+(`medium_32` / `medium_64`) against the wrong pointer size returns a
+warning, not a confusing error. `medium_nosize` does not.
 
 ### `bsim_ingest`
 
@@ -257,17 +270,25 @@ is stock Ghidra, which never reads this extension's environment
 variables, and its `HeadlessClientAuthenticator` falls back to a stdin
 prompt when there is no console. An invalid `source` is refused
 synchronously with the remedy. A program with no functions is refused. A
-64-bit program into a corpus that is already 32-bit is refused (the CLI
-would otherwise accept it and degrade silently). A stripped program is
+pointer-size mismatch against a sized template (`medium_32` / `medium_64`
+/ `large_32`) is refused — the CLI would otherwise accept it and degrade
+silently. `medium_nosize` accepts mixed sizes. Identical-MD5 re-ingest is
+skipped (BSim keys on MD5 but records the throwaway project URL). The
+response carries `executable_md5` for the artifact sidecar. A compiler-spec
+change on the same bytes (windows → gcc) still collides; that needs a new
+database, not a re-ingest. A stripped program is
 ingested with a warning. Ingest takes minutes: expect the job ticket, and
 verify by polling `bsim_job_status` and re-running `bsim_list_corpus` —
-never by `dry_run`.
+never by `dry_run`. The staged GZF keeps the program name, so
+`bsim_list_corpus` shows `littlefs-v2.9.3-gcc13-arm-Os`, not `"program"`.
 
 ### `bsim_query`
 
 ```
 bsim_query(db_url, program, function=None, similarity_threshold=0.0,
-           confidence_threshold=10.0, max_matches=10, wait_seconds=45)
+           confidence_threshold=10.0, max_matches=10, arch=None,
+           executable=None, compiler=None, exclude_md5=None,
+           min_feature_count=8, min_function_size=0, wait_seconds=45)
 ```
 
 Filter on confidence, not similarity. Cross-compiler matches
@@ -276,6 +297,18 @@ overlap is meaningful. The old default (`similarity_threshold=0.7`)
 returned nothing against a differently-compiled reference. 10.0 is a
 starting floor from one littlefs cross-build, not a calibration.
 
+`arch`, `executable`, `compiler`, and `exclude_md5` are server-side
+`BSimFilter` atoms (the same types the GUI search dialog uses). They are
+not applied after `max_matches`. Whole-program queries pass `ALL`, never
+`-` — a bare dash is eaten by `analyzeHeadless` and the threshold falls
+back to 0.7.
+
+Functions too small to identify (near-empty feature vectors; measured
+stubs matching a 24-byte wrapper at similarity 1.0, confidence 9.2) are
+**returned** with `identifiable=false` and a `reason` that names the
+measured feature count and the threshold. Query is investigation and
+must not hide data.
+
 Every match has `similarity` and `confidence` as separate numbers, plus
 the source executable name and architecture. If the top two
 differently-named hits are within 0.05 similarity, `ambiguous` is true.
@@ -283,26 +316,31 @@ A `similarity_threshold` above 0.5 adds a warning: it will silently
 drop the matches this feature exists to find.
 
 A short generic function (an accessor, a thunk) can still score high
-similarity. It should come back with **low confidence**. That split is
-the whole feature. If it does not, BSim is not solving this problem and
-the tools should not be used to rename anything.
+similarity. It should come back with **low confidence** and
+`identifiable=false` when the vector is too small. That split is
+the whole feature.
 
-`bsim_apply_matches` still requires an explicit `min_confidence` and
-still queries at `similarity_threshold=0.7` / `min_similarity=0.8`
-unless you pass those. Cross-build apply needs the same 0.0 similarity
-floor as query; do not copy the apply defaults onto query.
+`bsim_apply_matches` still requires an explicit `min_confidence`. Its
+query-time `similarity_threshold` now defaults to 0.0, same as query.
+It skips unidentifiable functions unless `apply_unidentifiable=true`.
 
 ### `bsim_apply_matches`
 
 ```
 bsim_apply_matches(db_url, program, min_confidence=<required>,
-                   min_similarity=0.8, skip_named=True, dry_run=True, wait_seconds=45)
+                   min_similarity=0.8, skip_named=True, dry_run=True,
+                   similarity_threshold=0.0, arch=None, executable=None,
+                   compiler=None, exclude_md5=None, min_feature_count=8,
+                   apply_unidentifiable=False, wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
-functions you already trust. `dry_run=True` is the default and does not
-call `setName`. `skip_named=True` will not overwrite an analyst's name.
-An `ambiguous` result is never applied, whatever the scores.
+functions you already trust, after unidentifiable functions are out of
+the set — a floor around 10 then becomes meaningful again. `dry_run=True`
+is the default and does not call `setName`. `skip_named=True` will not
+overwrite an analyst's name. An `ambiguous` result is never applied,
+whatever the scores. Unidentifiable functions are skipped and counted
+unless `apply_unidentifiable=true`.
 
 Applied names are the BSim hit names as-is (C linkage, not PascalCase).
 `lfs_bd_read` is the right name here.
@@ -331,20 +369,37 @@ call abandoned by an upstream gateway still leaves evidence in the
 
 ## Deployment
 
-H2 to start:
+PostgreSQL, one instance, two databases. H2 `file:` URLs cannot be opened
+from a Ghidra GUI on another machine; the interactive search dialog needs
+a network service. A stock `postgres` image will not work — BSim's schema
+needs the `lshvector` C extension (image `ghidra-mcp-bsim`, sources
+pinned in `docker/bsim/lshvector.lock` to Ghidra 12.1.2). Do not use
+`support/bsim_ctl`. SSL is mandatory: Ghidra refuses a non-SSL connection.
+The service is on `BIND_ADDR:5432` (VPN/LAN, same posture as Ghidra
+Server RMI) and on the compose network as `ghidra-bsim`. It is not on
+the Cloudflare tunnel.
 
 ```
-file:/srv/ghidra/bsim/<db>
+postgresql://<BIND_ADDR>:5432/embedded   # medium_nosize, ARM firmware
+postgresql://<BIND_ADDR>:5432/userland   # medium_nosize, x86-64 Linux
 ```
 
-The directory must be writable by uid 1000 and sit on its own volume. It
-is not covered by `GHIDRA_MCP_FILE_ROOT`. Compose mounts
-`ghidra-bsim:/srv/ghidra/bsim`. Set `GHIDRA_MCP_BSIM_ROOT=/srv/ghidra/bsim`
-so a `file:` URL cannot wander.
+Login is `BSIM_DB_USER` / `BSIM_DB_PASSWORD` in `docker/.env`. Not the
+Ghidra Server account. `GHIDRA_MCP_BSIM_URLS` is the allowlist; a
+`db_url` off that list is a specific error, not a silent outbound
+connection. Passwords stay in the environment, never in the URL.
 
-Back it up. Regenerating a corpus means recompiling everything in it.
+`GHIDRA_MCP_BSIM_ROOT=/srv/ghidra/bsim` still confines leftover `file:`
+URLs and holds template sidecars. `bsim-backup` runs `pg_dump` of both
+databases and tars `ghidra-repos`.
 
-PostgreSQL later, via `bsim_ctl`, when more than one writer is needed.
+Migration (stand up → `bsim_create_db` → re-ingest artifacts →
+`bsim_list_corpus` → retire H2): `docker/bsim/MIGRATION.md`. Do not
+convert H2 files.
+
+If `ghidra.cacerts` is already set for Ghidra Server TLS, import
+`ghidra-bsim`'s `server.crt` into that store or GUI clients fail PKIX.
+The default (unset `ghidra.cacerts`) accepts the self-signed cert.
 
 ## What this is not
 
