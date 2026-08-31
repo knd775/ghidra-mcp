@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,26 @@ class BuildError(Exception):
         self.extra = extra or {}
 
 
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    """SIGKILL the session started by ``start_new_session``, not just ``proc``."""
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            proc.kill()
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def _default_run(
     argv: list[str],
     *,
@@ -104,17 +125,39 @@ def _default_run(
     timeout: float | None = 120,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    # New session so a timeout can kill pipelines, ``make -j``, and
+    # backgrounded descendants — subprocess.run only signals /bin/sh.
+    proc = subprocess.Popen(
         argv,
         cwd=cwd,
         env=None if env is None else dict(env),
-        check=check,
-        timeout=timeout,
-        input=input_text,
-        text=True,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group(proc)
+        try:
+            leftover_out, leftover_err = proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired as leftover:
+            leftover_out = leftover.stdout if leftover.stdout is not None else exc.stdout
+            leftover_err = leftover.stderr if leftover.stderr is not None else exc.stderr
+        raise subprocess.TimeoutExpired(
+            argv,
+            timeout if timeout is not None else 0,
+            output=leftover_out,
+            stderr=leftover_err,
+        ) from None
+    except BaseException:
+        _kill_process_group(proc)
+        raise
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, argv, stdout, stderr)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def sanitize_repo_id(repo: str) -> str:
@@ -342,6 +385,11 @@ def require_prepare_timeout(req: Mapping[str, Any]) -> int:
     raw = req.get("prepare_timeout", DEFAULT_PREPARE_TIMEOUT)
     if raw is None or raw == "":
         return DEFAULT_PREPARE_TIMEOUT
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        raise BuildError(
+            f"prepare_timeout must be an integer number of seconds; got {raw!r}",
+            status="invalid_prepare_timeout",
+        )
     try:
         timeout = int(raw)
     except (TypeError, ValueError) as exc:

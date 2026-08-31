@@ -540,6 +540,51 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertEquals(120, req.get("prepare_timeout"));
     }
 
+    public void testManifestRejectsFractionalPrepareTimeout() {
+        String json = "{\"references\":[{"
+                + "\"name\":\"frotz\","
+                + "\"repo\":\"https://gitlab.com/DavidGriffith/frotz.git\","
+                + "\"ref\":\"2.54\","
+                + "\"sources\":[\"src/common/process.c\"],"
+                + "\"prepare_timeout\":1.9,"
+                + "\"toolchain\":\"gcc13-arm\""
+                + "}]}";
+        try {
+            ReferenceManifest.parse(json, List.of("gcc13-arm"));
+            fail("fractional prepare_timeout must be rejected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("integer"));
+        }
+
+        String yaml = "references:\n"
+                + "  - name: frotz\n"
+                + "    repo: https://gitlab.com/DavidGriffith/frotz.git\n"
+                + "    ref: 2.54\n"
+                + "    sources: [src/common/process.c]\n"
+                + "    prepare_timeout: 1.9\n"
+                + "    toolchain: gcc13-arm\n";
+        try {
+            ReferenceManifest.parse(yaml, List.of("gcc13-arm"));
+            fail("fractional YAML prepare_timeout must be rejected");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("integer"));
+        }
+    }
+
+    public void testManifestAcceptsIntegralJsonPrepareTimeout() {
+        String json = "{\"references\":[{"
+                + "\"name\":\"frotz\","
+                + "\"repo\":\"https://gitlab.com/DavidGriffith/frotz.git\","
+                + "\"ref\":\"2.54\","
+                + "\"sources\":[\"src/common/process.c\"],"
+                + "\"prepare_timeout\":300,"
+                + "\"toolchain\":\"gcc13-arm\""
+                + "}]}";
+        List<ReferenceBuild.Spec> jobs = ReferenceManifest.parse(json, List.of("gcc13-arm"));
+        assertEquals(1, jobs.size());
+        assertEquals(300, jobs.get(0).prepareTimeout());
+    }
+
     public void testIdenticalInputsProduceIdenticalArgv() {
         ReferenceBuild.Spec a = ReferenceBuild.parse(
                 "littlefs", "https://github.com/littlefs-project/littlefs.git", "v2.9.3",

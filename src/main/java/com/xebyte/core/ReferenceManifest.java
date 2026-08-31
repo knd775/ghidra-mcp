@@ -198,7 +198,15 @@ public final class ReferenceManifest {
     private static int intOr(Map<String, Object> entry, String key, int fallback) {
         Object v = entry.get(key);
         if (v == null || String.valueOf(v).isBlank()) return fallback;
-        if (v instanceof Number n) return n.intValue();
+        if (v instanceof Number n) {
+            double d = n.doubleValue();
+            if (!Double.isFinite(d) || d != Math.rint(d)
+                    || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException(
+                        "references entry '" + key + "' must be an integer; got " + v);
+            }
+            return (int) d;
+        }
         try {
             return Integer.parseInt(String.valueOf(v).trim());
         } catch (NumberFormatException e) {

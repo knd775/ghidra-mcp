@@ -36,8 +36,9 @@ config_template: medium_nosize
 #
 # Each littlefs configuration × 3 toolchains × 3 opt = 9, for 18 littlefs
 # objects total. pico-sdk × 3 toolchains × 2 opt × 2 boards = 12.
-# frotz × gcc13-arm × {-O2, -Os} = 2. build_manifest skips jobs whose
-# outputs already exist.
+# frotz × gcc13-arm × {-O2, -Os} = 2. build_manifest skips a job only
+# when the output exists, its sidecar is readable, the artifact SHA-256
+# matches, and the recorded prepare command matches.
 # x86-64 userland lives in docker/references.userland.yaml (same
 # database, different build matrix).
 
