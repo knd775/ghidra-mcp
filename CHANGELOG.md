@@ -6,6 +6,23 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim corroboration (constants and strings)
+
+BSim features omit constant values by design, so two `printf` wrappers score
+similarity 1.0 regardless of the string. `bsim_ingest` now extracts listing-level
+constants, strings and **direct** callees (no callee recursion) into a companion
+`corroboration` schema in the same PostgreSQL database — not in Ghidra's BSim
+tables, so `bsim createdatabase` cannot drop them. `corroborate_match` compares
+a live query extract against that corpus row and returns evidence (shared /
+query-only / ref-only, distinctiveness marks, the string-match rule that
+fired). It never emits a blended score and never opens a reference program.
+`bsim_query(corroborate=true)` attaches the same evidence to ambiguous,
+unidentifiable, or low-confidence hits without reordering. String comparison
+defaults to `auto`: exact first, then basename for path-shaped `__FILE__`
+strings. A miss (pre-feature ingest, leftover H2) is `no_evidence`, not an
+error. Identical-MD5 ingest skip still writes corroboration when the program
+is open.
+
 ### BSim cross-build matching
 
 Five tools wrap Ghidra's `bsim` CLI so the headless server can match functions

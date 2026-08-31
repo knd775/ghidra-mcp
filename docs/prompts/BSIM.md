@@ -277,7 +277,11 @@ skipped (BSim keys on MD5 but records the throwaway project URL). The
 response carries `executable_md5` for the artifact sidecar. A compiler-spec
 change on the same bytes (windows → gcc) still collides; that needs a new
 database, not a re-ingest. A stripped program is
-ingested with a warning. Ingest takes minutes: expect the job ticket, and
+ingested with a warning. On PostgreSQL, ingest also writes per-function
+constants, strings and direct callees into the companion `corroboration`
+schema (same database, not BSim's tables). Identical-MD5 skip still writes
+that row when the program is open — that is the backfill path. Ingest takes
+minutes: expect the job ticket, and
 verify by polling `bsim_job_status` and re-running `bsim_list_corpus` —
 never by `dry_run`. The staged GZF keeps the program name, so
 `bsim_list_corpus` shows `littlefs-v2.9.3-gcc13-arm-Os`, not `"program"`.
@@ -288,7 +292,8 @@ never by `dry_run`. The staged GZF keeps the program name, so
 bsim_query(db_url, program, function=None, similarity_threshold=0.0,
            confidence_threshold=10.0, max_matches=10, arch=None,
            executable=None, compiler=None, exclude_md5=None,
-           min_feature_count=8, min_function_size=0, wait_seconds=45)
+           min_feature_count=8, min_function_size=0, wait_seconds=45,
+           corroborate=False, corroborate_max_candidates=3)
 ```
 
 Filter on confidence, not similarity. Cross-compiler matches
@@ -323,6 +328,33 @@ the whole feature.
 `bsim_apply_matches` still requires an explicit `min_confidence`. Its
 query-time `similarity_threshold` now defaults to 0.0, same as query.
 It skips unidentifiable functions unless `apply_unidentifiable=true`.
+
+`corroborate=true` attaches constants/strings/callee evidence to
+ambiguous, unidentifiable, or low-confidence hits (best confidence below
+20). It never reorders matches. BSim ranking stays BSim's.
+
+### `corroborate_match`
+
+```
+corroborate_match(program, function, db_url, ref_executable, ref_function,
+                  string_normalisation="auto")
+```
+
+The query side is extracted live from the open program. The reference
+side comes from the `corroboration` schema written at ingest. **No
+reference program is opened.** Returns shared / query-only / ref-only
+constants and strings, shared direct callees, and notes. Distinctiveness
+is judged at query time from corpus frequency. There is no blended
+score.
+
+`string_normalisation`: `off` (exact), `basename` (final path component
+when both look like paths), `auto` (exact first, then basename). A
+basename match reports both originals — firmware `__FILE__` paths and
+`-fdebug-prefix-map` `/ref/…` paths are the same file. Format strings
+match exactly.
+
+A lookup miss (executable ingested before this feature, or a leftover
+H2 `file:` URL) is `status: no_evidence`, not an error.
 
 ### `bsim_apply_matches`
 

@@ -41,17 +41,22 @@ import java.util.Map;
  * <p>A corpus you cannot inspect is one you stop trusting, which is why
  * {@code bsim_list_corpus} exists. The tools do not invent a corpus: compile
  * the same library at several optimisation levels and compiler versions and
- * ingest <em>with symbols</em>.
+ * ingest <em>with symbols</em>. Constants and strings are extracted at ingest
+ * into a companion {@code corroboration} schema so {@code corroborate_match}
+ * never needs the reference program open.
  */
 @McpToolGroup(value = "bsim",
         description = "Cross-build function matching via Ghidra BSim (CLI wrapper). "
                 + "Returns similarity and confidence separately; never a bare ranked list. "
+                + "corroborate_match adds constants/strings/callees as evidence, not a score. "
                 + "CLI-heavy calls return a job_id when they outlive wait_seconds; poll "
                 + "bsim_job_status for the result.")
 public class BSimService {
 
     static final String QUERY_SCRIPT_RESOURCE = "/bsim/BSim_McpQuery.java";
     static final String QUERY_SCRIPT_NAME = "BSim_McpQuery.java";
+    static final String EXTRACT_SCRIPT_RESOURCE = "/bsim/BSim_McpExtract.java";
+    static final String EXTRACT_SCRIPT_NAME = "BSim_McpExtract.java";
     static final String DEFAULT_TEMPLATE = "medium_nosize";
     static final String WHOLE_PROGRAM_FUNCTION = "ALL";
     static final String STRIPPED_WARNING =
@@ -70,6 +75,8 @@ public class BSimService {
     private final ThreadingStrategy threadingStrategy;
     private final BSimCli cli;
     private final BSimJobs jobs;
+    private final CorroborationStore.Factory stores;
+    private final CorroborationExtractor extractor;
 
     public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy) {
         this(programProvider, threadingStrategy, new BSimCli());
@@ -82,10 +89,19 @@ public class BSimService {
 
     public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy,
                        BSimCli cli, BSimJobs jobs) {
+        this(programProvider, threadingStrategy, cli, jobs,
+                CorroborationStore::open, CorroborationExtract.INSTANCE);
+    }
+
+    public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy,
+                       BSimCli cli, BSimJobs jobs, CorroborationStore.Factory stores,
+                       CorroborationExtractor extractor) {
         this.programProvider = programProvider;
         this.threadingStrategy = threadingStrategy;
         this.cli = cli;
         this.jobs = jobs;
+        this.stores = stores != null ? stores : CorroborationStore::open;
+        this.extractor = extractor != null ? extractor : CorroborationExtract.INSTANCE;
     }
 
     // ========================================================================
@@ -206,14 +222,18 @@ public class BSimService {
 
     @McpTool(path = "/bsim_ingest", method = "POST",
             description = "Generate BSim signatures from a ghidraURL (or an open program) and "
-                    + "commit them with `bsim generatesigs --bsim --commit`. Refuses a source with "
-                    + "no functions, and a pointer-size mismatch against a sized template "
-                    + "(medium_32 / medium_64 / large_32). medium_nosize accepts mixed pointer "
-                    + "sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but records "
-                    + "the throwaway project URL, so a second pass is not a no-op). The ingest "
-                    + "response carries executable_md5 for the artifact sidecar. Warns when the "
-                    + "source has few user-defined names. Ingest with symbols. Ingest takes "
-                    + "minutes: expect a job_id, then poll bsim_job_status.",
+                    + "commit them with `bsim generatesigs --bsim --commit`. Also extracts "
+                    + "per-function constants, strings and direct callees into the companion "
+                    + "corroboration schema (same PostgreSQL database, not BSim's tables) so "
+                    + "corroborate_match does not need the reference program later. Refuses a "
+                    + "source with no functions, and a pointer-size mismatch against a sized "
+                    + "template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed "
+                    + "pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but "
+                    + "records the throwaway project URL, so a second pass is not a no-op) but "
+                    + "corroboration is still written when the program is open — that is the "
+                    + "backfill path. The ingest response carries executable_md5 for the artifact "
+                    + "sidecar. Warns when the source has few user-defined names. Ingest with "
+                    + "symbols. Ingest takes minutes: expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response ingest(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -276,7 +296,10 @@ public class BSimService {
                 Response reject = precheckProgram(program, url, warnings);
                 if (reject != null) return reject;
                 Response skip = skipIfAlreadyIngested(program, url);
-                if (skip != null) return skip;
+                if (skip != null) {
+                    mergeSkipCorroboration(url, program, source, warnings, skip);
+                    return skip;
+                }
             }
 
             // A caller-supplied xml_dir is theirs to keep; a temp one is ours
@@ -340,6 +363,7 @@ public class BSimService {
                     recordArtifactExecutableMd5(program, md5);
                 }
                 if (program != null) body.put("executable_name", program.getName());
+                storeCorroboration(url, program, ghidraUrl, commit, warnings, body);
                 if (!warnings.isEmpty()) body.put("warnings", warnings);
                 return Response.ok(body);
             } finally {
@@ -367,9 +391,11 @@ public class BSimService {
                     + "Each match has separate numeric similarity and confidence, plus the source "
                     + "executable name and architecture. Flagged ambiguous when the top two "
                     + "differently-named hits sit within 0.05 similarity. A similarity_threshold "
-                    + "above 0.5 silently drops cross-compiler matches and adds a warning. Queries "
-                    + "run a helper analyzeHeadless JVM and can take minutes: expect a job_id, "
-                    + "then poll bsim_job_status.",
+                    + "above 0.5 silently drops cross-compiler matches and adds a warning. "
+                    + "Opt-in corroborate=true attaches constants/strings/callee evidence to "
+                    + "ambiguous, unidentifiable, or low-confidence hits without reordering "
+                    + "them. Queries run a helper analyzeHeadless JVM and can take minutes: "
+                    + "expect a job_id, then poll bsim_job_status.",
             category = "bsim")
     public Response query(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -411,7 +437,16 @@ public class BSimService {
                     description = "Byte-size proxy used only when min_feature_count is 0. Default 0 (off).")
                     int minFunctionSize,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
-                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
+                    description = WAIT_SECONDS_DESCRIPTION) int waitSeconds,
+            @Param(value = "corroborate", source = ParamSource.BODY, defaultValue = "false",
+                    description = "If true, attach corroboration evidence (constants, strings, "
+                            + "direct callees) to ambiguous, unidentifiable, or low-confidence "
+                            + "matches. Default false. Never reorders results.")
+                    boolean corroborate,
+            @Param(value = "corroborate_max_candidates", source = ParamSource.BODY, defaultValue = "3",
+                    description = "When corroborate=true, evidence is attached to at most this "
+                            + "many leading matches per function. Default 3.")
+                    int corroborateMaxCandidates) {
         try {
             String url = BSimUrls.requireBsimUrl(dbUrl);
             String pgCred = BSimUrls.missingPostgresCredential(url);
@@ -421,7 +456,8 @@ public class BSimService {
             Program program = pe.program();
             QuerySpec spec = new QuerySpec(function, similarityThreshold, confidenceThreshold,
                     maxMatches, arch, executable, compiler, excludeMd5,
-                    minFeatureCount, minFunctionSize);
+                    minFeatureCount, minFunctionSize, corroborate,
+                    Math.max(1, corroborateMaxCandidates));
 
             Map<String, Object> request = new LinkedHashMap<>();
             request.put("db_url", url);
@@ -689,6 +725,96 @@ public class BSimService {
     }
 
     // ========================================================================
+    // corroborate_match
+    // ========================================================================
+
+    @McpTool(path = "/corroborate_match", method = "POST",
+            description = "Compare listing-level constants, strings and direct callees of an "
+                    + "open query function against a BSim corpus candidate. The reference side "
+                    + "is read from the companion corroboration schema written at ingest — the "
+                    + "reference program is not opened. Returns shared / query-only / ref-only "
+                    + "evidence with distinctiveness marks and the string-match rule that fired; "
+                    + "never a blended score. A miss (executable ingested before extraction "
+                    + "existed, or a file: H2 URL) is status=no_evidence, not an error. "
+                    + "string_normalisation: off | basename | auto (default auto: exact first, "
+                    + "then basename for path-shaped __FILE__ strings).",
+            category = "bsim")
+    public Response corroborateMatch(
+            @Param(value = "program", defaultValue = "",
+                    description = "Program containing the query function") String programName,
+            @Param(value = "function", source = ParamSource.BODY,
+                    description = "Query function name or address") String function,
+            @Param(value = "db_url", source = ParamSource.BODY,
+                    description = "BSim / corroboration database URL") String dbUrl,
+            @Param(value = "ref_executable", source = ParamSource.BODY,
+                    description = "Corpus executable name or MD5") String refExecutable,
+            @Param(value = "ref_function", source = ParamSource.BODY,
+                    description = "Candidate function name in the corpus") String refFunction,
+            @Param(value = "string_normalisation", source = ParamSource.BODY, defaultValue = "auto",
+                    description = "off | basename | auto. auto tries exact then basename on paths.")
+                    String stringNormalisation) {
+        try {
+            String url = BSimUrls.requireBsimUrl(dbUrl);
+            String pgCred = BSimUrls.missingPostgresCredential(url);
+            if (pgCred != null) return Response.err(pgCred);
+            if (function == null || function.isBlank()) {
+                return Response.err("function is required (name or address of the query function)");
+            }
+            if (refFunction == null || refFunction.isBlank()) {
+                return Response.err("ref_function is required (corpus candidate name)");
+            }
+            if (refExecutable == null || refExecutable.isBlank()) {
+                return Response.err("ref_executable is required (corpus executable name or MD5)");
+            }
+            CorroborationEvidence.StringNorm norm =
+                    CorroborationEvidence.StringNorm.parse(stringNormalisation);
+            ServiceUtils.ProgramOrError pe = ServiceUtils.getProgramOrError(programProvider, programName);
+            if (pe.hasError()) return pe.error();
+            Program program = pe.program();
+
+            CorroborationEvidence.FunctionRow queryRow;
+            try {
+                queryRow = extractor.extractOne(program, function.trim());
+            } catch (Exception e) {
+                return Response.err("failed to extract query function: "
+                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            }
+            if (queryRow == null) {
+                return Response.err("function not found: " + function);
+            }
+
+            CorroborationStore store = stores.open(url);
+            if (!store.writable()) {
+                return Response.ok(CorroborationEvidence.noEvidence(
+                        queryRow.functionName(), refFunction.trim(),
+                        "unsupported_backend",
+                        List.of("Corroboration data lives in a companion PostgreSQL schema; "
+                                + "this db_url is not postgresql://")));
+            }
+            CorroborationEvidence.FunctionRow refRow;
+            try {
+                refRow = store.lookup(refExecutable.trim(), refFunction.trim());
+            } catch (Exception e) {
+                return Response.err("corroboration lookup failed: "
+                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            }
+            if (refRow == null) {
+                return Response.ok(CorroborationEvidence.noEvidence(
+                        queryRow.functionName(), refFunction.trim(),
+                        "not_extracted",
+                        List.of("No corroboration data for this executable; "
+                                + "it was ingested before extraction existed")));
+            }
+            Map<String, Object> body = CorroborationEvidence.compare(queryRow, refRow, store, norm);
+            return Response.ok(body);
+        } catch (IllegalArgumentException e) {
+            return Response.err(e.getMessage());
+        } catch (Exception e) {
+            return Response.err(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        }
+    }
+
+    // ========================================================================
     // bsim_job_status
     // ========================================================================
 
@@ -781,11 +907,14 @@ public class BSimService {
             }
             if (spec.function != null && !spec.function.isBlank() && results.size() == 1) {
                 Map<String, Object> body = results.get(0).toMap();
+                attachQueryCorroboration(dbUrl, program, spec, List.of(results.get(0)),
+                        List.of(body), warnings);
                 if (!warnings.isEmpty()) body.put("warnings", warnings);
                 return Response.ok(body);
             }
             List<Map<String, Object>> rows = new ArrayList<>();
             for (BSimMatches.FunctionResult fr : results) rows.add(fr.toMap());
+            attachQueryCorroboration(dbUrl, program, spec, results, rows, warnings);
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("program", program.getName());
             body.put("results", rows);
@@ -989,11 +1118,20 @@ public class BSimService {
     }
 
     static void extractQueryScript(Path scriptDir) throws IOException {
+        extractClasspathScript(scriptDir, QUERY_SCRIPT_RESOURCE, QUERY_SCRIPT_NAME);
+    }
+
+    static void extractExtractScript(Path scriptDir) throws IOException {
+        extractClasspathScript(scriptDir, EXTRACT_SCRIPT_RESOURCE, EXTRACT_SCRIPT_NAME);
+    }
+
+    private static void extractClasspathScript(Path scriptDir, String resource, String name)
+            throws IOException {
         Files.createDirectories(scriptDir);
-        Path dest = scriptDir.resolve(QUERY_SCRIPT_NAME);
-        try (InputStream in = BSimService.class.getResourceAsStream(QUERY_SCRIPT_RESOURCE)) {
+        Path dest = scriptDir.resolve(name);
+        try (InputStream in = BSimService.class.getResourceAsStream(resource)) {
             if (in == null) {
-                throw new IOException("Missing classpath resource " + QUERY_SCRIPT_RESOURCE);
+                throw new IOException("Missing classpath resource " + resource);
             }
             Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
         }
@@ -1115,10 +1253,20 @@ public class BSimService {
         final String excludeMd5;
         final int minFeatureCount;
         final int minFunctionSize;
+        final boolean corroborate;
+        final int corroborateMax;
 
         QuerySpec(String function, double similarity, double confidence, int maxMatches,
                   String arch, String executable, String compiler, String excludeMd5,
                   int minFeatureCount, int minFunctionSize) {
+            this(function, similarity, confidence, maxMatches, arch, executable, compiler,
+                    excludeMd5, minFeatureCount, minFunctionSize, false, 3);
+        }
+
+        QuerySpec(String function, double similarity, double confidence, int maxMatches,
+                  String arch, String executable, String compiler, String excludeMd5,
+                  int minFeatureCount, int minFunctionSize,
+                  boolean corroborate, int corroborateMax) {
             this.function = function;
             this.similarity = similarity;
             this.confidence = confidence;
@@ -1129,6 +1277,224 @@ public class BSimService {
             this.excludeMd5 = excludeMd5 == null ? "" : excludeMd5;
             this.minFeatureCount = minFeatureCount;
             this.minFunctionSize = minFunctionSize;
+            this.corroborate = corroborate;
+            this.corroborateMax = Math.max(1, corroborateMax);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void mergeSkipCorroboration(String url, Program program, String source,
+                                        List<String> warnings, Response skip) {
+        if (!(skip instanceof Response.Ok ok) || !(ok.data() instanceof Map<?, ?> raw)) return;
+        Map<String, Object> body = (Map<String, Object>) raw;
+        storeCorroboration(url, program, source, true, warnings, body);
+        if (!warnings.isEmpty()) body.put("warnings", warnings);
+    }
+
+    private void storeCorroboration(String url, Program program, String source,
+                                    boolean commit, List<String> warnings,
+                                    Map<String, Object> body) {
+        if (!commit) return;
+        CorroborationStore store = stores.open(url);
+        if (!store.writable()) return;
+        try {
+            List<CorroborationEvidence.FunctionRow> rows;
+            String md5 = programMd5(program);
+            String exeName = program != null ? program.getName() : "";
+            if (program != null) {
+                rows = extractor.extractAll(program);
+            } else {
+                rows = extractCorroborationViaScript(source, warnings);
+                if (!rows.isEmpty()) {
+                    CorroborationEvidence.FunctionRow first = rows.get(0);
+                    if (md5 == null || md5.isBlank()) md5 = first.executableMd5();
+                    if (exeName == null || exeName.isBlank()) exeName = first.executableName();
+                }
+            }
+            if (rows == null) rows = List.of();
+            store.upsert(md5, exeName, rows);
+            if (body != null) {
+                body.put("corroboration", rows.isEmpty() ? "empty" : "stored");
+                body.put("corroboration_functions", rows.size());
+            }
+        } catch (Exception e) {
+            warnings.add("corroboration extract/store failed: "
+                    + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            if (body != null) body.put("corroboration", "failed");
+        }
+    }
+
+    private List<CorroborationEvidence.FunctionRow> extractCorroborationViaScript(
+            String ghidraUrl, List<String> warnings) {
+        if (ghidraUrl == null || ghidraUrl.isBlank()) return List.of();
+        HeadlessTarget target = HeadlessTarget.parse(ghidraUrl);
+        if (target == null || target.fileName == null) {
+            warnings.add("corroboration not stored: open the program and re-ingest "
+                    + "(identical-MD5 skip still writes corroboration) so listing-level "
+                    + "constants can be extracted");
+            return List.of();
+        }
+        Path workDir = null;
+        try {
+            workDir = Files.createTempDirectory("bsim-extract-");
+            Path scriptDir = workDir.resolve("script");
+            Path outJson = workDir.resolve("extract.json");
+            extractExtractScript(scriptDir);
+            List<String> args = new ArrayList<>(target.headlessArgs());
+            args.add("-noanalysis");
+            if (BSimUrls.isServerGhidraUrl(ghidraUrl)) {
+                String user = BSimCli.resolvedServerUser();
+                if (user != null) {
+                    args.add("-connect");
+                    args.add(user);
+                }
+            }
+            args.add("-scriptPath");
+            args.add(scriptDir.toAbsolutePath().toString());
+            args.add("-postScript");
+            args.add(EXTRACT_SCRIPT_NAME);
+            args.add(outJson.toAbsolutePath().toString());
+            BSimCli.Result r = analyzeHeadless(BSimCli.INGEST_TIMEOUT, args, null);
+            if (!Files.isRegularFile(outJson) || Files.size(outJson) == 0) {
+                warnings.add("corroboration extract script produced no JSON (exit "
+                        + r.exitCode + ")");
+                return List.of();
+            }
+            Map<String, Object> payload = JsonHelper.parseJson(
+                    Files.readString(outJson, StandardCharsets.UTF_8));
+            if (payload != null && payload.containsKey("error")) {
+                warnings.add("corroboration extract: " + payload.get("error"));
+                return List.of();
+            }
+            return CorroborationStore.rowsFromExtractPayload(payload, "", "");
+        } catch (Exception e) {
+            warnings.add("corroboration extract via script failed: "
+                    + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            return List.of();
+        } finally {
+            deleteRecursively(workDir);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void attachQueryCorroboration(String dbUrl, Program program, QuerySpec spec,
+                                          List<BSimMatches.FunctionResult> results,
+                                          List<Map<String, Object>> bodies,
+                                          List<String> warnings) {
+        if (!spec.corroborate || results == null || bodies == null) return;
+        CorroborationStore store = stores.open(dbUrl);
+        for (int i = 0; i < results.size() && i < bodies.size(); i++) {
+            BSimMatches.FunctionResult fr = results.get(i);
+            if (!BSimMatches.needsCorroboration(fr)) continue;
+            Map<String, Object> body = bodies.get(i);
+            Object matchesObj = body.get("matches");
+            if (!(matchesObj instanceof List<?> matchList)) continue;
+            CorroborationEvidence.FunctionRow queryRow;
+            try {
+                String sel = (fr.function != null && !fr.function.isEmpty())
+                        ? fr.function : fr.address;
+                queryRow = extractor.extractOne(program, sel);
+            } catch (Exception e) {
+                warnings.add("corroboration extract failed for " + fr.function + ": "
+                        + e.getMessage());
+                continue;
+            }
+            if (queryRow == null) {
+                queryRow = CorroborationEvidence.FunctionRow.empty(fr.function);
+            }
+            int attached = 0;
+            for (Object item : matchList) {
+                if (attached >= spec.corroborateMax) break;
+                if (!(item instanceof Map<?, ?> raw)) continue;
+                Map<String, Object> match = (Map<String, Object>) raw;
+                String refName = String.valueOf(match.getOrDefault("name", ""));
+                String refExe = "";
+                if (match.get("md5") != null && !String.valueOf(match.get("md5")).isBlank()) {
+                    refExe = String.valueOf(match.get("md5"));
+                } else if (match.get("executable") != null) {
+                    refExe = String.valueOf(match.get("executable"));
+                }
+                Map<String, Object> evidence;
+                try {
+                    if (!store.writable()) {
+                        evidence = CorroborationEvidence.noEvidence(
+                                queryRow.functionName(), refName, "unsupported_backend",
+                                List.of("Corroboration requires postgresql://"));
+                    } else {
+                        CorroborationEvidence.FunctionRow refRow = store.lookup(refExe, refName);
+                        if (refRow == null) {
+                            evidence = CorroborationEvidence.noEvidence(
+                                    queryRow.functionName(), refName, "not_extracted",
+                                    List.of("No corroboration data for this executable; "
+                                            + "it was ingested before extraction existed"));
+                        } else {
+                            evidence = CorroborationEvidence.compare(queryRow, refRow, store,
+                                    CorroborationEvidence.StringNorm.AUTO);
+                        }
+                    }
+                } catch (Exception e) {
+                    evidence = CorroborationEvidence.noEvidence(
+                            queryRow.functionName(), refName, "store_unavailable",
+                            List.of("corroboration lookup failed: " + e.getMessage()));
+                }
+                match.put("corroboration", evidence);
+                attached++;
+            }
+        }
+    }
+
+    /**
+     * Split a ghidraURL into analyzeHeadless location / folder / process args.
+     * {@code ghidra://host/repo/folder/file} and {@code ghidra:/dir/Project/file}.
+     */
+    static final class HeadlessTarget {
+        final String location;
+        final String folder;
+        final String fileName;
+        final boolean server;
+
+        HeadlessTarget(String location, String folder, String fileName, boolean server) {
+            this.location = location;
+            this.folder = folder;
+            this.fileName = fileName;
+            this.server = server;
+        }
+
+        List<String> headlessArgs() {
+            List<String> args = new ArrayList<>();
+            args.add(location);
+            if (folder != null && !folder.isEmpty()) args.add(folder);
+            if (fileName != null) {
+                args.add("-process");
+                args.add(fileName);
+            }
+            return args;
+        }
+
+        static HeadlessTarget parse(String url) {
+            if (url == null || url.isBlank()) return null;
+            String trimmed = url.trim();
+            if (!BSimUrls.isServerGhidraUrl(trimmed)) {
+                // Local ghidra:/dir/Project URLs do not name the program
+                // reliably; open it and re-ingest (MD5 skip still writes).
+                return new HeadlessTarget("", "", null, false);
+            }
+            String rest = trimmed.substring("ghidra://".length());
+            int slash = rest.indexOf('/');
+            if (slash < 0) return null;
+            String host = rest.substring(0, slash);
+            String path = rest.substring(slash + 1);
+            while (path.startsWith("/")) path = path.substring(1);
+            String[] parts = path.split("/");
+            if (parts.length < 2) return null;
+            String repo = parts[0];
+            String file = parts[parts.length - 1];
+            StringBuilder folder = new StringBuilder();
+            for (int i = 1; i < parts.length - 1; i++) {
+                folder.append('/').append(parts[i]);
+            }
+            return new HeadlessTarget("ghidra://" + host + "/" + repo,
+                    folder.toString(), file, true);
         }
     }
 

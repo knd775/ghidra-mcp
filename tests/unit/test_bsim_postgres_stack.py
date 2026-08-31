@@ -243,6 +243,23 @@ class TestBsimPostgresImage(unittest.TestCase):
         self.assertIn("file:/srv/ghidra/bsim/re", text)
         self.assertIn("not the ghidra server", text.lower().replace("*", ""))
         self.assertIn("Do not use `support/bsim_ctl`", text)
+        self.assertIn("corroboration", text)
+        self.assertIn("createdatabase", text)
+
+    def test_corroboration_schema_is_companion_not_bsim(self):
+        sql = (REPO_ROOT / "src" / "main" / "resources" / "bsim" / "corroboration.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CREATE SCHEMA IF NOT EXISTS corroboration", sql)
+        self.assertIn("corroboration.functions", sql)
+        self.assertIn("USING gin (constants)", sql)
+        self.assertIn("USING gin (strings)", sql)
+        self.assertNotIn("descriptable", sql)
+        self.assertNotIn("exetable", sql)
+        guide = (REPO_ROOT / "docs" / "prompts" / "BSIM.md").read_text(encoding="utf-8")
+        self.assertIn("corroborate_match", guide)
+        self.assertIn("corroboration", guide)
+        self.assertIn("no_evidence", guide)
 
     def test_manifests_point_at_postgres(self):
         arm = yaml.safe_load(

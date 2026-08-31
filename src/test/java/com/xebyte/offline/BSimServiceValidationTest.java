@@ -389,7 +389,11 @@ public class BSimServiceValidationTest extends TestCase {
         java.lang.reflect.Method query = BSimService.class.getMethod(
                 "query", String.class, String.class, double.class, double.class,
                 int.class, String.class, String.class, String.class, String.class,
-                String.class, int.class, int.class, int.class);
+                String.class, int.class, int.class, int.class, boolean.class, int.class);
+        Param corroborate = paramNamed(query, "corroborate");
+        assertEquals("false", corroborate.defaultValue());
+        Param corrMax = paramNamed(query, "corroborate_max_candidates");
+        assertEquals("3", corrMax.defaultValue());
         Param similarity = paramNamed(query, "similarity_threshold");
         Param confidence = paramNamed(query, "confidence_threshold");
         assertEquals("0.0", similarity.defaultValue());
@@ -424,7 +428,7 @@ public class BSimServiceValidationTest extends TestCase {
 
     public void testQueryRequiresProgram() {
         Response r = svc.query("file:/tmp/db", "FUN_1", 0.7, 0.0, 10, "",
-                "", "", "", "", 8, 0, WAIT);
+                "", "", "", "", 8, 0, WAIT, false, 3);
         assertTrue(r instanceof Response.Err);
         assertTrue(r.toJson().contains("No program loaded"));
     }
@@ -616,7 +620,7 @@ public class BSimServiceValidationTest extends TestCase {
         List<Path> saved = new java.util.concurrent.CopyOnWriteArrayList<>();
         BSimService qsvc = queryService(saved, true);
         Response r = qsvc.query("file:" + tmp.resolve("qdb"), "", 0.05, 0.0, 10, "",
-                "", "", "", "", 8, 0, WAIT);
+                "", "", "", "", 8, 0, WAIT, false, 3);
         assertFalse(r instanceof Response.Err);
         List<String> cmd = null;
         for (List<String> c : commands) {
@@ -634,7 +638,7 @@ public class BSimServiceValidationTest extends TestCase {
         BSimService qsvc = queryService(saved, true);
         Response r = qsvc.query("file:" + tmp.resolve("qdb"), "lfs_bd_read", 0.0, 10.0, 10, "",
                 "ARM:LE:32:Cortex", "littlefs.o", "gcc", "aabbccddeeff00112233445566778899",
-                8, 0, WAIT);
+                8, 0, WAIT, false, 3);
         assertFalse("query failed: " + r.toJson(), r instanceof Response.Err);
         List<String> cmd = null;
         for (List<String> c : commands) {
@@ -668,9 +672,9 @@ public class BSimServiceValidationTest extends TestCase {
         Set<String> before = tmpEntries("bsim-query-");
 
         Response single = qsvc.query("file:" + tmp.resolve("qdb"), "blake2b_compress",
-                0.7, 0.0, 10, "", "", "", "", "", 8, 0, WAIT);
+                0.7, 0.0, 10, "", "", "", "", "", 8, 0, WAIT, false, 3);
         Response whole = qsvc.query("file:" + tmp.resolve("qdb"), "",
-                0.9, 0.0, 3, "", "", "", "", "", 8, 0, WAIT);
+                0.9, 0.0, 3, "", "", "", "", "", 8, 0, WAIT, false, 3);
 
         assertFalse("single-function query failed: " + single.toJson(),
                 single instanceof Response.Err);
@@ -694,7 +698,7 @@ public class BSimServiceValidationTest extends TestCase {
         Set<String> before = tmpEntries("bsim-query-");
 
         Response r = qsvc.query("file:" + tmp.resolve("qdb"), "", 0.7, 0.0, 10, "",
-                "", "", "", "", 8, 0, WAIT);
+                "", "", "", "", 8, 0, WAIT, false, 3);
 
         assertTrue(r instanceof Response.Err);
         assertTrue(r.toJson(), r.toJson().contains("produced no JSON"));

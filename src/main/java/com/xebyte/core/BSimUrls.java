@@ -371,6 +371,40 @@ public final class BSimUrls {
         return false;
     }
 
+    /**
+     * JDBC URL for the companion corroboration schema. SSL is required
+     * ({@code hostnossl reject} on the compose instance); password stays in
+     * connection properties, never in this string.
+     */
+    public static String toJdbcUrl(String postgresUrl) {
+        if (!isPostgresUrl(postgresUrl)) {
+            throw new IllegalArgumentException("not a postgresql:// URL");
+        }
+        URI uri = parseUri(postgresUrl);
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            throw new IllegalArgumentException("postgresql:// URL is missing a host");
+        }
+        int port = uri.getPort() < 0 ? 5432 : uri.getPort();
+        String db = databaseName(uri);
+        if (db.isEmpty()) {
+            throw new IllegalArgumentException("postgresql:// URL is missing a database name");
+        }
+        return "jdbc:postgresql://" + host + ":" + port + "/" + db + "?sslmode=require";
+    }
+
+    /** Userinfo from the URL, else {@link #resolvedBsimUser()}. */
+    public static String postgresUser(String postgresUrl) {
+        if (!isPostgresUrl(postgresUrl)) return resolvedBsimUser();
+        URI uri = parseUri(postgresUrl);
+        String userInfo = uri.getUserInfo();
+        if (userInfo != null && !userInfo.isBlank()) {
+            int colon = userInfo.indexOf(':');
+            return colon < 0 ? userInfo : userInfo.substring(0, colon);
+        }
+        return resolvedBsimUser();
+    }
+
     public static boolean argsContainPostgresUrl(List<String> args) {
         if (args == null) return false;
         for (String a : args) {

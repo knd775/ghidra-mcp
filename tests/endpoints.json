@@ -1,7 +1,7 @@
 {
   "version": "7.0.0",
   "description": "GhidraMCP REST API Endpoint Specification",
-  "total_endpoints": 267,
+  "total_endpoints": 268,
   "categories": {
     "listing": "List program data",
     "getter": "Get specific data",
@@ -398,7 +398,7 @@
         "program",
         "wait_seconds"
       ],
-      "description": "Generate BSim signatures from a ghidraURL (or an open program) and commit them with `bsim generatesigs --bsim --commit`. Refuses a source with no functions, and a pointer-size mismatch against a sized template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but records the throwaway project URL, so a second pass is not a no-op). The ingest response carries executable_md5 for the artifact sidecar. Warns when the source has few user-defined names. Ingest with symbols. Ingest takes minutes: expect a job_id, then poll bsim_job_status."
+      "description": "Generate BSim signatures from a ghidraURL (or an open program) and commit them with `bsim generatesigs --bsim --commit`. Also extracts per-function constants, strings and direct callees into the companion corroboration schema (same PostgreSQL database, not BSim's tables) so corroborate_match does not need the reference program later. Refuses a source with no functions, and a pointer-size mismatch against a sized template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but records the throwaway project URL, so a second pass is not a no-op) but corroboration is still written when the program is open — that is the backfill path. The ingest response carries executable_md5 for the artifact sidecar. Warns when the source has few user-defined names. Ingest with symbols. Ingest takes minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/bsim_job_status",
@@ -446,9 +446,11 @@
         "exclude_md5",
         "min_feature_count",
         "min_function_size",
-        "wait_seconds"
+        "wait_seconds",
+        "corroborate",
+        "corroborate_max_candidates"
       ],
-      "description": "Query one function or the whole open program against a BSim database. Filter on confidence, not similarity. Cross-compiler matches legitimately score 0.2-0.4 similarity; confidence indicates whether that overlap is meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 (a starting floor, not a calibration). Optional arch / executable / compiler / exclude_md5 are server-side BSimFilter atoms (not post-processed; max_matches applies after the filter). Functions whose feature vector is too small to identify are returned with identifiable=false, never dropped. Each match has separate numeric similarity and confidence, plus the source executable name and architecture. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity. A similarity_threshold above 0.5 silently drops cross-compiler matches and adds a warning. Queries run a helper analyzeHeadless JVM and can take minutes: expect a job_id, then poll bsim_job_status."
+      "description": "Query one function or the whole open program against a BSim database. Filter on confidence, not similarity. Cross-compiler matches legitimately score 0.2-0.4 similarity; confidence indicates whether that overlap is meaningful. Defaults: similarity_threshold=0.0, confidence_threshold=10.0 (a starting floor, not a calibration). Optional arch / executable / compiler / exclude_md5 are server-side BSimFilter atoms (not post-processed; max_matches applies after the filter). Functions whose feature vector is too small to identify are returned with identifiable=false, never dropped. Each match has separate numeric similarity and confidence, plus the source executable name and architecture. Flagged ambiguous when the top two differently-named hits sit within 0.05 similarity. A similarity_threshold above 0.5 silently drops cross-compiler matches and adds a warning. Opt-in corroborate=true attaches constants/strings/callee evidence to ambiguous, unidentifiable, or low-confidence hits without reordering them. Queries run a helper analyzeHeadless JVM and can take minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/build_manifest",
@@ -637,6 +639,20 @@
         "size"
       ],
       "description": "Convert number between bases"
+    },
+    {
+      "path": "/corroborate_match",
+      "method": "POST",
+      "category": "bsim",
+      "params": [
+        "program",
+        "function",
+        "db_url",
+        "ref_executable",
+        "ref_function",
+        "string_normalisation"
+      ],
+      "description": "Compare listing-level constants, strings and direct callees of an open query function against a BSim corpus candidate. The reference side is read from the companion corroboration schema written at ingest — the reference program is not opened. Returns shared / query-only / ref-only evidence with distinctiveness marks and the string-match rule that fired; never a blended score. A miss (executable ingested before extraction existed, or a file: H2 URL) is status=no_evidence, not an error. string_normalisation: off | basename | auto (default auto: exact first, then basename for path-shaped __FILE__ strings)."
     },
     {
       "path": "/create_array_type",

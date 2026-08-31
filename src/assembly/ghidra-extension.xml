@@ -36,5 +36,13 @@
             </includes>
             <outputDirectory>GhidraMCP/lib</outputDirectory>
         </fileSet>
+        <!-- PostgreSQL JDBC for the corroboration companion schema. -->
+        <fileSet>
+            <directory>${project.build.directory}/lib</directory>
+            <includes>
+                <include>postgresql-*.jar</include>
+            </includes>
+            <outputDirectory>GhidraMCP/lib</outputDirectory>
+        </fileSet>
     </fileSets>
 </assembly>
