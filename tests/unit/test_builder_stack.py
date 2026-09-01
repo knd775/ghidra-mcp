@@ -1284,6 +1284,39 @@ def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def _fake_cmake_configure(argv: list[str], *, opt: str = "", arch: bool = True) -> None:
+    """Write the compile_commands.json a real configure would leave behind.
+
+    The builder verifies the effective compile line before it builds, so a fake
+    configure that writes nothing is indistinguishable from a generator that
+    cannot export one. `opt` defaults to the level the argv actually asked for;
+    pass a different one (or arch=False) to fake a framework that overrides us.
+    """
+    build_dir = Path(argv[argv.index("-B") + 1])
+    if not opt:
+        flags = next(
+            (a.split("=", 1)[1] for a in argv if a.startswith("-DGHIDRA_C_FLAGS=")), ""
+        )
+        opt = next((tok for tok in flags.split() if tok.startswith("-O")), "-Os")
+    command = ["arm-none-eabi-gcc"]
+    if arch:
+        command += ["-mcpu=cortex-m0plus", "-mthumb"]
+    command += [opt, "-g", "-c", "i2c.c"]
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(build_dir),
+                    "file": "src/rp2_common/hardware_i2c/i2c.c",
+                    "arguments": command,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 class TestFrameworkToolchainVars(unittest.TestCase):
     """pico-sdk resolves its own compiler; CMAKE_C_COMPILER alone is ignored.
 
@@ -1418,6 +1451,197 @@ class TestFrameworkToolchainVars(unittest.TestCase):
         self.assertEqual(
             path_flag, ["-DPICO_TOOLCHAIN_PATH=/opt/ghidra-builder/toolchains/gcc13-arm/bin"]
         )
+
+
+class TestFrameworkCompileFlags(unittest.TestCase):
+    """Architecture flags must survive, and the requested -O must be the only one.
+
+    Both defects were the same command line: `-DCMAKE_C_FLAGS=` replaces the
+    value pico's toolchain file seeded through CMAKE_C_FLAGS_INIT (losing
+    `-mcpu=cortex-m0plus -mthumb`, so every compile died in the assembler),
+    and the SDK's Release default then appended `-O3 -DNDEBUG` after our `-O2`
+    — an artifact named -O2 that was built at -O3.
+    """
+
+    STUB = REPO_ROOT / "docker" / "stubs" / "pico-sdk"
+
+    def configure_argv(self, opt="-O2", extra_flags=()):
+        return gbr.fw.cmake_configure_argv(
+            stub=self.STUB,
+            build_dir=Path("/build"),
+            sdk_path="/sdk",
+            board="pico",
+            libraries=["hardware_i2c"],
+            opt=opt,
+            config={},
+            extra_flags=list(extra_flags),
+            cc="arm-none-eabi-gcc",
+            cxx="arm-none-eabi-g++",
+            generator="Ninja",
+        )
+
+    def test_flags_never_go_through_cmake_c_flags(self):
+        argv = self.configure_argv(extra_flags=["-g"])
+        self.assertFalse(
+            [a for a in argv if a.startswith("-DCMAKE_C_FLAGS=")],
+            "CMAKE_C_FLAGS replaces CMAKE_C_FLAGS_INIT and drops -mcpu/-mthumb",
+        )
+        self.assertFalse([a for a in argv if a.startswith("-DCMAKE_CXX_FLAGS=")])
+        self.assertIn("-DGHIDRA_C_FLAGS=-O2 -g", argv)
+        self.assertIn("-DGHIDRA_CXX_FLAGS=-O2 -g", argv)
+
+    def test_build_type_contributes_no_optimisation_flags(self):
+        argv = self.configure_argv()
+        self.assertIn(f"-DCMAKE_BUILD_TYPE={gbr.fw.BUILD_TYPE}", argv)
+        for lang in ("C", "CXX", "ASM"):
+            self.assertIn(f"-DCMAKE_{lang}_FLAGS_{gbr.fw.BUILD_TYPE_SUFFIX}=", argv)
+
+    def test_configure_exports_compile_commands_for_the_check(self):
+        self.assertIn("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", self.configure_argv())
+
+    def test_pico_stub_spends_the_flags_with_add_compile_options(self):
+        text = (self.STUB / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("GHIDRA_C_FLAGS", text)
+        self.assertIn("add_compile_options", text)
+        self.assertNotIn("CMAKE_C_FLAGS_INIT", text.split("#")[0])
+
+    def test_every_cmake_stub_consumes_ghidra_c_flags(self):
+        """A stub that ignores them compiles at whatever the framework picked."""
+        root = REPO_ROOT / "docker" / "stubs"
+        for stub in sorted(root.iterdir()):
+            cmakelists = stub / "CMakeLists.txt"
+            if not cmakelists.is_file():
+                continue
+            text = cmakelists.read_text(encoding="utf-8")
+            self.assertIn("GHIDRA_C_FLAGS", text, f"{stub.name} drops the requested flags")
+
+    def test_pico_stub_declares_its_architecture_invariants(self):
+        meta = json.loads((self.STUB / "stub.json").read_text(encoding="utf-8"))
+        exact, prefixes = gbr.fw.stub_required_flags(meta)
+        self.assertIn("-mthumb", exact)
+        # The cpu depends on the board (m0plus on RP2040, m33 on RP2350), so
+        # only its presence is a stub-level invariant.
+        self.assertIn("-mcpu=", prefixes)
+
+    def test_appended_optimisation_level_is_a_violation(self):
+        entries = [
+            {
+                "file": "i2c.c",
+                "command": "arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -O2 -g "
+                           "-O3 -DNDEBUG -c i2c.c",
+            }
+        ]
+        violations = gbr.fw.compile_flag_violations(entries, "-O2")
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-O3", violations[0])
+
+    def test_missing_architecture_flags_are_a_violation(self):
+        entries = [{"file": "i2c.c", "arguments": ["arm-none-eabi-gcc", "-O2", "-c", "i2c.c"]}]
+        violations = gbr.fw.compile_flag_violations(
+            entries, "-O2", require_flags=["-mthumb"], require_prefixes=["-mcpu="]
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-mthumb", violations[0])
+        self.assertIn("-mcpu=", violations[0])
+
+    def test_matching_line_passes_and_assembly_needs_no_opt_level(self):
+        good = {
+            "file": "i2c.c",
+            "arguments": ["arm-none-eabi-gcc", "-mcpu=cortex-m0plus", "-mthumb", "-Os", "-c"],
+        }
+        asm = {
+            "file": "crt0.S",
+            "arguments": ["arm-none-eabi-gcc", "-mcpu=cortex-m0plus", "-mthumb", "-c"],
+        }
+        self.assertEqual(
+            gbr.fw.compile_flag_violations(
+                [good, asm], "-Os", require_flags=["-mthumb"], require_prefixes=["-mcpu="]
+            ),
+            [],
+        )
+
+    def test_verify_names_the_file_and_the_levels(self):
+        with tempfile.TemporaryDirectory() as td:
+            build = Path(td)
+            (build / "compile_commands.json").write_text(
+                json.dumps([
+                    {"file": "i2c.c", "arguments": ["cc", "-O2", "-O3", "-c", "i2c.c"]}
+                ]),
+                encoding="utf-8",
+            )
+            with self.assertRaises(gbr.fw.FrameworkError) as ctx:
+                gbr.fw.verify_compile_flags(build, "-O2")
+            self.assertEqual(ctx.exception.status, "flag_mismatch")
+            self.assertIn("i2c.c", str(ctx.exception))
+            self.assertIn("-O3", str(ctx.exception))
+
+    def test_missing_compile_commands_is_refused_not_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(gbr.fw.FrameworkError) as ctx:
+                gbr.fw.verify_compile_flags(Path(td), "-O2")
+            self.assertEqual(ctx.exception.status, "flags_unverifiable")
+
+    def test_override_fails_the_build_before_anything_is_written(self):
+        """The mislabelled artifact is worse than the failure: nothing downstream
+        can tell what flags an object was built with."""
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "uploads"
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    return _git_ok(argv)
+                if argv[0] == "cmake":
+                    if "-B" in argv and "--build" not in argv:
+                        _fake_cmake_configure(argv, opt="-O3")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.handle_request(
+                    {
+                        "mode": "framework",
+                        "name": "pico-sdk",
+                        "repo": "https://github.com/raspberrypi/pico-sdk.git",
+                        "ref": "2.1.0",
+                        "framework": "pico-sdk",
+                        "libraries": ["hardware_i2c"],
+                        "board": "pico",
+                        "toolchain": "gcc13-arm",
+                        "opt": "-O2",
+                        "output_dir": str(dest),
+                    },
+                    run=run,
+                    src_cache=Path(td) / "src",
+                    extract=extract,
+                )
+            self.assertEqual(ctx.exception.status, "flag_mismatch")
+            self.assertFalse(list(dest.glob("*.o")) if dest.is_dir() else [])
+
+    def test_dry_run_preview_shows_the_same_flag_handling(self):
+        body = gbr.handle_framework_request(
+            {
+                "mode": "framework",
+                "name": "pico-sdk",
+                "repo": "https://example.invalid/pico-sdk.git",
+                "ref": "2.1.0",
+                "framework": "pico-sdk",
+                "libraries": ["hardware_i2c"],
+                "board": "pico",
+                "opt": "-O2",
+                "toolchain": "gcc13-arm",
+                "dry_run": True,
+            },
+            src_cache=Path("/tmp"),
+            run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+            extract=None,
+        )
+        configure = body["command"][0]
+        self.assertFalse([a for a in configure if a.startswith("-DCMAKE_C_FLAGS=")])
+        self.assertTrue([a for a in configure if a.startswith("-DGHIDRA_C_FLAGS=-O2 ")])
+        self.assertIn(f"-DCMAKE_BUILD_TYPE={gbr.fw.BUILD_TYPE}", configure)
 
 
 class TestCmakeGenerator(unittest.TestCase):
@@ -1590,7 +1814,11 @@ class TestFrameworkHarvest(unittest.TestCase):
                     if "log" in argv:
                         return subprocess.CompletedProcess(argv, 0, "1\n", "")
                     return subprocess.CompletedProcess(argv, 0, "", "")
-                if argv[0] in {"cmake", "arm-none-eabi-gcc"}:
+                if argv[0] == "cmake":
+                    if "-B" in argv and "--build" not in argv:
+                        _fake_cmake_configure(argv)
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-gcc":
                     return subprocess.CompletedProcess(argv, 0, "gcc 13.2.1\n", "")
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -1653,6 +1881,8 @@ class TestFrameworkHarvest(unittest.TestCase):
                     _write(build_dir / "ghidra_stub.elf", _arm_elf32(e_type=2))
                     return subprocess.CompletedProcess(argv, 0, "", "")
                 if argv[0] == "cmake":
+                    if "-B" in argv and "--build" not in argv:
+                        _fake_cmake_configure(argv)
                     return subprocess.CompletedProcess(argv, 0, "", "")
                 if argv[0] == "arm-none-eabi-nm":
                     obj = argv[-1]
@@ -1710,6 +1940,8 @@ class TestFrameworkHarvest(unittest.TestCase):
                 self.assertTrue(Path(art["path"]).is_file())
             i2c = next(a for a in result["artifacts"] if a["library"] == "hardware_i2c")
             self.assertIn("hardware_i2c_init", i2c["defined_functions"])
+            self.assertEqual(result["flag_check"]["opt"], "-Os")
+            self.assertGreater(result["flag_check"]["compile_lines"], 0)
             self.assertEqual(
                 result["commit_sha"], "9c7e232086f865cff0bb96fe753deb66431d91fd"
             )
@@ -1733,6 +1965,90 @@ class TestFrameworkHarvest(unittest.TestCase):
                 )
                 self.assertEqual(meta["artifact"], path.name)
                 self.assertEqual(meta["debug_path_prefix"], "/ref/pico-sdk")
+                # Provenance for the level the filename claims: the compiler
+                # agreed, it was not assumed.
+                self.assertEqual(meta["flag_check"]["opt"], "-Os")
+                self.assertIn("-mthumb", meta["flag_check"]["require_compile_flags"])
+
+    def test_symbol_less_extra_is_skipped_not_fatal(self):
+        """RP2040's bs2_default_library is assembled boot padding with no
+        symbols. Refusing the whole build over an extra the requested libraries
+        dragged in loses every library that did compile; a requested library
+        with no functions is still a hard refuse."""
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "uploads"
+
+            def extract(git_dir, sha, dest_dir):
+                dest_dir.mkdir(parents=True, exist_ok=True)
+
+            def run(argv, **kwargs):
+                if argv[0] == "git":
+                    return _git_ok(argv)
+                if argv[0] == "cmake" and "--build" in argv:
+                    build_dir = Path(argv[argv.index("--build") + 1])
+                    _write(
+                        build_dir / "CMakeFiles/ghidra_stub.dir/src/rp2_common/hardware_i2c/i2c.c.o",
+                        _arm_elf32(),
+                    )
+                    _write(
+                        build_dir / "CMakeFiles/bs2_default_library.dir/bs2.S.o",
+                        _arm_elf32(),
+                    )
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "cmake":
+                    if "-B" in argv and "--build" not in argv:
+                        _fake_cmake_configure(argv)
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "arm-none-eabi-nm":
+                    if "hardware_i2c" in argv[-1]:
+                        return subprocess.CompletedProcess(
+                            argv, 0, "00000001 T i2c_write_blocking\n", ""
+                        )
+                    return subprocess.CompletedProcess(argv, 0, "00000000 d $d\n", "")
+                if argv[0] == "arm-none-eabi-gcc" and "--version" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "gcc 13.2.1\n", "")
+                if argv[0] == "arm-none-eabi-ld":
+                    Path(argv[argv.index("-o") + 1]).write_bytes(_arm_elf32())
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            request = {
+                "mode": "framework",
+                "name": "pico-sdk",
+                "repo": "https://github.com/raspberrypi/pico-sdk.git",
+                "ref": "2.1.0",
+                "framework": "pico-sdk",
+                "libraries": ["hardware_i2c"],
+                "board": "pico",
+                "opt": "-O2",
+                "toolchain": "gcc13-arm",
+                "cc": "arm-none-eabi-gcc",
+                "ld": "arm-none-eabi-ld",
+                "nm": "arm-none-eabi-nm",
+                "output_dir": str(dest),
+            }
+            result = gbr.handle_request(
+                request, run=run, src_cache=Path(td) / "src", extract=extract
+            )
+            self.assertEqual(result["status"], "success")
+            libs = {a["library"] for a in result["artifacts"]}
+            self.assertEqual({"hardware_i2c"}, libs)
+            self.assertEqual(
+                [f["library"] for f in result["failed"]], ["bs2_default_library"]
+            )
+            self.assertFalse(
+                list(dest.glob("*bs2_default_library*")),
+                "a skipped extra must not be written",
+            )
+
+            with self.assertRaises(gbr.BuildError) as ctx:
+                gbr.handle_request(
+                    {**request, "libraries": ["bs2_default_library"]},
+                    run=run,
+                    src_cache=Path(td) / "src",
+                    extract=extract,
+                )
+            self.assertEqual(ctx.exception.status, "zero_functions")
 
     def test_failed_harvest_removes_written_artifacts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1768,6 +2084,8 @@ class TestFrameworkHarvest(unittest.TestCase):
                     )
                     return subprocess.CompletedProcess(argv, 0, "", "")
                 if argv[0] == "cmake":
+                    if "-B" in argv and "--build" not in argv:
+                        _fake_cmake_configure(argv)
                     return subprocess.CompletedProcess(argv, 0, "", "")
                 if argv[0] == "arm-none-eabi-nm":
                     obj = argv[-1]

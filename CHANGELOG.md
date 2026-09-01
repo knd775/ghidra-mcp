@@ -6,6 +6,52 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### `build_reference` framework mode: compile flags, and a smoke test
+
+Framework mode compiled nothing on a Pico board. Every unit died in the
+assembler with "selected processor does not support `dmb' in ARM mode".
+Cortex-M is Thumb-only, and the compile line had no `-mcpu=cortex-m0plus`
+and no `-mthumb`. Those come from pico-sdk's toolchain file via
+`CMAKE_C_FLAGS_INIT`, and passing `-DCMAKE_C_FLAGS=` on the command line
+*replaces* what `_INIT` seeded. Flags now go in as `GHIDRA_C_FLAGS` and
+the stub's `CMakeLists.txt` spends them with `add_compile_options()`,
+which appends. Any framework with a CMake toolchain file has the same
+trap, so a test requires every cmake stub to consume `GHIDRA_C_FLAGS`.
+
+Behind that sat a quieter one. The SDK's `Release` default appended
+`-O3 -DNDEBUG` after our `-O2`, so the object would have been built at
+`-O3` and written as `pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico.o`
+with a sidecar recording `opt: -O2`. That is worse than a build failure:
+BSim does not know what flags an object was built with, so a corpus
+built specifically to span optimisation levels would have contained an
+entry that lies about its own. Configure now uses a `GhidraRef` build
+type with empty per-config flag variables, exports
+`compile_commands.json`, and *checks* the effective compile lines before
+building: exactly one `-O`, matching the request, plus the stub's
+declared architecture flags (pico-sdk: `-mthumb`, and `-mcpu=` by
+prefix, since the cpu depends on the board). A mismatch fails the build
+as `flag_mismatch`; a success reports `flag_check` in the envelope and
+the sidecar.
+
+Building pico-sdk for real then surfaced one more: `bs2_default_library`,
+the RP2040 boot-stage padding, harvests with no symbols at all, and its
+zero-function refusal was killing builds whose requested libraries had
+all compiled. Symbol-less *extras* are now named in `failed` and skipped;
+a requested library with zero functions is still a hard refuse.
+
+All six framework-mode defects to date were found by calling the deployed
+tool by hand. Six deploys for six defects a single run would have
+caught. `tests/integration/test_builder_smoke.py` now exercises every
+builder path once against a real builder (sources, sources with
+`prepare`, framework, each also as `dry_run`, plus the flag guard firing)
+in about 90 seconds, asserting compile flags, symbol names, sidecars, and
+Thumb ISA attributes on the produced object. It skips unless
+`GHIDRA_MCP_BUILDER_URL` points at a builder.
+
+Corpus note: `time_us_32` is `static inline` in SDK 2.1.0, so no object
+defines it. It exists in firmware only inlined into callers. `time_us_64`
+is the symbol to match on.
+
 ### `build_reference` framework mode: three blockers cleared
 
 Framework mode had never run end to end. Three defects in sequence, the
