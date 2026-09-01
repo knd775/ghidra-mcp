@@ -6,6 +6,48 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### `build_reference` framework mode: three blockers cleared
+
+Framework mode had never run end to end. Three defects in sequence, the
+first hiding the other two.
+
+`sources` was a schema-required parameter, so every `mode=framework`
+call was rejected by the bridge's pydantic validation before the handler
+ran ("outputSchema defined but no structured output returned"). That is
+why a valid stub, an invalid stub, and a call with no `framework` at all
+failed identically: none of them reached validation that could say
+anything useful. `sources` is now optional at the schema level and
+validated per mode inside the handler, so the documented errors (empty
+`framework`, empty `libraries`, unknown `framework` — each listing the
+installed stubs) are reachable. Passing `sources` with `mode=framework`
+is now its own named error rather than being silently ignored.
+
+pico-sdk ignored `CMAKE_C_COMPILER`: `pico_find_compiler` resolves the
+toolchain itself by searching `PATH`, and the builder's packed prefixes
+are deliberately off `PATH` because the identity selects which one to
+use. Configure died with "Compiler 'arm-none-eabi-gcc' not found".
+Stubs now declare their own cache variables in `stub.json`
+(`toolchain_cache_vars`), filled from the resolved toolchain identity:
+pico-sdk asks for `PICO_TOOLCHAIN_PATH` and `PICO_GCC_TRIPLE`.
+`CMAKE_C_COMPILER` is still passed. This generalises — Zephyr wants
+`ZEPHYR_TOOLCHAIN_VARIANT` / `CROSS_COMPILE`, ESP-IDF wants
+`IDF_TOOLCHAIN` — so the variable names are stub data, not a per-framework
+branch in the builder. A template whose tokens do not resolve is dropped
+rather than emitted empty.
+
+`cmake -G Ninja` failed with "CMAKE_MAKE_PROGRAM is not set" against a
+running image without `ninja-build`. The image installs it and now
+asserts `/usr/bin/ninja` at build time, the builder falls back to CMake's
+default generator when ninja is absent instead of failing configure, and
+`GET /health` (so `builder_health`) reports `generators` /
+`cmake_generator` so a stale image is visible without running a build.
+
+The pico-sdk corpus entry also gains `hardware_uart`, `hardware_gpio`,
+`hardware_timer`, and `pico_unique_id`, which cover firmware functions
+already named by hand (`gpio_set_function`, `gpio_set_pulls`,
+`time_us_32`, `board_unique_id_get`) and so give immediate ground truth
+for match quality.
+
 ### `build_reference` / `build_manifest` `force` flag
 
 `force=true` deletes this spec's existing objects and sidecars, then

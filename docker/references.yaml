@@ -79,7 +79,11 @@ references:
       - hardware_pio
       - hardware_flash
       - hardware_dma
+      - hardware_uart
+      - hardware_gpio
+      - hardware_timer
       - pico_multicore
+      - pico_unique_id
     matrix:
       toolchain: [gcc10-arm, gcc12-arm, gcc13-arm]
       opt: [-Os, -O2]

@@ -77,6 +77,26 @@ file per harvested library, including submodules such as TinyUSB). The
 stub's `main.c` must not call those libraries — that is the test that
 harvesting did not use the `--gc-sections`'d ELF.
 
+A framework that resolves its own toolchain does not honour
+`CMAKE_C_COMPILER`: pico-sdk's `pico_find_compiler` searches `PATH`, and
+the builder's packed prefixes are off `PATH` because the identity is what
+selects one. Each stub therefore declares its own cache variables in
+`stub.json`:
+
+```json
+"toolchain_cache_vars": {
+  "PICO_TOOLCHAIN_PATH": "{toolchain_bin}",
+  "PICO_GCC_TRIPLE": "{toolchain_triple}"
+}
+```
+
+filled from the resolved identity (`{toolchain}`, `{toolchain_bin}`,
+`{toolchain_triple}`, `{toolchain_prefix}`, `{cc}`, `{cxx}`). Zephyr's
+`ZEPHYR_TOOLCHAIN_VARIANT`/`CROSS_COMPILE` and ESP-IDF's `IDF_TOOLCHAIN`
+go in the same block; adding a framework does not mean editing the
+builder. `config={...}` is applied after these, so an operator can still
+override one.
+
 A corpus needs a matrix, not nine hand-written calls.
 `docker/references.yaml` is the corpus definition; `build_manifest` expands
 it. Each of the `littlefs` and `littlefs-logging` configurations expands over
@@ -184,8 +204,11 @@ build_reference(name, repo, ref, sources=[], toolchain="gcc13-arm",
 shell command run in the cloned tree after checkout and before compile
 (generated headers, not a substitute for a stub). It comes from this call
 or a manifest, never from repository content. A compile unit that fails is
-named in `failed` and the rest still link. `mode="framework"`
-ignores `sources`, configures `docker/stubs/<framework>/` against the
+named in `failed` and the rest still link. `sources` is optional in the
+schema (a framework call omits it) and required in `mode="sources"`;
+passing it with `mode="framework"` is an error, because there the stub
+decides what is compiled. `mode="framework"` configures
+`docker/stubs/<framework>/` against the
 cloned SDK, and harvests **build-tree** `.o`/`.a` files — never the
 linked ELF. Names are
 `<name>-<library>-<ref>-<toolchain>-<opt>[-<board>].o`. Both modes

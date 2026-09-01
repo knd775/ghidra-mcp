@@ -905,6 +905,8 @@ def handle_framework_request(
                 extra_flags=extra_flags,
                 cc=cc,
                 cxx=cxx,
+                cache_vars=fw.toolchain_cache_argv(
+                    meta, fw.toolchain_tokens(cc, cxx, toolchain)),
             )
             commands = [configure, fw.cmake_build_argv(Path("<build>"))]
         raw_dir = str(req.get("output_dir") or "").strip()
@@ -1015,6 +1017,8 @@ def handle_framework_request(
                 extra_flags=extra_flags,
                 cc=cc,
                 cxx=cxx,
+                cache_vars=fw.toolchain_cache_argv(
+                    meta, fw.toolchain_tokens(cc, cxx, toolchain)),
             )
             commands = [configure]
             configured = run(configure, env=env, timeout=180)
@@ -1316,11 +1320,18 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
 def health_payload(run: RunFn = _default_run) -> dict[str, Any]:
     installed = packed_toolchains.list_installed()
     identities = sorted(installed)
+    # generators is how a stale image is diagnosable from builder_health:
+    # cmake -G Ninja on an image without ninja-build fails configure with
+    # "CMAKE_MAKE_PROGRAM is not set", which reads like a stub bug.
+    generators = [name for name in ("Ninja", "Unix Makefiles")
+                  if shutil.which({"Ninja": "ninja", "Unix Makefiles": "make"}[name])]
     body: dict[str, Any] = {
         "ok": True,
         "identities": identities,
         "uid": os.getuid(),
         "stubs": fw.list_stubs(),
+        "generators": generators,
+        "cmake_generator": fw.cmake_generator() or "default",
     }
     releases: dict[str, str] = {}
     for ident, prefix in installed.items():

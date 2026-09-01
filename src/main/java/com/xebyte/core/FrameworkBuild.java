@@ -345,6 +345,71 @@ public final class FrameworkBuild {
         if (!argv.isEmpty()) steps.add(argv);
     }
 
+    /**
+     * Placeholder for the packed toolchain's {@code bin} directory. The preview
+     * runs outside the builder, so the real prefix
+     * ({@code /opt/ghidra-builder/toolchains/<identity>/bin}) is not knowable
+     * here; the builder substitutes it, the same way {@code <snapshot>} works.
+     */
+    public static final String TOOLCHAIN_BIN_PLACEHOLDER = "<toolchain_bin>";
+
+    /**
+     * Cache entries a stub declares in {@code toolchain_cache_vars} for a
+     * framework that resolves its own toolchain rather than honouring
+     * {@code CMAKE_C_COMPILER}. pico-sdk needs {@code PICO_TOOLCHAIN_PATH} and
+     * {@code PICO_GCC_TRIPLE}; Zephyr and ESP-IDF want different names, which is
+     * why the stub owns the list.
+     *
+     * <p>Templates whose tokens do not resolve are dropped rather than emitted
+     * empty, matching {@code framework_build.toolchain_cache_argv}.
+     */
+    public static List<String> toolchainCacheArgs(Path stub, ToolchainIdentity id) {
+        if (stub == null) return List.of();
+        Path meta = stub.resolve("stub.json");
+        if (!Files.isRegularFile(meta)) return List.of();
+        JsonObject vars;
+        try {
+            JsonElement el = JsonParser.parseString(Files.readString(meta, StandardCharsets.UTF_8));
+            if (!el.isJsonObject()) return List.of();
+            JsonElement raw = el.getAsJsonObject().get("toolchain_cache_vars");
+            if (raw == null || !raw.isJsonObject()) return List.of();
+            vars = raw.getAsJsonObject();
+        } catch (Exception ignored) {
+            return List.of();
+        }
+        Map<String, String> tokens = toolchainTokens(id);
+        List<String> argv = new ArrayList<>();
+        for (Map.Entry<String, JsonElement> entry : vars.entrySet()) {
+            String key = entry.getKey() == null ? "" : entry.getKey().trim();
+            if (key.isEmpty() || entry.getValue() == null || !entry.getValue().isJsonPrimitive()) {
+                continue;
+            }
+            String value = entry.getValue().getAsString();
+            for (Map.Entry<String, String> token : tokens.entrySet()) {
+                value = value.replace("{" + token.getKey() + "}", token.getValue());
+            }
+            if (value.isEmpty() || value.indexOf('{') >= 0) continue;
+            argv.add("-D" + key + "=" + value);
+        }
+        return argv;
+    }
+
+    static Map<String, String> toolchainTokens(ToolchainIdentity id) {
+        String cc = id.cc();
+        String triple = cc.endsWith("-gcc")
+                ? cc.substring(0, cc.length() - "-gcc".length())
+                : (cc.endsWith("-clang") ? cc.substring(0, cc.length() - "-clang".length()) : "");
+        Map<String, String> tokens = new LinkedHashMap<>();
+        tokens.put("toolchain", id.id());
+        tokens.put("toolchain_bin", TOOLCHAIN_BIN_PLACEHOLDER);
+        tokens.put("toolchain_triple", triple);
+        tokens.put("toolchain_prefix",
+                triple.isEmpty() ? "" : TOOLCHAIN_BIN_PLACEHOLDER + "/" + triple + "-");
+        tokens.put("cc", cc);
+        tokens.put("cxx", cxxFromCc(cc));
+        return tokens;
+    }
+
     static List<List<String>> cmakeCommandLines(ReferenceBuild.Spec spec) {
         ToolchainIdentity id = spec.identity();
         String cxx = cxxFromCc(id.cc());
@@ -376,6 +441,7 @@ public final class FrameworkBuild {
         configure.add("-DCMAKE_CXX_COMPILER=" + cxx);
         configure.add("-DCMAKE_C_FLAGS=" + cflags);
         configure.add("-DCMAKE_CXX_FLAGS=" + cflags);
+        configure.addAll(toolchainCacheArgs(findStubDir(spec.framework()), id));
         if (!spec.board().isBlank()) {
             configure.add("-DGHIDRA_BOARD=" + spec.board());
         }

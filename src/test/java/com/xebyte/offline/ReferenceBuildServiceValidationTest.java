@@ -5,6 +5,7 @@ import com.xebyte.core.BuilderClient;
 import com.xebyte.core.EndpointDef;
 import com.xebyte.core.FrameworkBuild;
 import com.xebyte.core.JsonHelper;
+import com.xebyte.core.Param;
 import com.xebyte.core.ReferenceBuild;
 import com.xebyte.core.ReferenceBuildService;
 import com.xebyte.core.ReferenceManifest;
@@ -1466,6 +1467,147 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
         assertTrue(json, body.get("artifacts") instanceof List<?>);
         assertTrue(json, body.get("failed") instanceof List<?>);
         assertFalse("job tickets must not use this helper", "started".equals(status));
+    }
+
+    /**
+     * {@code sources} must be optional at the schema level. It was required,
+     * so pydantic in the bridge rejected every framework-mode call before the
+     * handler ran; the failure was identical for a valid stub, an invalid stub,
+     * and a call with no framework at all, because none of them reached any
+     * validation that could say something useful.
+     */
+    public void testSourcesParamIsOptionalInSchema() throws Exception {
+        Param sources = null;
+        for (java.lang.reflect.Method m : ReferenceBuildService.class.getMethods()) {
+            if (!"buildReference".equals(m.getName())) continue;
+            for (java.lang.reflect.Parameter p : m.getParameters()) {
+                Param ann = p.getAnnotation(Param.class);
+                if (ann != null && "sources".equals(ann.value())) sources = ann;
+            }
+        }
+        assertNotNull("no annotated sources parameter found", sources);
+        assertFalse("sources must not be schema-required; mode=framework omits it",
+                Param.NO_DEFAULT.equals(sources.defaultValue()));
+    }
+
+    /** Framework mode must be callable without sources at all. */
+    public void testFrameworkDryRunWithoutSourcesArgument() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                null,
+                "gcc13-arm",
+                "",
+                "-O2",
+                List.of(),
+                List.of(),
+                false,
+                "",
+                true,
+                "framework",
+                "pico-sdk",
+                List.of("pico_stdlib"),
+                "pico",
+                Map.of());
+        assertFalse("unexpected error: " + r.toJson(), r instanceof Response.Err);
+        assertEnvelope(r.toJson(), "would_execute", "framework");
+        assertTrue("dry_run must not configure or compile", client.calls.isEmpty());
+    }
+
+    /** sources belongs to mode=sources; in framework mode the stub decides. */
+    public void testFrameworkRefusesSources() {
+        Response r = svc.buildReference(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of("lfs.c"),
+                "gcc13-arm",
+                "",
+                "-O2",
+                List.of(),
+                List.of(),
+                false,
+                "",
+                true,
+                "framework",
+                "pico-sdk",
+                List.of("pico_stdlib"),
+                "pico",
+                Map.of());
+        assertTrue(r.toJson(), r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("mode=framework"));
+        assertTrue(r.toJson(), r.toJson().contains("libraries"));
+    }
+
+    /** Sources mode still requires sources, and says which mode it means. */
+    public void testSourcesModeStillRequiresSources() {
+        Response r = svc.buildReference(
+                "littlefs",
+                "https://github.com/littlefs-project/littlefs.git",
+                "v2.9.3",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-Os",
+                List.of(),
+                List.of(),
+                false,
+                "",
+                true);
+        assertTrue(r.toJson(), r instanceof Response.Err);
+        assertTrue(r.toJson(), r.toJson().contains("mode=sources"));
+    }
+
+    /**
+     * pico-sdk ignores CMAKE_C_COMPILER: pico_find_compiler searches PATH and
+     * the packed prefixes are off PATH by design, so configure failed with
+     * "Compiler 'arm-none-eabi-gcc' not found". The stub declares the SDK's own
+     * cache variables and they are filled from the resolved identity, which is
+     * the same hook Zephyr and ESP-IDF will use.
+     */
+    public void testFrameworkPreviewCarriesStubToolchainVars() {
+        ReferenceBuild.Spec spec = new ReferenceBuild.Spec(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "-mcpu=cortex-m0plus -mthumb",
+                "-O2",
+                List.of(),
+                List.of(),
+                false,
+                "",
+                "framework",
+                "pico-sdk",
+                List.of("pico_stdlib"),
+                "pico",
+                Map.of());
+        List<String> configure = spec.commandLines(tmp.resolve("uploads")).get(0);
+        assertTrue(configure.toString(),
+                configure.contains("-DPICO_TOOLCHAIN_PATH="
+                        + FrameworkBuild.TOOLCHAIN_BIN_PLACEHOLDER));
+        assertTrue(configure.toString(), configure.contains("-DPICO_GCC_TRIPLE=arm-none-eabi"));
+        assertTrue("generic CMake vars stay; other stubs may rely on them",
+                configure.contains("-DCMAKE_C_COMPILER=arm-none-eabi-gcc"));
+    }
+
+    /** A template whose tokens do not resolve is dropped, never emitted empty. */
+    public void testUnresolvedToolchainTemplateIsDropped() throws Exception {
+        Path stubs = tmp.resolve("stubs/fake-sdk");
+        Files.createDirectories(stubs);
+        Files.writeString(stubs.resolve("stub.json"),
+                "{\"name\":\"fake-sdk\",\"generator\":\"cmake\","
+                        + "\"toolchain_cache_vars\":{\"A\":\"{toolchain_triple}\","
+                        + "\"B\":\"{no_such_token}\"}}",
+                StandardCharsets.UTF_8);
+        List<String> argv = FrameworkBuild.toolchainCacheArgs(
+                stubs, ToolchainIdentity.parse("gcc13-arm"));
+        assertEquals(List.of("-DA=arm-none-eabi"), argv);
+        List<String> native_ = FrameworkBuild.toolchainCacheArgs(
+                stubs, ToolchainIdentity.parse("gcc13-x86_64"));
+        assertEquals("gcc-13 has no triple to substitute", List.of(), native_);
     }
 
     private static void deleteRecursively(Path dir) throws Exception {
