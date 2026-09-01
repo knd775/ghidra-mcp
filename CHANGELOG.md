@@ -45,6 +45,15 @@ imports nothing. Default off.
 
 Offline coverage: `BSimSignaturesTest` (guards, ingest storage, apply
 wiring through the injected `BSimSignatures.Support` seam).
+`CorroborationTest` stubs that seam: its programs are reflective proxies
+with no data type manager, and the Maven offline classpath has no Graph
+or DB jar, so the real `.gdt` export threw `NoClassDefFoundError` there.
+
+That surfaced a `BSimJobs` bug worth its own line: the worker caught
+`Exception` only, so an `Error` killed the single job thread and left the
+job `running` forever, every later job queued behind a ticket nobody
+could redeem. It now catches `Throwable` and reports the job as failed
+(`BSimJobsTest` pins both the failure and the worker surviving it).
 
 ### `build_reference` framework mode: compile flags, and a smoke test
 

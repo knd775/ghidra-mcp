@@ -4,6 +4,7 @@ import com.xebyte.core.BSimCli;
 import com.xebyte.core.BSimJobs;
 import com.xebyte.core.BSimMatches;
 import com.xebyte.core.BSimService;
+import com.xebyte.core.BSimSignatures;
 import com.xebyte.core.BSimTestCredentials;
 import com.xebyte.core.BSimTestEnv;
 import com.xebyte.core.CorroborationEvidence;
@@ -279,7 +280,7 @@ public class CorroborationTest extends TestCase {
         }, tmp.resolve("ghidra").toFile());
         BSimService svc = new BSimService(providerOf(programNamed("nullcog.elf")),
                 new NoopThreadingStrategy(), skipCli, new BSimJobs(),
-                this::storeFor, extractor(row));
+                this::storeFor, extractor(row), NO_SIGNATURES);
         Response r = svc.ingest("postgresql://ghidra-bsim:5432/embedded",
                 "nullcog.elf", "", true, false, "", 45);
         assertFalse(r instanceof Response.Err);
@@ -517,19 +518,39 @@ public class CorroborationTest extends TestCase {
         return new FunctionRow(md5, exe, function, constants, strings, callees, truncated);
     }
 
+    /**
+     * These programs are reflective proxies with no data type manager, and
+     * the Maven offline classpath has no Graph/DB jars for
+     * {@code FileDataTypeManager}. The real export needs a live program and
+     * is covered by the integration tier; here it would only fail (or, in
+     * CI, throw a {@code NoClassDefFoundError}), so the seam is stubbed out.
+     */
+    private static final BSimSignatures.Support NO_SIGNATURES = new BSimSignatures.Support() {
+        @Override
+        public Path exportArchive(Program program, List<String> warnings) {
+            return null;
+        }
+
+        @Override
+        public BSimSignatures.Applier applier(Program program) {
+            throw new UnsupportedOperationException("apply is not exercised here");
+        }
+    };
+
     private CorroborationStore storeFor(String url) {
         return com.xebyte.core.BSimUrls.isPostgresUrl(url) ? store : CorroborationStore.open(url);
     }
 
     private BSimService serviceWith(Program program, ExtractOne one, ExtractAll all) {
         return new BSimService(providerOf(program), new NoopThreadingStrategy(),
-                recordingCli(null), new BSimJobs(), this::storeFor, extractor(one, all));
+                recordingCli(null), new BSimJobs(), this::storeFor, extractor(one, all),
+                NO_SIGNATURES);
     }
 
     private BSimService queryService(FunctionRow query, String resultJson) {
         return new BSimService(providerOf(programNamed("nullcog.elf")),
                 new NoopThreadingStrategy(), recordingCli(resultJson), new BSimJobs(),
-                this::storeFor, extractor(query));
+                this::storeFor, extractor(query), NO_SIGNATURES);
     }
 
     private static CorroborationExtractor extractor(FunctionRow row) {
