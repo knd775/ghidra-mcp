@@ -7,5 +7,7 @@
   "toolchain_cache_vars": {
     "PICO_TOOLCHAIN_PATH": "{toolchain_bin}",
     "PICO_GCC_TRIPLE": "{toolchain_triple}"
-  }
+  },
+  "require_compile_flags": ["-mthumb"],
+  "require_compile_flag_prefixes": ["-mcpu="]
 }

@@ -971,6 +971,7 @@ def handle_framework_request(
             "build": str(build_dir),
         }
         commands: list[list[str]] = []
+        flag_check: dict[str, Any] | None = None
         if generator == "make":
             out_of_tree = bool(meta.get("out_of_tree"))
             cwd = build_dir if out_of_tree else snapshot
@@ -1029,6 +1030,21 @@ def handle_framework_request(
                     status="configure_failed",
                     extra={"stderr": stderr, "command": configure},
                 )
+            require_flags, require_prefixes = fw.stub_required_flags(meta)
+            checked = fw.verify_compile_flags(
+                build_dir,
+                opt,
+                require_flags=require_flags,
+                require_prefixes=require_prefixes,
+            )
+            # Reported, not just enforced: the caller labelled this corpus entry
+            # with `opt`, and this is the evidence the compiler agreed.
+            flag_check = {
+                "opt": opt,
+                "compile_lines": checked,
+                "require_compile_flags": require_flags,
+                "require_compile_flag_prefixes": require_prefixes,
+            }
             build = fw.cmake_build_argv(build_dir)
             commands.append(build)
             built = run(build, env=env, timeout=900)
@@ -1069,7 +1085,9 @@ def handle_framework_request(
                 ordered.append(lib)
 
         staging_dir.mkdir(parents=True, exist_ok=True)
+        requested = set(libraries)
         artifacts: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
         written: list[Path] = []
         total_fns = 0
         compiler_ver = cc_version(cc, run)
@@ -1082,12 +1100,24 @@ def handle_framework_request(
                 commands.append(combine_cmd)
                 names = defined_functions(nm_bin, staged, run, env)
                 if not names:
-                    raise BuildError(
-                        f"refusing to write: 0 defined functions in harvested {lib} "
-                        "(everything was optimised out or the ELF was harvested)",
-                        status="zero_functions",
-                        extra={"function_count": 0, "library": lib, "commit_sha": sha},
-                    )
+                    if lib in requested:
+                        raise BuildError(
+                            f"refusing to write: 0 defined functions in harvested {lib} "
+                            "(everything was optimised out or the ELF was harvested)",
+                            status="zero_functions",
+                            extra={"function_count": 0, "library": lib, "commit_sha": sha},
+                        )
+                    # An extra the requested libraries dragged in. RP2040's
+                    # bs2_default_library is assembled boot padding with no
+                    # symbols at all; refusing the whole build over it loses
+                    # the libraries that did compile. Named and skipped, the
+                    # same way a failed source unit is in mode=sources.
+                    skipped.append({
+                        "library": lib,
+                        "status": "zero_functions",
+                        "reason": "no defined functions in the harvested objects",
+                    })
+                    continue
                 install_built_object(staged, dest)
                 written.append(dest)
                 digest = sha256_file(dest)
@@ -1103,6 +1133,7 @@ def handle_framework_request(
                         "library": lib,
                         "board": board,
                         "config": config,
+                        "flag_check": flag_check,
                     },
                 )
                 total_fns += len(names)
@@ -1140,6 +1171,8 @@ def handle_framework_request(
             cc_version=compiler_ver,
             framework=framework,
             board=board,
+            failed=skipped,
+            extra={"flag_check": flag_check} if flag_check else None,
         )
     except fw.FrameworkError as exc:
         raise BuildError(str(exc), status=exc.status, extra=exc.extra) from exc

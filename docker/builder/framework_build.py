@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 ET_REL = 1
 EM_ARM = 40
@@ -48,6 +49,16 @@ CMAKE_TARGET_RE = re.compile(r"CMakeFiles/([^/]+)\.dir")
 
 STUB_ENV = "GHIDRA_MCP_STUBS"
 DEFAULT_STUBS = Path("/opt/ghidra-builder/stubs")
+
+# Our own build type, so the framework's default (pico-sdk forces Release
+# when CMAKE_BUILD_TYPE is unset) cannot append its own `-O3 -DNDEBUG`
+# after the requested level. The per-config flag variables are defined
+# empty; CMake upper-cases the config name to find them.
+BUILD_TYPE = "GhidraRef"
+BUILD_TYPE_SUFFIX = BUILD_TYPE.upper()
+
+OPT_RE = re.compile(r"^-O(?:[0-3sgz]|fast)?$")
+ASM_SUFFIXES = frozenset({".s", ".S", ".asm"})
 
 RunFn = Callable[..., Any]
 
@@ -327,8 +338,21 @@ def cmake_configure_argv(
         f"-DGHIDRA_LIBRARIES={';'.join(libraries)}",
         f"-DCMAKE_C_COMPILER={cc}",
         f"-DCMAKE_CXX_COMPILER={cxx}",
-        f"-DCMAKE_C_FLAGS={cflags}",
-        f"-DCMAKE_CXX_FLAGS={cflags}",
+        # Never CMAKE_C_FLAGS: assigning it on the command line replaces what
+        # the framework's toolchain file seeded through CMAKE_C_FLAGS_INIT.
+        # For pico-sdk that is `-mcpu=cortex-m0plus -mthumb`, and losing it
+        # makes every compile die in the assembler ("selected processor does
+        # not support `dmb' in ARM mode"). The stub spends these through
+        # add_compile_options(), which appends.
+        f"-DGHIDRA_C_FLAGS={cflags}",
+        f"-DGHIDRA_CXX_FLAGS={cflags}",
+        f"-DCMAKE_BUILD_TYPE={BUILD_TYPE}",
+        f"-DCMAKE_C_FLAGS_{BUILD_TYPE_SUFFIX}=",
+        f"-DCMAKE_CXX_FLAGS_{BUILD_TYPE_SUFFIX}=",
+        f"-DCMAKE_ASM_FLAGS_{BUILD_TYPE_SUFFIX}=",
+        # The post-configure flag check reads this file. Ninja and the
+        # Makefiles generators both write it.
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     ]
     argv.extend(cache_vars or [])
     if board:
@@ -340,6 +364,138 @@ def cmake_configure_argv(
 
 def cmake_build_argv(build_dir: Path) -> list[str]:
     return ["cmake", "--build", str(build_dir), "-j"]
+
+
+def stub_required_flags(meta: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """Flags a stub asserts must survive onto every compile line.
+
+    Exact tokens in `require_compile_flags`, prefixes in
+    `require_compile_flag_prefixes`. pico-sdk declares `-mthumb` exactly and
+    `-mcpu=` as a prefix: the cpu depends on the board (m0plus on RP2040,
+    m33 on RP2350), so only its presence is a stub-level invariant.
+    """
+
+    def as_list(key: str) -> list[str]:
+        raw = meta.get(key) or []
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    return as_list("require_compile_flags"), as_list("require_compile_flag_prefixes")
+
+
+def compile_commands_path(build_dir: Path) -> Path:
+    return build_dir / "compile_commands.json"
+
+
+def load_compile_commands(build_dir: Path) -> list[dict[str, Any]]:
+    path = compile_commands_path(build_dir)
+    if not path.is_file():
+        raise FrameworkError(
+            f"cmake wrote no {path.name}; the effective compile flags cannot be "
+            "verified, and an object built at the wrong -O level would be "
+            "labelled with the requested one",
+            status="flags_unverifiable",
+            extra={"expected": str(path)},
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrameworkError(
+            f"unreadable {path.name}: {exc}",
+            status="flags_unverifiable",
+            extra={"expected": str(path)},
+        ) from exc
+    return [entry for entry in data if isinstance(entry, Mapping)]
+
+
+def entry_argv(entry: Mapping[str, Any]) -> list[str]:
+    raw = entry.get("arguments")
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw]
+    command = str(entry.get("command") or "")
+    if not command:
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def compile_flag_violations(
+    entries: Sequence[Mapping[str, Any]],
+    opt: str,
+    *,
+    require_flags: Sequence[str] = (),
+    require_prefixes: Sequence[str] = (),
+) -> list[str]:
+    """Effective compile lines that would produce a mislabelled artifact.
+
+    The artifact name and its sidecar both record the requested `opt`. A
+    framework that appends its own `-O3 -DNDEBUG` after ours wins on the
+    command line, and nothing downstream can tell: BSim does not know what
+    flags an object was built with. So the level is checked, not assumed.
+    """
+    want = (opt or "").strip()
+    violations: list[str] = []
+    for entry in entries:
+        source = str(entry.get("file") or "")
+        argv = entry_argv(entry)
+        if not argv:
+            continue
+        levels = [tok for tok in argv if OPT_RE.match(tok)]
+        if want and Path(source).suffix not in ASM_SUFFIXES:
+            if not levels or set(levels) != {want}:
+                found = " ".join(levels) if levels else "no -O flag"
+                violations.append(f"{source}: expected {want}, compile line has {found}")
+                continue
+        missing = [flag for flag in require_flags if flag not in argv]
+        missing += [
+            prefix
+            for prefix in require_prefixes
+            if not any(tok.startswith(prefix) for tok in argv)
+        ]
+        if missing:
+            violations.append(f"{source}: missing {' '.join(missing)}")
+    return violations
+
+
+def verify_compile_flags(
+    build_dir: Path,
+    opt: str,
+    *,
+    require_flags: Sequence[str] = (),
+    require_prefixes: Sequence[str] = (),
+    sample: int = 5,
+) -> int:
+    """Fail configure-time rather than emit an object that lies about itself.
+
+    Returns the number of compile lines checked.
+    """
+    entries = load_compile_commands(build_dir)
+    violations = compile_flag_violations(
+        entries, opt, require_flags=require_flags, require_prefixes=require_prefixes
+    )
+    if violations:
+        shown = violations[:sample]
+        more = len(violations) - len(shown)
+        detail = "\n".join("  " + v for v in shown)
+        if more > 0:
+            detail += f"\n  ... and {more} more"
+        raise FrameworkError(
+            "refusing to build: the effective compile flags do not match the "
+            f"request ({len(violations)} of {len(entries)} compile lines):\n{detail}",
+            status="flag_mismatch",
+            extra={
+                "violations": violations[:50],
+                "violation_count": len(violations),
+                "compile_lines": len(entries),
+                "opt": opt,
+                "require_compile_flags": list(require_flags),
+                "require_compile_flag_prefixes": list(require_prefixes),
+            },
+        )
+    return len(entries)
 
 
 def checkout_with_submodules(

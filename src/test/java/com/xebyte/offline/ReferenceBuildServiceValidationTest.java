@@ -1593,6 +1593,58 @@ public class ReferenceBuildServiceValidationTest extends TestCase {
                 configure.contains("-DCMAKE_C_COMPILER=arm-none-eabi-gcc"));
     }
 
+    /**
+     * Architecture flags and the requested {@code -O} level both used to be lost
+     * on this line. {@code -DCMAKE_C_FLAGS=} replaces what pico's toolchain file
+     * seeded via {@code CMAKE_C_FLAGS_INIT} ({@code -mcpu=cortex-m0plus
+     * -mthumb}), and the SDK's {@code Release} default then appended {@code -O3
+     * -DNDEBUG} after ours. The preview mirrors what the builder runs, so it
+     * must show the fix, not the old line.
+     */
+    public void testFrameworkPreviewNeverAssignsCmakeCFlags() {
+        ReferenceBuild.Spec spec = new ReferenceBuild.Spec(
+                "pico-sdk",
+                "https://github.com/raspberrypi/pico-sdk.git",
+                "2.1.0",
+                List.of(),
+                "gcc13-arm",
+                "",
+                "-O2",
+                List.of(),
+                List.of(),
+                false,
+                "",
+                "framework",
+                "pico-sdk",
+                List.of("hardware_i2c"),
+                "pico",
+                Map.of());
+        List<String> configure = spec.commandLines(tmp.resolve("uploads")).get(0);
+        for (String arg : configure) {
+            assertFalse("CMAKE_C_FLAGS drops the toolchain file's arch flags: " + arg,
+                    arg.startsWith("-DCMAKE_C_FLAGS=") || arg.startsWith("-DCMAKE_CXX_FLAGS="));
+        }
+        assertTrue(configure.toString(),
+                configure.stream().anyMatch(a -> a.startsWith("-DGHIDRA_C_FLAGS=-O2 ")));
+        assertTrue(configure.toString(),
+                configure.contains("-DCMAKE_BUILD_TYPE=" + FrameworkBuild.BUILD_TYPE));
+        assertTrue(configure.toString(),
+                configure.contains("-DCMAKE_C_FLAGS_" + FrameworkBuild.BUILD_TYPE_SUFFIX + "="));
+        assertTrue(configure.toString(),
+                configure.contains("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
+    }
+
+    /** The Java preview and the builder must not drift on these names. */
+    public void testPreviewFlagNamesMatchTheBuilder() throws Exception {
+        String python = Files.readString(
+                Path.of("docker", "builder", "framework_build.py"), StandardCharsets.UTF_8);
+        assertTrue(python.contains("-DGHIDRA_C_FLAGS={cflags}"));
+        assertTrue(python.contains("BUILD_TYPE = \"" + FrameworkBuild.BUILD_TYPE + "\""));
+        assertTrue(python.contains("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
+        assertFalse("the builder must not assign CMAKE_C_FLAGS either",
+                python.contains("-DCMAKE_C_FLAGS={cflags}"));
+    }
+
     /** A template whose tokens do not resolve is dropped, never emitted empty. */
     public void testUnresolvedToolchainTemplateIsDropped() throws Exception {
         Path stubs = tmp.resolve("stubs/fake-sdk");

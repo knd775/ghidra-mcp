@@ -34,6 +34,21 @@ include("${PICO_SDK_PATH}/pico_sdk_init.cmake")
 project(ghidra_framework_stub C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
+
+# Flag policy lands here, not on the cmake command line. `-DCMAKE_C_FLAGS=...`
+# *replaces* the value pico_arm_cortex_m0plus_gcc.cmake seeded through
+# CMAKE_C_FLAGS_INIT, which is where `-mcpu=cortex-m0plus -mthumb` comes
+# from; without them every compile dies in the assembler with
+# "selected processor does not support `dmb' in ARM mode" (Cortex-M is
+# Thumb-only). add_compile_options appends instead, and lands after
+# CMAKE_C_FLAGS_<CONFIG> on the command line, so the requested -O level is
+# the last one standing. The builder passes the flags as GHIDRA_C_FLAGS;
+# any cmake stub added later must spend them the same way.
+if(GHIDRA_C_FLAGS)
+    separate_arguments(GHIDRA_C_FLAG_LIST NATIVE_COMMAND "${GHIDRA_C_FLAGS}")
+    add_compile_options(${GHIDRA_C_FLAG_LIST})
+endif()
+
 pico_sdk_init()
 
 add_executable(ghidra_stub main.c)

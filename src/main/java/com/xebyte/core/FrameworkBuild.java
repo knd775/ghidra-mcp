@@ -36,6 +36,14 @@ public final class FrameworkBuild {
     /** Shipped stub; {@link #listFrameworks()} also scans {@code docker/stubs}. */
     public static final List<String> DEFAULT_FRAMEWORKS = List.of("pico-sdk");
     public static final Duration TIMEOUT = Duration.ofMinutes(20);
+    /**
+     * Build type the builder configures with, so a framework that defaults to
+     * {@code Release} (pico-sdk does) cannot append its own {@code -O3 -DNDEBUG}
+     * after the requested level. Mirrors {@code framework_build.BUILD_TYPE}.
+     */
+    public static final String BUILD_TYPE = "GhidraRef";
+    /** CMake upper-cases the config name to find per-config flag variables. */
+    public static final String BUILD_TYPE_SUFFIX = BUILD_TYPE.toUpperCase(Locale.ROOT);
 
     private FrameworkBuild() {}
 
@@ -439,8 +447,19 @@ public final class FrameworkBuild {
         configure.add("-DGHIDRA_LIBRARIES=" + String.join(";", spec.libraries()));
         configure.add("-DCMAKE_C_COMPILER=" + id.cc());
         configure.add("-DCMAKE_CXX_COMPILER=" + cxx);
-        configure.add("-DCMAKE_C_FLAGS=" + cflags);
-        configure.add("-DCMAKE_CXX_FLAGS=" + cflags);
+        // Never CMAKE_C_FLAGS. Assigning it on the command line replaces what the
+        // framework's toolchain file seeded through CMAKE_C_FLAGS_INIT (for
+        // pico-sdk: -mcpu=cortex-m0plus -mthumb), and every compile then fails in
+        // the assembler. The stub spends GHIDRA_C_FLAGS through
+        // add_compile_options(), which appends. Our own build type keeps the
+        // framework's Release default from appending -O3 after the requested level.
+        configure.add("-DGHIDRA_C_FLAGS=" + cflags);
+        configure.add("-DGHIDRA_CXX_FLAGS=" + cflags);
+        configure.add("-DCMAKE_BUILD_TYPE=" + BUILD_TYPE);
+        configure.add("-DCMAKE_C_FLAGS_" + BUILD_TYPE_SUFFIX + "=");
+        configure.add("-DCMAKE_CXX_FLAGS_" + BUILD_TYPE_SUFFIX + "=");
+        configure.add("-DCMAKE_ASM_FLAGS_" + BUILD_TYPE_SUFFIX + "=");
+        configure.add("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
         configure.addAll(toolchainCacheArgs(findStubDir(spec.framework()), id));
         if (!spec.board().isBlank()) {
             configure.add("-DGHIDRA_BOARD=" + spec.board());
