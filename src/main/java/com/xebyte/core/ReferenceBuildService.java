@@ -48,6 +48,8 @@ public class ReferenceBuildService {
                     + "this tool; the shared volume is the handoff. ref must be a tag or SHA "
                     + "(bare branch names are refused). Compiled with -g; strip_debug=true runs "
                     + "strip --strip-debug (keeps .symtab) when corpus disk is tight. "
+                    + "sources belongs to mode=sources only; mode=framework takes framework "
+                    + "and libraries instead and refuses sources. "
                     + "mode=sources accepts prepare (a shell command run in "
                     + "the cloned tree after checkout, before compile) so generated headers do not "
                     + "need a framework stub. prepare comes from this call or a manifest, never "
@@ -75,8 +77,11 @@ public class ReferenceBuildService {
                     description = "Git URL") String repo,
             @Param(value = "ref", source = ParamSource.BODY,
                     description = "Tag or commit SHA. Required. Branch names are refused.") String ref,
-            @Param(value = "sources", source = ParamSource.BODY,
-                    description = "Source files to compile, JSON array e.g. [\"lfs.c\"]") Object sources,
+            @Param(value = "sources", source = ParamSource.BODY, defaultValue = "",
+                    description = "mode=sources: source files to compile, JSON array e.g. "
+                            + "[\"lfs.c\"]. Required there, refused in mode=framework (the stub "
+                            + "names what it builds). Optional at the schema level so a "
+                            + "framework call does not have to send it.") Object sources,
             @Param(value = "toolchain", source = ParamSource.BODY, defaultValue = "gcc13-arm",
                     description = "Full identity <compiler><major>-<target> (gcc13-arm, "
                             + "gcc13-x86_64, clang17-arm). Selects which binary the builder "
@@ -328,7 +333,9 @@ public class ReferenceBuildService {
 
     @McpTool(path = "/builder_health", method = "GET",
             description = "What the ghidra-builder container can compile right now: packed "
-                    + "toolchain identities, ARM GNU releases, and framework stubs. Proxies "
+                    + "toolchain identities, ARM GNU releases, framework stubs, and the CMake "
+                    + "generators it has (generators/cmake_generator: a stale image without "
+                    + "ninja-build shows up here rather than as a configure failure). Proxies "
                     + "the builder's GET /health. build_reference and build_manifest refuse "
                     + "unknown names using this same list, not a Java constant.",
             category = "bsim")

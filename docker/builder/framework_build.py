@@ -225,6 +225,75 @@ def harvest_groups(build_dir: Path) -> dict[str, list[Path]]:
     return groups
 
 
+def toolchain_tokens(cc: str, cxx: str, identity: str) -> dict[str, str]:
+    """Tokens a stub can spend in `toolchain_cache_vars`.
+
+    Derived from the resolved compiler path, so an identity that is not packed
+    (unit tests, older images) yields empty values and the stub's variables are
+    dropped rather than pointing somewhere wrong.
+
+    `toolchain_bin` is the directory holding the compiler, not its parent.
+    pico_find_compiler passes PICO_TOOLCHAIN_PATH as `PATHS` with
+    `PATH_SUFFIXES bin`, and CMake searches `<prefix>/bin` *and* `<prefix>`
+    itself, so the bin directory resolves (measured against CMake 3.31.6:
+    both `<root>` and `<root>/bin` find `<root>/bin/arm-none-eabi-gcc`).
+    Deriving the root instead would assume every prefix keeps its compiler
+    one level under a `bin/`, which the token cannot know.
+    """
+    path = Path(cc or "")
+    parent = path.parent
+    bin_dir = str(parent) if str(parent) not in {"", "."} else ""
+    name = path.name
+    triple = name[: -len("-gcc")] if name.endswith("-gcc") else ""
+    if not triple and name.endswith("-clang"):
+        triple = name[: -len("-clang")]
+    return {
+        "toolchain": identity or "",
+        "toolchain_bin": bin_dir,
+        "toolchain_triple": triple,
+        "toolchain_prefix": f"{bin_dir}/{triple}-" if bin_dir and triple else "",
+        "cc": cc or "",
+        "cxx": cxx or "",
+    }
+
+
+def toolchain_cache_argv(meta: Mapping[str, Any], tokens: Mapping[str, str]) -> list[str]:
+    """`-D` flags a stub declares for a framework that resolves its own toolchain.
+
+    pico-sdk ignores CMAKE_C_COMPILER: pico_find_compiler searches PATH, and the
+    packed prefixes are deliberately not on PATH. Zephyr
+    (ZEPHYR_TOOLCHAIN_VARIANT / CROSS_COMPILE) and ESP-IDF (IDF_TOOLCHAIN) each
+    want their own variables, so this stays stub data rather than a special case
+    per framework here.
+
+    A template whose tokens do not resolve is dropped, not emitted empty: an
+    empty PICO_TOOLCHAIN_PATH searches PATH again and fails further downstream.
+    """
+    raw = meta.get("toolchain_cache_vars") or {}
+    if not isinstance(raw, Mapping):
+        return []
+    argv: list[str] = []
+    for key, template in raw.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        value = substitute_tokens([str(template)], tokens)[0]
+        if not value or "{" in value:
+            continue
+        argv.append(f"-D{name}={value}")
+    return argv
+
+
+def cmake_generator(which: Callable[[str], Any] = shutil.which) -> str:
+    """Ninja when the image has it, otherwise CMake's default generator.
+
+    Ninja parallelises a pico-sdk build far better and the builder image
+    installs ninja-build, but a stale image without it must still build rather
+    than fail configure with "CMAKE_MAKE_PROGRAM is not set".
+    """
+    return "Ninja" if which("ninja") else ""
+
+
 def cmake_configure_argv(
     *,
     stub: Path,
@@ -237,18 +306,23 @@ def cmake_configure_argv(
     extra_flags: list[str],
     cc: str,
     cxx: str,
+    cache_vars: list[str] | None = None,
+    generator: str | None = None,
 ) -> list[str]:
     cflags = opt
     if extra_flags:
         cflags = opt + " " + " ".join(extra_flags)
+    gen = cmake_generator() if generator is None else generator
     argv = [
         "cmake",
         "-S",
         str(stub),
         "-B",
         str(build_dir),
-        "-G",
-        "Ninja",
+    ]
+    if gen:
+        argv += ["-G", gen]
+    argv += [
         f"-DGHIDRA_SDK_PATH={sdk_path}",
         f"-DGHIDRA_LIBRARIES={';'.join(libraries)}",
         f"-DCMAKE_C_COMPILER={cc}",
@@ -256,6 +330,7 @@ def cmake_configure_argv(
         f"-DCMAKE_C_FLAGS={cflags}",
         f"-DCMAKE_CXX_FLAGS={cflags}",
     ]
+    argv.extend(cache_vars or [])
     if board:
         argv.append(f"-DGHIDRA_BOARD={board}")
     for key, value in config.items():

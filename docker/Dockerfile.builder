@@ -25,7 +25,11 @@
 # versions.
 #
 # Host gcc/g++, cmake, and ninja are for framework stubs: pico-sdk's
-# pioasm is a nested host build. Do not set CC/CXX in ENV.
+# pioasm is a nested host build. Do not set CC/CXX in ENV. The ninja
+# binary is asserted at image build: cmake -G Ninja without it fails
+# configure with "CMAKE_MAKE_PROGRAM is not set", which reads like a stub
+# bug rather than a missing package. GET /health reports the generators
+# so a stale running image is visible from builder_health.
 #
 # Native x86-64 is distro gcc-13 (identity gcc13-x86_64), not another
 # ARM GNU tarball. The bulk of an arm-none-eabi prefix is multilib newlib;
@@ -100,6 +104,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
     && git config --system --add safe.directory '*' \
     && test -x /usr/bin/gcc-13 \
     && test -x /usr/bin/g++-13 \
+    && test -x /usr/bin/ninja \
     && ! dpkg -l gcc-multilib 2>/dev/null | grep -q '^ii'
 
 COPY --from=gcc10 --chown=1000:1000 /out /opt/ghidra-builder/toolchains/gcc10-arm

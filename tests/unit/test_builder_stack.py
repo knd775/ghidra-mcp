@@ -1284,6 +1284,189 @@ def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+class TestFrameworkToolchainVars(unittest.TestCase):
+    """pico-sdk resolves its own compiler; CMAKE_C_COMPILER alone is ignored.
+
+    pico_find_compiler searches PATH, and the packed prefixes are deliberately
+    off PATH, so configure died with "Compiler 'arm-none-eabi-gcc' not found".
+    The fix is stub-declared cache variables filled from the resolved identity,
+    which is also what Zephyr (ZEPHYR_TOOLCHAIN_VARIANT / CROSS_COMPILE) and
+    ESP-IDF (IDF_TOOLCHAIN) will need.
+    """
+
+    PACKED_CC = "/opt/ghidra-builder/toolchains/gcc13-arm/bin/arm-none-eabi-gcc"
+
+    def test_tokens_come_from_the_resolved_compiler_path(self):
+        tokens = gbr.fw.toolchain_tokens(
+            self.PACKED_CC,
+            "/opt/ghidra-builder/toolchains/gcc13-arm/bin/arm-none-eabi-g++",
+            "gcc13-arm",
+        )
+        self.assertEqual(
+            tokens["toolchain_bin"], "/opt/ghidra-builder/toolchains/gcc13-arm/bin"
+        )
+        self.assertEqual(tokens["toolchain_triple"], "arm-none-eabi")
+        self.assertEqual(tokens["toolchain"], "gcc13-arm")
+        self.assertEqual(
+            tokens["toolchain_prefix"],
+            "/opt/ghidra-builder/toolchains/gcc13-arm/bin/arm-none-eabi-",
+        )
+
+    def test_pico_toolchain_path_is_the_bin_dir_not_its_parent(self):
+        """pico_find_compiler searches <prefix>/bin and <prefix> itself.
+
+        find_program(PATHS ENV PICO_TOOLCHAIN_PATH PATH_SUFFIXES bin) checks the
+        suffixed directory and the bare prefix, so the bin directory resolves.
+        Measured against CMake 3.31.6: with the compiler at
+        <root>/bin/arm-none-eabi-gcc, both <root> and <root>/bin find it.
+        Deriving the parent instead would assume every packed prefix keeps its
+        compiler exactly one level under a bin/, which this token cannot know —
+        a flat prefix would then point at the wrong directory entirely.
+        """
+        tokens = gbr.fw.toolchain_tokens(self.PACKED_CC, "", "gcc13-arm")
+        self.assertTrue(tokens["toolchain_bin"].endswith("/bin"))
+        self.assertEqual(
+            str(Path(self.PACKED_CC).parent), tokens["toolchain_bin"]
+        )
+
+    def test_bare_compiler_name_yields_no_bin_dir(self):
+        """Unit tests and older images fall back to the requested binary name."""
+        tokens = gbr.fw.toolchain_tokens("arm-none-eabi-gcc", "", "gcc13-arm")
+        self.assertEqual(tokens["toolchain_bin"], "")
+        self.assertEqual(tokens["toolchain_triple"], "arm-none-eabi")
+
+    def test_pico_stub_declares_its_own_toolchain_variables(self):
+        meta = gbr.fw.load_stub_meta(gbr.fw.stub_dir("pico-sdk"))
+        declared = meta.get("toolchain_cache_vars")
+        self.assertIsInstance(declared, dict)
+        self.assertEqual(declared.get("PICO_TOOLCHAIN_PATH"), "{toolchain_bin}")
+        self.assertEqual(declared.get("PICO_GCC_TRIPLE"), "{toolchain_triple}")
+
+    def test_cache_argv_resolves_the_declared_variables(self):
+        meta = gbr.fw.load_stub_meta(gbr.fw.stub_dir("pico-sdk"))
+        tokens = gbr.fw.toolchain_tokens(self.PACKED_CC, "", "gcc13-arm")
+        argv = gbr.fw.toolchain_cache_argv(meta, tokens)
+        self.assertIn(
+            "-DPICO_TOOLCHAIN_PATH=/opt/ghidra-builder/toolchains/gcc13-arm/bin", argv
+        )
+        self.assertIn("-DPICO_GCC_TRIPLE=arm-none-eabi", argv)
+
+    def test_unresolved_template_is_dropped_not_emitted_empty(self):
+        """An empty PICO_TOOLCHAIN_PATH searches PATH again and fails later."""
+        tokens = gbr.fw.toolchain_tokens("arm-none-eabi-gcc", "", "gcc13-arm")
+        argv = gbr.fw.toolchain_cache_argv(
+            {"toolchain_cache_vars": {"PICO_TOOLCHAIN_PATH": "{toolchain_bin}"}},
+            tokens,
+        )
+        self.assertEqual(argv, [])
+        unknown = gbr.fw.toolchain_cache_argv(
+            {"toolchain_cache_vars": {"X": "{no_such_token}"}}, tokens
+        )
+        self.assertEqual(unknown, [])
+
+    def test_configure_argv_carries_cache_vars_and_operator_config_wins(self):
+        argv = gbr.fw.cmake_configure_argv(
+            stub=Path("/stubs/pico-sdk"),
+            build_dir=Path("/build"),
+            sdk_path="/sdk",
+            board="pico",
+            libraries=["pico_stdlib"],
+            opt="-O2",
+            config={"PICO_TOOLCHAIN_PATH": "/override"},
+            extra_flags=[],
+            cc=self.PACKED_CC,
+            cxx="",
+            cache_vars=["-DPICO_TOOLCHAIN_PATH=/opt/x/bin"],
+            generator="Ninja",
+        )
+        self.assertIn("-DPICO_TOOLCHAIN_PATH=/opt/x/bin", argv)
+        # config is appended after cache_vars, so a later -D wins in CMake.
+        self.assertGreater(
+            argv.index("-DPICO_TOOLCHAIN_PATH=/override"),
+            argv.index("-DPICO_TOOLCHAIN_PATH=/opt/x/bin"),
+        )
+
+    def test_framework_build_passes_stub_toolchain_vars_to_cmake(self):
+        """End to end through the request handler, not just the argv helper."""
+        seen: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            seen.append([str(a) for a in argv])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        body = gbr.handle_framework_request(
+            {
+                "mode": "framework",
+                "name": "pico-sdk",
+                "repo": "https://example.invalid/pico-sdk.git",
+                "ref": "2.1.0",
+                "framework": "pico-sdk",
+                "libraries": ["pico_stdlib"],
+                "board": "pico",
+                "opt": "-O2",
+                "toolchain": "gcc13-arm",
+                "cc": self.PACKED_CC,
+                "dry_run": True,
+            },
+            src_cache=Path("/tmp"),
+            run=run,
+            extract=None,
+        )
+        configure = body["command"][0]
+        self.assertIn("-DPICO_GCC_TRIPLE=arm-none-eabi", configure)
+        path_flag = [a for a in configure if a.startswith("-DPICO_TOOLCHAIN_PATH=")]
+        self.assertEqual(
+            path_flag, ["-DPICO_TOOLCHAIN_PATH=/opt/ghidra-builder/toolchains/gcc13-arm/bin"]
+        )
+
+
+class TestCmakeGenerator(unittest.TestCase):
+    """cmake -G Ninja without ninja installed fails configure outright."""
+
+    def test_ninja_used_when_present(self):
+        argv = gbr.fw.cmake_configure_argv(
+            stub=Path("/stubs/pico-sdk"),
+            build_dir=Path("/build"),
+            sdk_path="/sdk",
+            board="",
+            libraries=["pico_stdlib"],
+            opt="-O2",
+            config={},
+            extra_flags=[],
+            cc="cc",
+            cxx="c++",
+            generator="Ninja",
+        )
+        self.assertEqual(argv[argv.index("-G") + 1], "Ninja")
+
+    def test_default_generator_when_ninja_is_missing(self):
+        self.assertEqual(gbr.fw.cmake_generator(lambda name: None), "")
+        self.assertEqual(gbr.fw.cmake_generator(lambda name: "/usr/bin/ninja"), "Ninja")
+        argv = gbr.fw.cmake_configure_argv(
+            stub=Path("/stubs/pico-sdk"),
+            build_dir=Path("/build"),
+            sdk_path="/sdk",
+            board="",
+            libraries=["pico_stdlib"],
+            opt="-O2",
+            config={},
+            extra_flags=[],
+            cc="cc",
+            cxx="c++",
+            generator="",
+        )
+        self.assertNotIn("-G", argv)
+
+    def test_image_asserts_ninja_and_health_reports_generators(self):
+        text = DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn("ninja-build", text)
+        self.assertIn("test -x /usr/bin/ninja", text)
+        body = gbr.health_payload(run=lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, "gcc (test) 13.2.0\n", ""))
+        self.assertIn("generators", body)
+        self.assertIn("cmake_generator", body)
+
+
 class TestFrameworkHarvest(unittest.TestCase):
     def test_list_stubs_includes_pico_sdk(self):
         names = gbr.fw.list_stubs()

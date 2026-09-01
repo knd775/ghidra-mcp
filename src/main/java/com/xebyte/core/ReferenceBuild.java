@@ -418,6 +418,7 @@ public final class ReferenceBuild {
         String n = requireName(name);
         String r = requireRepo(repo);
         String pinned = requireRef(ref);
+        refuseSourcesInFramework(sourcesRaw);
         String fw = FrameworkBuild.requireFramework(framework, resolvedMode, knownFrameworks);
         List<String> libraries = FrameworkBuild.requireLibraries(librariesRaw, resolvedMode);
         String b = FrameworkBuild.requireBoard(board);
@@ -520,10 +521,27 @@ public final class ReferenceBuild {
         return value;
     }
 
+    /**
+     * {@code sources} is a sources-mode input. It is optional at the schema
+     * level so a framework call can omit it; passing it with {@code
+     * mode=framework} is a mistake worth naming, because nothing would compile
+     * those files and the stub decides what gets built.
+     */
+    public static void refuseSourcesInFramework(Object raw) {
+        List<String> sources = stringList(raw);
+        if (!sources.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "sources is not accepted in mode=framework; the stub decides what is "
+                            + "compiled. Pass framework and libraries instead. Got: " + sources);
+        }
+    }
+
     public static List<String> requireSources(Object raw) {
         List<String> sources = stringList(raw);
         if (sources.isEmpty()) {
-            throw new IllegalArgumentException("sources is required (e.g. [\"lfs.c\"])");
+            throw new IllegalArgumentException(
+                    "sources is required in mode=sources (e.g. [\"lfs.c\"]); mode=framework "
+                            + "names framework and libraries instead");
         }
         for (String src : sources) {
             Path p = Path.of(src);

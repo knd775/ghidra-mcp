@@ -16,6 +16,14 @@ if(GHIDRA_BOARD)
     set(PICO_BOARD "${GHIDRA_BOARD}" CACHE STRING "Pico board" FORCE)
 endif()
 
+# The toolchain is NOT selected here. pico-sdk resolves its own compiler
+# through pico_find_compiler, which searches PATH; the builder's packed
+# prefixes are deliberately off PATH, so CMAKE_C_COMPILER alone is ignored
+# and configure fails with "Compiler 'arm-none-eabi-gcc' not found".
+# PICO_TOOLCHAIN_PATH / PICO_GCC_TRIPLE come in as -D cache entries from
+# the toolchain_cache_vars block in stub.json, filled from the resolved
+# toolchain identity.
+#
 # Nested ExternalProject builds of pioasm/picotool use the host compiler.
 # Do not set CC/CXX in the environment. PICO_NO_PICOTOOL skips the 2.1.0
 # GitHub fetch of picotool (we harvest objects, not UF2).
