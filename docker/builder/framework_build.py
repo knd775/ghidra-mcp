@@ -231,6 +231,14 @@ def toolchain_tokens(cc: str, cxx: str, identity: str) -> dict[str, str]:
     Derived from the resolved compiler path, so an identity that is not packed
     (unit tests, older images) yields empty values and the stub's variables are
     dropped rather than pointing somewhere wrong.
+
+    `toolchain_bin` is the directory holding the compiler, not its parent.
+    pico_find_compiler passes PICO_TOOLCHAIN_PATH as `PATHS` with
+    `PATH_SUFFIXES bin`, and CMake searches `<prefix>/bin` *and* `<prefix>`
+    itself, so the bin directory resolves (measured against CMake 3.31.6:
+    both `<root>` and `<root>/bin` find `<root>/bin/arm-none-eabi-gcc`).
+    Deriving the root instead would assume every prefix keeps its compiler
+    one level under a `bin/`, which the token cannot know.
     """
     path = Path(cc or "")
     parent = path.parent

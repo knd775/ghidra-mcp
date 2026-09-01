@@ -1312,6 +1312,23 @@ class TestFrameworkToolchainVars(unittest.TestCase):
             "/opt/ghidra-builder/toolchains/gcc13-arm/bin/arm-none-eabi-",
         )
 
+    def test_pico_toolchain_path_is_the_bin_dir_not_its_parent(self):
+        """pico_find_compiler searches <prefix>/bin and <prefix> itself.
+
+        find_program(PATHS ENV PICO_TOOLCHAIN_PATH PATH_SUFFIXES bin) checks the
+        suffixed directory and the bare prefix, so the bin directory resolves.
+        Measured against CMake 3.31.6: with the compiler at
+        <root>/bin/arm-none-eabi-gcc, both <root> and <root>/bin find it.
+        Deriving the parent instead would assume every packed prefix keeps its
+        compiler exactly one level under a bin/, which this token cannot know —
+        a flat prefix would then point at the wrong directory entirely.
+        """
+        tokens = gbr.fw.toolchain_tokens(self.PACKED_CC, "", "gcc13-arm")
+        self.assertTrue(tokens["toolchain_bin"].endswith("/bin"))
+        self.assertEqual(
+            str(Path(self.PACKED_CC).parent), tokens["toolchain_bin"]
+        )
+
     def test_bare_compiler_name_yields_no_bin_dir(self):
         """Unit tests and older images fall back to the requested binary name."""
         tokens = gbr.fw.toolchain_tokens("arm-none-eabi-gcc", "", "gcc13-arm")
