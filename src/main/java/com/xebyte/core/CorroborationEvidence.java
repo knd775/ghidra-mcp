@@ -49,6 +49,12 @@ public final class CorroborationEvidence {
         }
     }
 
+    /**
+     * One function's corroboration row. {@code signature} is the typed
+     * prototype ingest captured from the reference's DWARF (see
+     * {@link BSimSignatures.Signature}); {@code null} for rows written before
+     * signatures existed or by an extractor that did not read one.
+     */
     public record FunctionRow(
             String executableMd5,
             String executableName,
@@ -56,7 +62,8 @@ public final class CorroborationEvidence {
             List<String> constants,
             List<String> strings,
             List<String> callees,
-            boolean truncated) {
+            boolean truncated,
+            BSimSignatures.Signature signature) {
 
         public FunctionRow {
             executableMd5 = executableMd5 == null ? "" : executableMd5.toLowerCase(Locale.ROOT);
@@ -65,6 +72,18 @@ public final class CorroborationEvidence {
             constants = constants == null ? List.of() : List.copyOf(constants);
             strings = strings == null ? List.of() : List.copyOf(strings);
             callees = callees == null ? List.of() : List.copyOf(callees);
+        }
+
+        public FunctionRow(String executableMd5, String executableName, String functionName,
+                           List<String> constants, List<String> strings, List<String> callees,
+                           boolean truncated) {
+            this(executableMd5, executableName, functionName, constants, strings, callees,
+                    truncated, null);
+        }
+
+        public FunctionRow withSignature(BSimSignatures.Signature sig) {
+            return new FunctionRow(executableMd5, executableName, functionName,
+                    constants, strings, callees, truncated, sig);
         }
 
         public static FunctionRow empty(String functionName) {

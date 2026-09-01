@@ -6,6 +6,46 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim: typed signatures from references (`apply_signatures`)
+
+Every corpus reference is built with `-g`, so a matched function has a
+fully typed prototype in the reference's DWARF, and `bsim_apply_matches`
+was throwing it away. After BSim named 159 functions in a real firmware,
+`lfs_mount` still decompiled as
+`undefined4 lfs_mount(undefined4 param_1, undefined4 param_2)`.
+
+References are disposable inputs and are never opened at apply time, so
+`bsim_ingest` now captures the signature data alongside corroboration:
+`<artifact>.gdt`, a Data Type Archive beside the artifact (every DWARF
+type plus one function definition per DWARF-signed function under
+`/bsim-sig/`), and `prototype` / `calling_convention` / `param_count` /
+`has_dwarf` / `gdt_path` columns in `corroboration.functions` (idempotent
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for existing databases). The
+`ghidra://` path does the same inside `BSim_McpExtract.java`. `has_dwarf`
+is true only for a DWARF (`IMPORTED`) signature source; analysis-inferred
+signatures are stored but never applied.
+
+`bsim_apply_matches(apply_signatures=true, min_signature_confidence=40)`
+applies the reference prototype to each function it renames, importing
+types with `KEEP_HANDLER`. Types the prototype names directly are matched
+against the target by name in any category, so a hand-defined `lfs_t`
+wins over the archive's copy and a second run imports nothing. Every
+applied signature carries a `[bsim-sig] from <reference> conf=<n>` plate
+marker.
+
+A wrong signature propagates through every caller, so it has its own
+gates and each is counted in a new `signatures` block: the separate
+confidence floor (must be `>= min_confidence`), same architecture only,
+DWARF only, archive present, not already applied, and reference parameter
+count equal to what the target's decompiler infers (inlined callees, SDK
+drift and `.constprop` variants all produce real mismatches). Failing a
+gate applies the name only; `signature_details` names both counts on a
+mismatch. `dry_run` runs the gates and reports the planned type work but
+imports nothing. Default off.
+
+Offline coverage: `BSimSignaturesTest` (guards, ingest storage, apply
+wiring through the injected `BSimSignatures.Support` seam).
+
 ### `build_reference` framework mode: compile flags, and a smoke test
 
 Framework mode compiled nothing on a Pico board. Every unit died in the
