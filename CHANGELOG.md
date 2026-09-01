@@ -55,6 +55,29 @@ job `running` forever, every later job queued behind a ticket nobody
 could redeem. It now catches `Throwable` and reports the job as failed
 (`BSimJobsTest` pins both the failure and the worker surviving it).
 
+The live run (a stripped littlefs ELF against a `-g` littlefs reference in
+a local PostgreSQL BSim: 43 names, 37 signatures, 5 parameter-count
+mismatches, hand-defined `lfs_t` kept, cross-arch hits from an x86-64
+reference refused by name) found two more things. With `skip_named=false`
+every function named by an earlier run was reported `conflicting` with
+itself, so a names-only corpus could never be followed by
+`apply_signatures=true`; such a function is now `unchanged`
+(`name_unchanged`) and still runs the signature gates. And a debug-stripped
+reference still reported `signatures_dwarf: 8`: `memcpy`, `printf` and
+friends are externals whose `IMPORTED` signature is Ghidra's library
+archive, so `has_dwarf` now excludes externals and thunks on both extract
+paths. The dry-run preview also turned out to be a lower bound: its
+parameter counts come from the untyped program, and once callees were
+typed in the real pass `lfs_mount` went from a 1-vs-2 mismatch to applied.
+
+Ingesting that stripped copy next to the `-g` one showed a third: the two
+tie on similarity, BSim's order between them is a coin toss, and 24 of 40
+signatures came back `skipped_no_dwarf` with the DWARF copy one row down.
+The signature source is now the best hit unless it fails a reference-side
+gate and another hit with the same name passes (`best_hit_source` /
+`best_hit_reason` on the row); a hit whose marker is already on the
+function wins outright, so a flipping tie stays idempotent.
+
 ### `build_reference` framework mode: compile flags, and a smoke test
 
 Framework mode compiled nothing on a Pico board. Every unit died in the

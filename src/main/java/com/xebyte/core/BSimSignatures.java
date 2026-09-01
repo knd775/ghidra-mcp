@@ -302,7 +302,11 @@ public final class BSimSignatures {
             String cc = f.getCallingConventionName();
             int params = sig != null && sig.getArguments() != null
                     ? sig.getArguments().length : f.getParameterCount();
-            boolean dwarf = f.getSignatureSource() == SourceType.IMPORTED;
+            // IMPORTED on an external or thunk is Ghidra's own library
+            // archive (memcpy, printf...), not the reference's DWARF, and the
+            // archive export skips those functions for the same reason.
+            boolean dwarf = !f.isExternal() && !f.isThunk()
+                    && f.getSignatureSource() == SourceType.IMPORTED;
             return new Signature(proto, cc, params, dwarf, "");
         } catch (Exception e) {
             return null;

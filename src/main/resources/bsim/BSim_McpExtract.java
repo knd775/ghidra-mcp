@@ -130,7 +130,10 @@ public class BSim_McpExtract extends GhidraScript {
             String cc = func.getCallingConventionName();
             int params = sig != null && sig.getArguments() != null
                     ? sig.getArguments().length : func.getParameterCount();
-            boolean dwarf = func.getSignatureSource() == SourceType.IMPORTED;
+            // Externals and thunks carry Ghidra's library-archive signature,
+            // not the reference's DWARF (mirrors BSimSignatures.describe).
+            boolean dwarf = !func.isExternal() && !func.isThunk()
+                    && func.getSignatureSource() == SourceType.IMPORTED;
             json.append(",\"prototype\":\"").append(escape(nullToEmpty(prototype))).append('"');
             json.append(",\"calling_convention\":\"").append(escape(nullToEmpty(cc))).append('"');
             json.append(",\"param_count\":").append(params);

@@ -29,12 +29,14 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.symbol.SourceType;
 import junit.framework.TestCase;
 
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -370,14 +372,124 @@ public class BSimSignaturesTest extends TestCase {
         seedReference(true, 2);
         FakeApplier applier = new FakeApplier();
         applier.alreadyApplied = true; // the marker from run one is on the function
-        BSimService svc = applyService(applier, matchJson(101.0, ARM));
-        String json = apply(svc, true, false, 15.0, 40.0).toJson();
+        // After run one the function is named lfs_mount, so the second run
+        // must use skip_named=false to reach it at all.
+        BSimService svc = applyService(applier, matchJson(101.0, ARM), "lfs_mount");
+        String json = apply(svc, true, false, 15.0, 40.0, false).toJson();
+        assertTrue(json, json.contains("\"name_unchanged\":1"));
+        assertTrue(json, json.contains("\"conflicting\":0"));
+        assertTrue(json, json.contains("\"renamed\":[]"));
         assertTrue(json, json.contains("\"skipped_already_applied\":1"));
         assertTrue(json, json.contains("\"applied\":0"));
         assertTrue(json, json.contains("\"types_imported\":0"));
         assertTrue(json, json.contains("\"types_kept_existing\":0"));
         assertFalse(json, json.contains("\"error\""));
         assertTrue(applier.applied.isEmpty());
+    }
+
+    /**
+     * Live 2026-09-01: with skip_named=false every function named by an
+     * earlier run was reported "conflicting" with itself, so a names-only
+     * pass could never be followed by apply_signatures=true.
+     */
+    public void testAlreadyNamedFunctionIsNotAConflictWithItself() throws Exception {
+        seedReference(true, 2);
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier, matchJson(101.0, ARM), "lfs_mount");
+        String json = apply(svc, true, false, 15.0, 40.0, false).toJson();
+        assertTrue(json, json.contains("\"conflicting\":0"));
+        assertTrue(json, json.contains("\"name_unchanged\":1"));
+        assertTrue(json, json.contains("\"renamed\":[]"));
+        assertTrue(json, json.contains("\"unchanged\":[{"));
+        assertTrue(json, json.contains("\"rename\":\"unchanged\""));
+        assertTrue(json, json.contains("\"applied\":1"));
+        assertEquals(List.of("lfs_mount"), applier.applied);
+    }
+
+    public void testAlreadyNamedFunctionStaysAlreadyNamedUnderSkipNamed() throws Exception {
+        seedReference(true, 2);
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier, matchJson(101.0, ARM), "lfs_mount");
+        String json = apply(svc, true, false, 15.0, 40.0, true).toJson();
+        assertTrue(json, json.contains("\"already_named\":1"));
+        assertTrue(json, json.contains("\"name_unchanged\":0"));
+        assertTrue(json, json.contains("\"applied\":0"));
+        assertTrue(applier.applied.isEmpty());
+    }
+
+    /**
+     * Live 2026-09-01: with a debug-stripped copy of the reference in the
+     * corpus, BSim's order between the two identical copies is a coin toss
+     * and 24 of 40 signatures were skipped_no_dwarf while the DWARF copy of
+     * the same function sat one row down.
+     */
+    public void testNoDwarfBestHitFallsBackToADwarfCopyOfTheSameName() throws Exception {
+        seedReference(true, 2);
+        seedStrippedCopy();
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier, twoCopiesJson(101.0, 100.0));
+        String json = apply(svc, true, false, 15.0, 40.0).toJson();
+        assertTrue(json, json.contains("\"applied\":1"));
+        assertTrue(json, json.contains("\"skipped_no_dwarf\":0"));
+        assertTrue(json, json.contains("\"source\":\"littlefs.o\""));
+        assertTrue(json, json.contains("\"best_hit_source\":\"littlefs-stripped.o\""));
+        assertTrue(json, json.contains("\"best_hit_reason\":\"skipped_no_dwarf\""));
+        assertEquals(List.of("[bsim-sig] from littlefs.o conf=100.0"), applier.provenance);
+    }
+
+    public void testNoSameNameAlternativeKeepsTheBestHitsReason() throws Exception {
+        seedReference(false, 2);
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier, matchJson(101.0, ARM));
+        String json = apply(svc, true, false, 15.0, 40.0).toJson();
+        assertTrue(json, json.contains("\"skipped_no_dwarf\":1"));
+        assertFalse(json, json.contains("best_hit_source"));
+        assertTrue(applier.applied.isEmpty());
+    }
+
+    /** A tie that flips order between runs must not re-apply from the other copy. */
+    public void testAlreadyAppliedCopyWinsOverAPassingBestHit() throws Exception {
+        seedReference(true, 2);
+        seedStrippedCopy();
+        // This time both copies carry DWARF, and the function already has
+        // the marker from the second one.
+        store.upsert(STRIPPED_MD5, "littlefs-stripped.o", List.of(new FunctionRow(STRIPPED_MD5,
+                "littlefs-stripped.o", "lfs_mount", List.of("0x3ff"), List.of(), List.of(), false,
+                new Signature(PROTOTYPE, "__stdcall", 2, true, ""))), gdt.toString());
+        FakeApplier applier = new FakeApplier();
+        applier.appliedFrom = java.util.Set.of("littlefs.o");
+        BSimService svc = applyService(applier, twoCopiesJson(101.0, 100.0), "lfs_mount");
+        String json = apply(svc, true, false, 15.0, 40.0, false).toJson();
+        assertTrue(json, json.contains("\"skipped_already_applied\":1"));
+        assertTrue(json, json.contains("\"applied\":0"));
+        assertTrue(json, json.contains("\"source\":\"littlefs.o\""));
+        assertTrue(applier.applied.isEmpty());
+    }
+
+    /**
+     * A debug-stripped littlefs.o still reported signatures_dwarf=8 live:
+     * memcpy, printf and friends are externals whose IMPORTED signature is
+     * Ghidra's library archive, not the reference's DWARF.
+     */
+    public void testDescribeDoesNotCountLibraryArchiveSignaturesAsDwarf() {
+        assertTrue(BSimSignatures.describe(signedFunction(false, false)).hasDwarf());
+        assertFalse(BSimSignatures.describe(signedFunction(true, false)).hasDwarf());
+        assertFalse(BSimSignatures.describe(signedFunction(false, true)).hasDwarf());
+    }
+
+    private static Function signedFunction(boolean external, boolean thunk) {
+        return (Function) Proxy.newProxyInstance(
+                Function.class.getClassLoader(), new Class<?>[] {Function.class},
+                (prox, m, a) -> switch (m.getName()) {
+                    case "getSignature" -> null;
+                    case "getPrototypeString" -> "void * memcpy(void * d, void * s, size_t n)";
+                    case "getCallingConventionName" -> "__stdcall";
+                    case "getParameterCount" -> 3;
+                    case "getSignatureSource" -> SourceType.IMPORTED;
+                    case "isExternal" -> external;
+                    case "isThunk" -> thunk;
+                    default -> throw new UnsupportedOperationException(m.getName());
+                });
     }
 
     public void testFailedApplicationIsReportedNotHidden() throws Exception {
@@ -423,6 +535,27 @@ public class BSimSignaturesTest extends TestCase {
                 new Signature(PROTOTYPE, "__stdcall", params, dwarf, ""))), gdt.toString());
     }
 
+    private static final String STRIPPED_MD5 = "ffeeddccbbaa99887766554433221100";
+
+    /** Two hits for the same name: a debug-stripped copy first, the DWARF one second. */
+    private static String twoCopiesJson(double strippedConfidence, double dwarfConfidence) {
+        return "{\"program\":\"fw.elf\",\"results\":[{\"function\":\"FUN_1000\","
+                + "\"address\":\"0x1000\",\"matches\":[{\"name\":\"lfs_mount\","
+                + "\"similarity\":1.0,\"confidence\":" + strippedConfidence + ","
+                + "\"executable\":\"littlefs-stripped.o\",\"arch\":\"" + ARM + "\","
+                + "\"md5\":\"" + STRIPPED_MD5 + "\",\"address\":\"0x2000\"},"
+                + "{\"name\":\"lfs_mount\","
+                + "\"similarity\":1.0,\"confidence\":" + dwarfConfidence + ","
+                + "\"executable\":\"littlefs.o\",\"arch\":\"" + ARM + "\","
+                + "\"md5\":\"" + REF_MD5 + "\",\"address\":\"0x2000\"}]}]}";
+    }
+
+    private void seedStrippedCopy() throws Exception {
+        store.upsert(STRIPPED_MD5, "littlefs-stripped.o", List.of(new FunctionRow(STRIPPED_MD5,
+                "littlefs-stripped.o", "lfs_mount", List.of("0x3ff"), List.of(), List.of(), false,
+                new Signature(PROTOTYPE, "__stdcall", 2, false, ""))), "");
+    }
+
     private static String matchJson(double confidence, String arch) {
         return "{\"program\":\"fw.elf\",\"results\":[{\"function\":\"FUN_1000\","
                 + "\"address\":\"0x1000\",\"matches\":[{\"name\":\"lfs_mount\","
@@ -433,8 +566,14 @@ public class BSimSignaturesTest extends TestCase {
 
     private static Response apply(BSimService svc, boolean signatures, boolean dryRun,
                                   double minConfidence, double minSignatureConfidence) {
+        return apply(svc, signatures, dryRun, minConfidence, minSignatureConfidence, true);
+    }
+
+    private static Response apply(BSimService svc, boolean signatures, boolean dryRun,
+                                  double minConfidence, double minSignatureConfidence,
+                                  boolean skipNamed) {
         return svc.applyMatches("postgresql://ghidra-bsim:5432/bsim", minConfidence, 0.15,
-                true, dryRun, 0.0, 10, "", "", "", "", "", 8, false, "none", 5.0,
+                skipNamed, dryRun, 0.0, 10, "", "", "", "", "", 8, false, "none", 5.0,
                 signatures, minSignatureConfidence, 45);
     }
 
@@ -450,7 +589,11 @@ public class BSimSignaturesTest extends TestCase {
     }
 
     private BSimService applyService(FakeApplier applier, String queryJson) {
-        Program program = program("fw.elf", new StubFunction("FUN_1000"));
+        return applyService(applier, queryJson, "FUN_1000");
+    }
+
+    private BSimService applyService(FakeApplier applier, String queryJson, String currentName) {
+        Program program = program("fw.elf", new StubFunction(currentName));
         FunctionRow query = FunctionRow.empty("FUN_1000");
         CorroborationExtractor extractor = new CorroborationExtractor() {
             @Override public List<FunctionRow> extractAll(Program p) { return List.of(query); }
@@ -546,7 +689,11 @@ public class BSimSignaturesTest extends TestCase {
             return paramCount;
         }
 
+        /** When set, only these references count as already applied. */
+        java.util.Set<String> appliedFrom;
+
         @Override public boolean alreadyApplied(Function function, String executable) {
+            if (appliedFrom != null) return appliedFrom.contains(executable);
             return alreadyApplied;
         }
 
@@ -587,23 +734,20 @@ public class BSimSignaturesTest extends TestCase {
                     case "getName" -> fn.name;
                     case "setName" -> { fn.name = (String) a[0]; yield null; }
                     case "getEntryPoint" -> entry;
+                    case "isThunk" -> false;
+                    case "isExternal" -> false;
                     case "toString" -> fn.name;
                     case "hashCode" -> System.identityHashCode(prox);
                     case "equals" -> prox == a[0];
-                    default -> throw new UnsupportedOperationException(m.getName());
-                });
-        FunctionIterator none = (FunctionIterator) Proxy.newProxyInstance(
-                FunctionIterator.class.getClassLoader(), new Class<?>[] {FunctionIterator.class},
-                (prox, m, a) -> switch (m.getName()) {
-                    case "iterator" -> prox;
-                    case "hasNext" -> false;
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
         FunctionManager fm = (FunctionManager) Proxy.newProxyInstance(
                 FunctionManager.class.getClassLoader(), new Class<?>[] {FunctionManager.class},
                 (prox, m, a) -> switch (m.getName()) {
                     case "getFunctionCount" -> 3;
-                    case "getFunctions" -> none;
+                    // The listing sees the function under its current name,
+                    // so the existing-name conflict check runs as it does live.
+                    case "getFunctions" -> functionsOver(List.of(function));
                     case "getFunctionAt" -> a[0] == entry ? function : null;
                     case "getFunctionContaining" -> a[0] == entry ? function : null;
                     default -> throw new UnsupportedOperationException(m.getName());
@@ -662,6 +806,18 @@ public class BSimSignaturesTest extends TestCase {
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
                     default -> throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    private static FunctionIterator functionsOver(List<Function> functions) {
+        Iterator<Function> it = functions.iterator();
+        return (FunctionIterator) Proxy.newProxyInstance(
+                FunctionIterator.class.getClassLoader(), new Class<?>[] {FunctionIterator.class},
+                (prox, m, a) -> switch (m.getName()) {
+                    case "iterator" -> prox;
+                    case "hasNext" -> it.hasNext();
+                    case "next" -> it.next();
+                    default -> throw new UnsupportedOperationException(m.getName());
                 });
     }
 

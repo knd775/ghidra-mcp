@@ -551,8 +551,13 @@ names, and each gate is counted:
 | reference `param_count` differs from what the target's decompiler infers (inlined callee, SDK version, `.constprop` variant) | `skipped_param_mismatch` (both counts named) |
 
 In every skipped case the name is still applied. Signature application only
-happens on functions being renamed in the same run, so with `skip_named=true`
-hand-named functions are untouched by construction.
+happens on functions whose name this run applied or confirmed, so with
+`skip_named=true` hand-named functions are untouched by construction. A
+function that already carries the proposed name is reported under
+`unchanged` (count `name_unchanged`), never as a conflict with itself, and
+still goes through the signature gates. That is the path for a corpus that
+was named before this feature existed: run again with `skip_named=false`
+and `apply_signatures=true`; nothing is renamed and the signatures land.
 
 Every applied signature gets a plate-comment marker,
 `[bsim-sig] from pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico.o conf=64.0`,
@@ -573,9 +578,33 @@ The response gains a `signatures` block (`applied`, `would_apply`, every
 ```
 
 `dry_run=true` runs every gate, reports `would_apply` and the type work it
-would do, and imports nothing: importing a type is a write. The 40 default is
-a starting point, not a calibration — in one real run every match above 40 was
-a large distinctive function and the band between 15 and 40 was mixed.
+would do, and imports nothing: importing a type is a write. Two things the
+preview cannot know. The parameter count it compares against is what the
+decompiler infers from the program as it stands; in a real pass, signatures
+applied earlier retype callees and later functions can settle to a different
+count (measured 2026-09-01 on a stripped littlefs: `lfs_mount` was
+`skipped_param_mismatch` with 1 vs 2 in the dry run and `applied` for real
+once its callees were typed). And its `types_imported` is summed per
+function, so a type several prototypes share is counted once per function
+in the preview and once in the real pass. Read the preview as the set of
+gates that will run, not as the exact counts.
+
+The signature source is the best hit unless that hit fails a
+reference-side gate (no signature row, no DWARF, cross-arch, archive gone,
+below the floor) and another hit proposing the same name passes; then that
+one is used and the row carries `best_hit_source` / `best_hit_reason`. A
+corpus that holds the same code twice (a debug-stripped copy, an older
+hand-built object) ties on similarity and BSim's order between the copies
+is not stable: live, 24 of 40 signatures were `skipped_no_dwarf` with the
+DWARF copy one row down. A hit whose marker is already on the function wins
+outright, so a tie that flips between runs stays idempotent.
+
+`has_dwarf` is false for externals and thunks even when their signature
+source is `IMPORTED`: that signature is Ghidra's own library archive
+(`memcpy`, `printf`), not the reference's DWARF, and the archive export
+skips those functions for the same reason. The 40 default is a starting
+point, not a calibration — in one real run every match above 40 was a large
+distinctive function and the band between 15 and 40 was mixed.
 
 ### `bsim_list_corpus`
 
