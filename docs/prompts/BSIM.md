@@ -391,6 +391,25 @@ verify by polling `bsim_job_status` and re-running `bsim_list_corpus` —
 never by `dry_run`. The staged GZF keeps the program name, so
 `bsim_list_corpus` shows `littlefs-v2.9.3-gcc13-arm-Os`, not `"program"`.
 
+Ingest also captures what `bsim_apply_matches(apply_signatures=true)` needs,
+because a reference is never opened again afterwards:
+
+- `<artifact>.gdt`, a Ghidra Data Type Archive beside the artifact and its
+  sidecar (falling back to `GHIDRA_MCP_BSIM_ROOT/gdt/<md5>.gdt` when that
+  directory is not writable). It holds every struct, typedef, enum and
+  function-definition type the DWARF produced, plus one function definition
+  per DWARF-signed function under `/bsim-sig/`.
+- Per-function `prototype` (Ghidra's `getPrototypeString(true, true)`, e.g.
+  `int lfs_mount(lfs_t * lfs, struct lfs_config * cfg)`), `calling_convention`,
+  `param_count`, `has_dwarf` and `gdt_path` columns in
+  `corroboration.functions`. `has_dwarf` is true only when the signature
+  source is DWARF (`IMPORTED`), never analysis — an analysis-inferred
+  signature is no better than the target's own and is never applied.
+
+The response reports `signature_archive`, `signatures_dwarf` and
+`signatures_analysis_only`. A reference built without `-g` yields
+`signatures_dwarf: 0` and a warning; apply will skip every function from it.
+
 ### `bsim_query`
 
 ```
@@ -472,7 +491,9 @@ bsim_apply_matches(db_url, program, min_confidence=<required>,
                    similarity_threshold=0.0, arch=None, executable=None,
                    compiler=None, exclude_md5=None, min_feature_count=8,
                    apply_unidentifiable=False, resolve_conflicts="none",
-                   conflict_min_confidence_margin=5.0, wait_seconds=45)
+                   conflict_min_confidence_margin=5.0,
+                   apply_signatures=False, min_signature_confidence=40.0,
+                   wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
@@ -494,6 +515,96 @@ resolved by `best`.
 
 Applied names are the BSim hit names as-is (C linkage, not PascalCase).
 `lfs_bd_read` is the right name here.
+
+#### Typed signatures (`apply_signatures=true`)
+
+Naming is half the readability. After BSim named 159 functions in a real
+firmware, `lfs_mount` still decompiled as
+`undefined4 lfs_mount(undefined4 param_1, undefined4 param_2)` when the
+reference had `int lfs_mount(lfs_t *lfs, const struct lfs_config *cfg)`.
+Applying that signature does more than label two parameters: the decompiler
+propagates the types, every access through `lfs` becomes a named field, and
+every *caller* gains typed arguments without being touched.
+
+With `apply_signatures=true`, each function that is being renamed in the same
+run also receives the reference's prototype, read from the data ingest wrote
+(`corroboration.functions` and the `.gdt` archive) — no reference program is
+opened. Types named by the prototype are resolved into the target with
+`KEEP_HANDLER`: a type the target already defines under that name, by hand or
+by an earlier run, is kept and the archive's definition is discarded. That
+makes repeated runs idempotent and protects hand work. Types nested inside an
+imported struct are matched by Ghidra's category path.
+
+A wrong name costs one rename. A wrong signature **propagates** — the
+decompiler trusts it, and a bad struct pointer type turns every caller into
+confidently wrong field accesses. So signatures sit behind stricter gates than
+names, and each gate is counted:
+
+| gate | skipped as |
+| --- | --- |
+| `confidence < min_signature_confidence` (default 40, must be `>= min_confidence`) | `skipped_below_confidence` |
+| target and reference `arch` differ (BSim's own tutorial: cross-arch types are unsafe) | `skipped_cross_arch` |
+| reference ingested before signatures existed, or a `file:` H2 database | `skipped_no_signature_data` |
+| reference signature came from analysis, not DWARF (`has_dwarf=false`, built without `-g`) | `skipped_no_dwarf` |
+| the `.gdt` archive is gone | `skipped_no_archive` |
+| the function already carries this reference's marker | `skipped_already_applied` |
+| reference `param_count` differs from what the target's decompiler infers (inlined callee, SDK version, `.constprop` variant) | `skipped_param_mismatch` (both counts named) |
+
+In every skipped case the name is still applied. Signature application only
+happens on functions whose name this run applied or confirmed, so with
+`skip_named=true` hand-named functions are untouched by construction. A
+function that already carries the proposed name is reported under
+`unchanged` (count `name_unchanged`), never as a conflict with itself, and
+still goes through the signature gates. That is the path for a corpus that
+was named before this feature existed: run again with `skip_named=false`
+and `apply_signatures=true`; nothing is renamed and the signatures land.
+
+Every applied signature gets a plate-comment marker,
+`[bsim-sig] from pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico.o conf=64.0`,
+so it is distinguishable from a hand-written prototype. Hand-written plate
+text is kept above it.
+
+The response gains a `signatures` block (`applied`, `would_apply`, every
+`skipped_*` count, `failed`, `types_imported`, `types_kept_existing`) and
+`signature_details` rows:
+
+```
+{"function": "lfs_mount", "status": "applied",
+ "prototype": "int lfs_mount(lfs_t * lfs, struct lfs_config * cfg)",
+ "confidence": 101.0, "source": "littlefs-v2.9.3-gcc13-arm-O2.o",
+ "types_imported": ["lfs_config"], "types_kept_existing": ["lfs_t"]}
+{"function": "lfs_dir_fetch", "status": "skipped_param_mismatch",
+ "reference_params": 3, "target_params": 2}
+```
+
+`dry_run=true` runs every gate, reports `would_apply` and the type work it
+would do, and imports nothing: importing a type is a write. Two things the
+preview cannot know. The parameter count it compares against is what the
+decompiler infers from the program as it stands; in a real pass, signatures
+applied earlier retype callees and later functions can settle to a different
+count (measured 2026-09-01 on a stripped littlefs: `lfs_mount` was
+`skipped_param_mismatch` with 1 vs 2 in the dry run and `applied` for real
+once its callees were typed). And its `types_imported` is summed per
+function, so a type several prototypes share is counted once per function
+in the preview and once in the real pass. Read the preview as the set of
+gates that will run, not as the exact counts.
+
+The signature source is the best hit unless that hit fails a
+reference-side gate (no signature row, no DWARF, cross-arch, archive gone,
+below the floor) and another hit proposing the same name passes; then that
+one is used and the row carries `best_hit_source` / `best_hit_reason`. A
+corpus that holds the same code twice (a debug-stripped copy, an older
+hand-built object) ties on similarity and BSim's order between the copies
+is not stable: live, 24 of 40 signatures were `skipped_no_dwarf` with the
+DWARF copy one row down. A hit whose marker is already on the function wins
+outright, so a tie that flips between runs stays idempotent.
+
+`has_dwarf` is false for externals and thunks even when their signature
+source is `IMPORTED`: that signature is Ghidra's own library archive
+(`memcpy`, `printf`), not the reference's DWARF, and the archive export
+skips those functions for the same reason. The 40 default is a starting
+point, not a calibration — in one real run every match above 40 was a large
+distinctive function and the band between 15 and 40 was mixed.
 
 ### `bsim_list_corpus`
 

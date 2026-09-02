@@ -269,10 +269,30 @@ class TestBsimPostgresImage(unittest.TestCase):
         self.assertIn("USING gin (strings)", sql)
         self.assertNotIn("descriptable", sql)
         self.assertNotIn("exetable", sql)
+        # Typed signatures for bsim_apply_matches(apply_signatures=true) live in
+        # the same companion table; existing databases get the columns via
+        # idempotent ALTERs, never a rebuild of BSim's own tables.
+        for column in ("prototype", "calling_convention", "param_count", "has_dwarf", "gdt_path"):
+            self.assertIn(column, sql)
+            self.assertIn(f"ADD COLUMN IF NOT EXISTS {column}", sql)
         guide = (REPO_ROOT / "docs" / "prompts" / "BSIM.md").read_text(encoding="utf-8")
         self.assertIn("corroborate_match", guide)
         self.assertIn("corroboration", guide)
         self.assertIn("no_evidence", guide)
+        self.assertIn("apply_signatures", guide)
+        self.assertIn("min_signature_confidence", guide)
+        self.assertIn("[bsim-sig]", guide)
+
+    def test_extract_script_copies_are_identical_and_emit_signatures(self):
+        resource = REPO_ROOT / "src" / "main" / "resources" / "bsim" / "BSim_McpExtract.java"
+        script = REPO_ROOT / "ghidra_scripts" / "BSim_McpExtract.java"
+        a = resource.read_text(encoding="utf-8")
+        self.assertEqual(a, script.read_text(encoding="utf-8"))
+        # JSON keys appear in Java source as escaped string literals.
+        for token in ('\\"prototype\\"', '\\"has_dwarf\\"', '\\"param_count\\"',
+                      '\\"gdt_path\\"', "/bsim-sig", "SourceType.IMPORTED",
+                      "FileDataTypeManager.createFileArchive"):
+            self.assertIn(token, a)
 
     def test_manifests_point_at_postgres(self):
         arm = yaml.safe_load(

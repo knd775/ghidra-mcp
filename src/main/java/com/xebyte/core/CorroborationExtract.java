@@ -91,7 +91,8 @@ public final class CorroborationExtract implements CorroborationExtractor {
                 md5 == null ? "" : md5,
                 exeName == null ? "" : exeName,
                 func == null ? "" : func.getName(),
-                constList, strList, calleeList, truncated);
+                constList, strList, calleeList, truncated,
+                BSimSignatures.describe(func));
     }
 
     static boolean collectInstruction(Listing listing, Instruction instr,

@@ -190,6 +190,68 @@ def test_apply_dry_run_does_not_rename(http_client, fixture_dir):
     assert before.text == after.text
 
 
+def test_apply_signatures_dry_run_reports_gates_and_writes_nothing(http_client, fixture_dir):
+    """apply_signatures=true under dry_run runs every gate, previews the type
+    work, and imports nothing. A reference program is never opened."""
+    before = http_client.get("/list_functions", params={"limit": "5"})
+    assert before.status_code == 200
+    data = _post(
+        http_client,
+        "/bsim_apply_matches",
+        {
+            "db_url": _db_url(fixture_dir),
+            "min_confidence": 15.0,
+            "dry_run": True,
+            "apply_signatures": True,
+            "min_signature_confidence": 40.0,
+        },
+    )
+    assert data.get("dry_run") is True, data
+    assert data.get("apply_signatures") is True, data
+    signatures = data.get("signatures") or {}
+    assert signatures.get("applied") == 0, data
+    for key in (
+        "would_apply",
+        "skipped_below_confidence",
+        "skipped_cross_arch",
+        "skipped_param_mismatch",
+        "skipped_no_dwarf",
+        "skipped_no_signature_data",
+        "types_imported",
+        "types_kept_existing",
+    ):
+        assert key in signatures, data
+    details = data.get("signature_details") or []
+    assert len(details) == signatures.get("would_apply", 0) + sum(
+        v for k, v in signatures.items() if k.startswith("skipped_") or k == "failed"
+    ), data
+    for row in details:
+        assert row.get("status") != "applied", row
+        if row.get("status") == "skipped_param_mismatch":
+            assert "reference_params" in row and "target_params" in row, row
+    after = http_client.get("/list_functions", params={"limit": "5"})
+    assert after.status_code == 200
+    assert before.text == after.text
+
+
+def test_apply_signature_floor_below_name_floor_is_an_error(http_client, fixture_dir):
+    response = http_client.post(
+        "/bsim_apply_matches",
+        json_data={
+            "db_url": _db_url(fixture_dir),
+            "min_confidence": 50.0,
+            "dry_run": True,
+            "apply_signatures": True,
+            "min_signature_confidence": 40.0,
+        },
+        timeout=60,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "error" in data
+    assert "min_signature_confidence" in data["error"]
+
+
 def test_corroborate_match_does_not_require_a_reference_program(http_client, fixture_dir):
     """Acceptance: evidence comes from the corpus; only the query program is open."""
     spec_path = fixture_dir / "corroboration.json"

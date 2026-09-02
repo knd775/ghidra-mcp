@@ -63,6 +63,10 @@ public class BSimService {
             "This program has few or no user-defined function names. "
                     + "A stripped binary adds signature noise and yields no names to propagate. "
                     + "Ingest a build with symbols.";
+    static final String NO_DWARF_WARNING =
+            "No function has a DWARF signature (has_dwarf=false for every row). The reference "
+                    + "was probably built without -g; bsim_apply_matches(apply_signatures=true) "
+                    + "will skip every function from it. Rebuild with -g to transfer types.";
 
     static final String WAIT_SECONDS_DESCRIPTION =
             "Seconds to wait inline before returning a job ticket (0-"
@@ -77,6 +81,7 @@ public class BSimService {
     private final BSimJobs jobs;
     private final CorroborationStore.Factory stores;
     private final CorroborationExtractor extractor;
+    private final BSimSignatures.Support signatures;
 
     public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy) {
         this(programProvider, threadingStrategy, new BSimCli());
@@ -96,12 +101,20 @@ public class BSimService {
     public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy,
                        BSimCli cli, BSimJobs jobs, CorroborationStore.Factory stores,
                        CorroborationExtractor extractor) {
+        this(programProvider, threadingStrategy, cli, jobs, stores, extractor,
+                BSimSignatures.GHIDRA);
+    }
+
+    public BSimService(ProgramProvider programProvider, ThreadingStrategy threadingStrategy,
+                       BSimCli cli, BSimJobs jobs, CorroborationStore.Factory stores,
+                       CorroborationExtractor extractor, BSimSignatures.Support signatures) {
         this.programProvider = programProvider;
         this.threadingStrategy = threadingStrategy;
         this.cli = cli;
         this.jobs = jobs;
         this.stores = stores != null ? stores : CorroborationStore::open;
         this.extractor = extractor != null ? extractor : CorroborationExtract.INSTANCE;
+        this.signatures = signatures != null ? signatures : BSimSignatures.GHIDRA;
     }
 
     // ========================================================================
@@ -244,15 +257,19 @@ public class BSimService {
                     + "commit them with `bsim generatesigs --bsim --commit`. Also extracts "
                     + "per-function constants, strings and direct callees into the companion "
                     + "corroboration schema (same PostgreSQL database, not BSim's tables) so "
-                    + "corroborate_match does not need the reference program later. Refuses a "
+                    + "corroborate_match does not need the reference program later. Also stores "
+                    + "each function's typed prototype (DWARF only: has_dwarf) and exports the "
+                    + "program's data types to <artifact>.gdt beside the artifact, so "
+                    + "bsim_apply_matches(apply_signatures=true) never opens the reference. Refuses a "
                     + "source with no functions, and a pointer-size mismatch against a sized "
                     + "template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed "
                     + "pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but "
                     + "records the throwaway project URL, so a second pass is not a no-op) but "
-                    + "corroboration is still written when the program is open — that is the "
-                    + "backfill path. The ingest response carries executable_md5 for the artifact "
-                    + "sidecar. Warns when the source has few user-defined names. Ingest with "
-                    + "symbols. Ingest takes minutes: expect a job_id, then poll bsim_job_status.",
+                    + "corroboration and signatures are still written when the program is open — "
+                    + "that is the backfill path. The ingest response carries executable_md5 for the "
+                    + "artifact sidecar. Warns when the source has few user-defined names or no DWARF "
+                    + "signatures. Ingest with symbols and -g. Ingest takes minutes: expect a job_id, "
+                    + "then poll bsim_job_status.",
             category = "bsim")
     public Response ingest(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -513,9 +530,22 @@ public class BSimService {
                     + "Functions flagged unidentifiable (too few LSH features) are skipped unless "
                     + "apply_unidentifiable=true. Optional arch / executable / compiler / "
                     + "exclude_md5 are the same server-side filters as bsim_query. Applied names "
-                    + "are the BSim hit names as-is (C linkage, not PascalCase). Runs a "
-                    + "full-program BSim query first, which takes minutes: expect a job_id, then "
-                    + "poll bsim_job_status.",
+                    + "are the BSim hit names as-is (C linkage, not PascalCase). A function that "
+                    + "already carries the proposed name is reported under unchanged (count "
+                    + "name_unchanged), never as a conflict with itself; with skip_named=false that "
+                    + "is how a names-only run is followed by apply_signatures=true. "
+                    + "apply_signatures=true (default false) additionally applies the reference's "
+                    + "typed DWARF prototype to each function being renamed, importing struct/typedef "
+                    + "types from the reference's .gdt archive with KEEP semantics (a type the target "
+                    + "already defines by name is never replaced). A wrong signature propagates through "
+                    + "the decompiler, so it has its own gates: min_signature_confidence (>= "
+                    + "min_confidence, default 40), same architecture only, DWARF-sourced only, and the "
+                    + "reference parameter count must equal what the target's decompiler infers; "
+                    + "anything else gets the name only and is counted in the signatures block. "
+                    + "Every applied signature carries a [bsim-sig] plate-comment marker naming the "
+                    + "reference and confidence. dry_run previews signatures and imports no types. "
+                    + "Runs a full-program BSim query first, which takes minutes: expect a job_id, "
+                    + "then poll bsim_job_status.",
             category = "bsim")
     public Response applyMatches(
             @Param(value = "db_url", source = ParamSource.BODY,
@@ -569,6 +599,19 @@ public class BSimService {
                     description = "Minimum confidence lead required by resolve_conflicts=best. "
                             + "Exact ties are always skipped, even when this is 0.")
                     double conflictMinConfidenceMargin,
+            @Param(value = "apply_signatures", source = ParamSource.BODY, defaultValue = "false",
+                    description = "Also apply the reference's typed prototype (parameter names, "
+                            + "struct pointer types, return type, calling convention) to each "
+                            + "function being renamed. Default false: a wrong signature propagates "
+                            + "to every caller, so opt in consciously. Only functions that pass "
+                            + "min_signature_confidence, same-arch, DWARF and parameter-count "
+                            + "checks get one; the rest keep the name only.")
+                    boolean applySignatures,
+            @Param(value = "min_signature_confidence", source = ParamSource.BODY,
+                    defaultValue = "40.0",
+                    description = "Confidence floor for signatures; must be >= min_confidence. "
+                            + "Default 40 is a starting point, not a calibration.")
+                    double minSignatureConfidence,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         if (minConfidence == null) {
@@ -587,6 +630,11 @@ public class BSimService {
             if (conflictMinConfidenceMargin < 0.0) {
                 return Response.err("conflict_min_confidence_margin must be >= 0");
             }
+            if (applySignatures && minSignatureConfidence < minConfidence) {
+                return Response.err("min_signature_confidence (" + minSignatureConfidence
+                        + ") must be >= min_confidence (" + minConfidence + "): a signature "
+                        + "propagates through every caller, so it needs the stricter floor.");
+            }
             String url = BSimUrls.requireBsimUrl(dbUrl);
             String pgCred = BSimUrls.missingPostgresCredential(url);
             if (pgCred != null) return Response.err(pgCred);
@@ -601,12 +649,15 @@ public class BSimService {
             request.put("min_confidence", minConfidence);
             request.put("resolve_conflicts", conflictMode);
             request.put("conflict_min_confidence_margin", conflictMinConfidenceMargin);
+            request.put("apply_signatures", applySignatures);
+            if (applySignatures) request.put("min_signature_confidence", minSignatureConfidence);
             BSimJobs.Job job = jobs.submit("bsim_apply_matches", request,
                     () -> runApplyMatches(url, program, minConfidence, minSimilarity,
                             skipNamed, dryRun, querySimilarity, maxMatches,
                             arch, executable, compiler, excludeMd5,
                             minFeatureCount, applyUnidentifiable, conflictMode,
-                            conflictMinConfidenceMargin));
+                            conflictMinConfidenceMargin, applySignatures,
+                            minSignatureConfidence));
             return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -622,7 +673,9 @@ public class BSimService {
                                      String arch, String executable, String compiler,
                                      String excludeMd5, int minFeatureCount,
                                      boolean applyUnidentifiable, String resolveConflicts,
-                                     double conflictMinConfidenceMargin) throws Exception {
+                                     double conflictMinConfidenceMargin,
+                                     boolean applySignatures, double minSignatureConfidence)
+            throws Exception {
         QuerySpec spec = new QuerySpec("", querySimilarity, 0.0, maxMatches,
                 arch, executable, compiler, excludeMd5, minFeatureCount, 0);
         Response queried = runQuery(url, program, spec);
@@ -630,14 +683,29 @@ public class BSimService {
         Map<String, Object> payload = JsonHelper.parseJson(queried.toJson());
         List<BSimMatches.FunctionResult> results =
                 BSimMatches.parseQueryPayload(payload, program.getExecutableMD5());
+        try (SignatureRun sigRun = applySignatures
+                ? new SignatureRun(url, program, dryRun, minSignatureConfidence) : null) {
+            return applyResults(program, results, minConfidence, minSimilarity, skipNamed,
+                    dryRun, applyUnidentifiable, resolveConflicts,
+                    conflictMinConfidenceMargin, sigRun);
+        }
+    }
+
+    private Response applyResults(Program program, List<BSimMatches.FunctionResult> results,
+                                  Double minConfidence, double minSimilarity, boolean skipNamed,
+                                  boolean dryRun, boolean applyUnidentifiable,
+                                  String resolveConflicts, double conflictMinConfidenceMargin,
+                                  SignatureRun sigRun) {
 
         List<Map<String, Object>> renamed = new ArrayList<>();
         List<Map<String, Object>> wouldRename = new ArrayList<>();
+        List<Map<String, Object>> unchanged = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
         Map<String, Integer> counts = new LinkedHashMap<>();
         counts.put("queried", results.size());
         counts.put("renamed", 0);
         counts.put("would_rename", 0);
+        counts.put("name_unchanged", 0);
         counts.put("already_named", 0);
         counts.put("unidentifiable", 0);
         counts.put("below_similarity", 0);
@@ -693,10 +761,34 @@ public class BSimService {
         int existingNameGroups = 0;
         for (Map.Entry<String, List<ApplyCandidate>> entry : byName.entrySet()) {
             List<ApplyCandidate> group = entry.getValue();
-            List<Function> existing = existingByName.getOrDefault(entry.getKey(), List.of());
+            List<Function> existing = new ArrayList<>(
+                    existingByName.getOrDefault(entry.getKey(), List.of()));
+            if (!existing.isEmpty()) {
+                // A function that already carries the proposed name is not a
+                // conflict with itself. With skip_named=false every function
+                // named by an earlier run came back "conflicting" (measured
+                // live 2026-09-01), so a names-only pass could never be
+                // followed by apply_signatures=true.
+                for (int i = 0; i < group.size(); i++) {
+                    ApplyCandidate candidate = group.get(i);
+                    Function own = candidate.function;
+                    if (own == null) {
+                        try {
+                            own = resolveApplyTarget(program, candidate.result);
+                        } catch (Exception e) {
+                            own = null;
+                        }
+                        if (own != null) {
+                            group.set(i, new ApplyCandidate(candidate.result, own, candidate.hit));
+                        }
+                    }
+                    final Function self = own;
+                    if (self != null) existing.removeIf(f -> sameFunction(f, self));
+                }
+            }
             if (group.size() == 1 && existing.isEmpty()) {
-                applyCandidate(program, group.get(0), dryRun, renamed, wouldRename,
-                        skipped, counts);
+                applyCandidate(program, group.get(0), dryRun, renamed, wouldRename, unchanged,
+                        skipped, counts, sigRun);
                 continue;
             }
 
@@ -739,7 +831,8 @@ public class BSimService {
                 resolvedConflictGroups++;
                 conflict.put("resolution", "best");
                 conflict.put("selected_function", leader.result.function);
-                applyCandidate(program, leader, dryRun, renamed, wouldRename, skipped, counts);
+                applyCandidate(program, leader, dryRun, renamed, wouldRename, unchanged, skipped,
+                        counts, sigRun);
                 for (int i = 1; i < group.size(); i++) {
                     skipConflict(group.get(i), "best_not_selected", margin,
                             skipped, counts);
@@ -784,7 +877,15 @@ public class BSimService {
         body.put("unidentifiable_skipped", counts.get("unidentifiable"));
         body.put("renamed", renamed);
         body.put("would_rename", wouldRename);
+        body.put("unchanged", unchanged);
         body.put("skipped", skipped);
+        if (sigRun != null) {
+            body.put("apply_signatures", true);
+            body.put("min_signature_confidence", sigRun.minConfidence);
+            body.put("signatures", sigRun.summary());
+            body.put("signature_details", sigRun.details);
+            if (!sigRun.warnings.isEmpty()) body.put("warnings", sigRun.warnings);
+        }
         return Response.ok(body);
     }
 
@@ -810,6 +911,13 @@ public class BSimService {
         }
     }
 
+    private static boolean sameFunction(Function a, Function b) {
+        if (a == b) return true;
+        if (a == null || b == null) return false;
+        if (a.equals(b)) return true;
+        return a.getEntryPoint() != null && a.getEntryPoint().equals(b.getEntryPoint());
+    }
+
     private static Map<String, List<Function>> existingFunctionsByName(
             Program program, Map<String, List<ApplyCandidate>> proposed) {
         Map<String, List<Function>> existing = new LinkedHashMap<>();
@@ -826,16 +934,37 @@ public class BSimService {
     private void applyCandidate(Program program, ApplyCandidate candidate, boolean dryRun,
                                 List<Map<String, Object>> renamed,
                                 List<Map<String, Object>> wouldRename,
+                                List<Map<String, Object>> unchanged,
                                 List<Map<String, Object>> skipped,
-                                Map<String, Integer> counts) {
+                                Map<String, Integer> counts, SignatureRun sigRun) {
         Map<String, Object> row = candidate.row();
+        Function target = candidate.function;
+        if (target == null) {
+            try {
+                target = resolveApplyTarget(program, candidate.result);
+            } catch (Exception e) {
+                target = null;
+            }
+        }
+        if (target != null && candidate.hit.name.equals(target.getName())) {
+            // Already carries this name (an earlier run, or the analyst).
+            // Nothing to write, but the signature gates still run: this is
+            // how a names-only pass is followed by apply_signatures=true,
+            // and the [bsim-sig] marker keeps a second signature pass idle.
+            row.put("rename", "unchanged");
+            unchanged.add(row);
+            counts.computeIfPresent("name_unchanged", (key, value) -> value + 1);
+            if (sigRun != null) sigRun.consider(candidate, target, row);
+            return;
+        }
         if (dryRun) {
             wouldRename.add(row);
             counts.computeIfPresent("would_rename", (key, value) -> value + 1);
+            // Read-only: the resolved target lets the preview run the same
+            // guards (arch, DWARF, parameter count) the real pass will.
+            if (sigRun != null) sigRun.consider(candidate, target, row);
             return;
         }
-        Function target = candidate.function != null
-                ? candidate.function : resolveApplyTarget(program, candidate.result);
         if (target == null) {
             row.put("reason", "function_not_found");
             skipped.add(row);
@@ -850,11 +979,233 @@ public class BSimService {
             });
             renamed.add(row);
             counts.computeIfPresent("renamed", (key, value) -> value + 1);
+            // Signatures ride on a name that was (or already is) applied, so
+            // hand-named functions under skip_named are untouched by construction.
+            if (sigRun != null) sigRun.consider(candidate, target, row);
         } catch (Exception e) {
             row.put("reason", "rename_failed");
             row.put("error", e.getMessage());
             skipped.add(row);
             counts.computeIfPresent("rename_failed", (key, value) -> value + 1);
+        }
+    }
+
+    /**
+     * Per-run state for {@code apply_signatures}. One store, one applier (and
+     * so one decompiler) for the whole pass; {@link #consider} runs the guards
+     * for a candidate whose name was (or would be) applied.
+     */
+    private final class SignatureRun implements AutoCloseable {
+        final Program program;
+        final boolean dryRun;
+        final double minConfidence;
+        final CorroborationStore store;
+        final BSimSignatures.Applier applier;
+        final String targetArch;
+        final Map<String, Integer> counts = new LinkedHashMap<>();
+        final List<Map<String, Object>> details = new ArrayList<>();
+        final List<String> warnings = new ArrayList<>();
+        private int typesImported;
+        private int typesKeptExisting;
+
+        SignatureRun(String url, Program program, boolean dryRun, double minConfidence) {
+            this.program = program;
+            this.dryRun = dryRun;
+            this.minConfidence = minConfidence;
+            this.store = stores.open(url);
+            this.applier = signatures.applier(program);
+            this.targetArch = applier.targetArch(program);
+            for (String key : List.of("applied", "would_apply",
+                    "skipped_below_confidence", "skipped_cross_arch",
+                    "skipped_param_mismatch", "skipped_no_dwarf",
+                    "skipped_no_signature_data", "skipped_no_archive",
+                    "skipped_already_applied", "skipped_target_unresolved", "failed")) {
+                counts.put(key, 0);
+            }
+            if (!store.writable()) {
+                warnings.add("apply_signatures: signature data lives in the companion "
+                        + "PostgreSQL schema; this db_url is not postgresql://, so every "
+                        + "signature is skipped_no_signature_data");
+            }
+        }
+
+        /** One hit's reference-side gates, before the decompiler is asked anything. */
+        private record Probe(BSimMatches.Hit hit, BSimSignatures.Signature sig,
+                             boolean archiveExists, boolean already,
+                             BSimSignatures.Decision decision) {}
+
+        private Probe probe(BSimMatches.Hit hit, Function target) {
+            BSimSignatures.Signature sig = null;
+            if (hit.confidence >= minConfidence && store.writable()) {
+                String refExe = (hit.md5 != null && !hit.md5.isBlank()) ? hit.md5 : hit.executable;
+                try {
+                    CorroborationEvidence.FunctionRow ref = store.lookup(refExe, hit.name);
+                    sig = ref == null ? null : ref.signature();
+                } catch (Exception e) {
+                    warnings.add("signature lookup failed for " + hit.name + ": "
+                            + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+                }
+            }
+            boolean archiveExists = sig != null && !sig.gdtPath().isEmpty()
+                    && Files.isRegularFile(Path.of(sig.gdtPath()));
+            boolean already = target != null && applier.alreadyApplied(target, hit.executable);
+            BSimSignatures.Decision decision = BSimSignatures.decide(hit.confidence, minConfidence,
+                    targetArch, hit.arch, sig, archiveExists, already, null);
+            return new Probe(hit, sig, archiveExists, already, decision);
+        }
+
+        /**
+         * Every hit proposing the applied name, best first, then by confidence.
+         * A corpus that holds the same code twice (a debug-stripped copy, an
+         * older hand-built object) ties on similarity, and BSim's order
+         * between the copies is not stable: measured live 2026-09-01, 24 of
+         * 40 signatures were skipped_no_dwarf while a DWARF copy of the
+         * same function sat one row down.
+         */
+        private List<BSimMatches.Hit> sameNameHits(ApplyCandidate candidate) {
+            BSimMatches.Hit best = candidate.hit;
+            List<BSimMatches.Hit> hits = new ArrayList<>();
+            hits.add(best);
+            List<BSimMatches.Hit> rest = new ArrayList<>();
+            if (candidate.result.matches != null) {
+                for (BSimMatches.Hit h : candidate.result.matches) {
+                    if (h != null && h != best && best.name.equals(h.name)) rest.add(h);
+                }
+            }
+            rest.sort((a, b) -> Double.compare(b.confidence, a.confidence));
+            hits.addAll(rest);
+            return hits;
+        }
+
+        void consider(ApplyCandidate candidate, Function target, Map<String, Object> row) {
+            BSimMatches.Hit best = candidate.hit;
+            Map<String, Object> detail = new LinkedHashMap<>();
+            detail.put("function", best.name);
+            if (candidate.result.address != null && !candidate.result.address.isEmpty()) {
+                detail.put("address", candidate.result.address);
+            }
+
+            // Source selection: the best hit unless it fails a reference-side
+            // gate and another hit with the same name passes. A hit whose
+            // marker is already on the function wins outright, so a tie that
+            // flips between two copies of a reference stays idempotent.
+            Probe first = null;
+            Probe passing = null;
+            Probe applied = null;
+            for (BSimMatches.Hit h : sameNameHits(candidate)) {
+                Probe p = probe(h, target);
+                if (first == null) first = p;
+                if (p.decision == BSimSignatures.Decision.SKIP_ALREADY_APPLIED) {
+                    applied = p;
+                    break;
+                }
+                if (passing == null && p.decision == BSimSignatures.Decision.APPLY) passing = p;
+            }
+            Probe use = applied != null ? applied : passing != null ? passing : first;
+            BSimMatches.Hit hit = use.hit;
+            BSimSignatures.Signature sig = use.sig;
+            boolean archiveExists = use.archiveExists;
+            boolean already = use.already;
+            BSimSignatures.Decision decision = use.decision;
+            detail.put("confidence", hit.confidence);
+            detail.put("source", hit.executable);
+            if (hit != best) {
+                detail.put("best_hit_source", best.executable);
+                detail.put("best_hit_reason", BSimSignatures.reason(first.decision));
+            }
+            if (decision == BSimSignatures.Decision.APPLY && target == null) {
+                record(row, detail, "skipped_target_unresolved");
+                return;
+            }
+            Integer targetParams = null;
+            if (decision == BSimSignatures.Decision.APPLY) {
+                targetParams = applier.targetParamCount(program, target);
+                decision = BSimSignatures.decide(hit.confidence, minConfidence,
+                        targetArch, hit.arch, sig, archiveExists, already, targetParams);
+            }
+            if (decision != BSimSignatures.Decision.APPLY) {
+                if (decision == BSimSignatures.Decision.SKIP_PARAM_MISMATCH) {
+                    detail.put("reference_params", sig.paramCount());
+                    detail.put("target_params", targetParams);
+                } else if (decision == BSimSignatures.Decision.SKIP_CROSS_ARCH) {
+                    detail.put("target_arch", targetArch);
+                    detail.put("reference_arch", hit.arch);
+                } else if (decision == BSimSignatures.Decision.SKIP_NO_ARCHIVE && sig != null) {
+                    detail.put("gdt_path", sig.gdtPath());
+                }
+                if (sig != null && !sig.isEmpty()) detail.put("prototype", sig.prototype());
+                record(row, detail, BSimSignatures.reason(decision));
+                return;
+            }
+            detail.put("prototype", sig.prototype());
+            if (!sig.callingConvention().isEmpty()) {
+                detail.put("calling_convention", sig.callingConvention());
+            }
+            if (dryRun) {
+                BSimSignatures.TypePlan plan = applier.plan(program, target, sig, hit.name);
+                if (!plan.error().isEmpty()) {
+                    detail.put("error", plan.error());
+                    record(row, detail, "failed");
+                    return;
+                }
+                addTypes(detail, plan.imported(), plan.keptExisting());
+                record(row, detail, "would_apply");
+                return;
+            }
+            String provenance = BSimSignatures.provenanceLine(hit.executable, hit.confidence);
+            BSimSignatures.Outcome outcome;
+            try {
+                final Function fn = target;
+                final BSimSignatures.Signature ref = sig;
+                outcome = threadingStrategy.executeWrite(program,
+                        "BSim apply signature " + hit.name,
+                        () -> applier.apply(program, fn, ref, hit.name, provenance));
+            } catch (Exception e) {
+                outcome = BSimSignatures.Outcome.failed(
+                        e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
+            if (outcome == null || !outcome.ok()) {
+                detail.put("error", outcome == null ? "no outcome" : outcome.error());
+                record(row, detail, "failed");
+                return;
+            }
+            if (!outcome.prototype().isEmpty()) detail.put("prototype", outcome.prototype());
+            if (!outcome.callingConvention().isEmpty()) {
+                detail.put("calling_convention", outcome.callingConvention());
+            }
+            detail.put("provenance", provenance);
+            addTypes(detail, outcome.imported(), outcome.keptExisting());
+            record(row, detail, "applied");
+        }
+
+        private void addTypes(Map<String, Object> detail, List<String> imported,
+                              List<String> kept) {
+            typesImported += imported.size();
+            typesKeptExisting += kept.size();
+            detail.put("types_imported", imported);
+            detail.put("types_kept_existing", kept);
+        }
+
+        private void record(Map<String, Object> row, Map<String, Object> detail, String status) {
+            detail.put("status", status);
+            counts.merge(status, 1, Integer::sum);
+            details.add(detail);
+            if (row != null) row.put("signature", status);
+        }
+
+        Map<String, Object> summary() {
+            Map<String, Object> m = new LinkedHashMap<>(counts);
+            m.put("types_imported", typesImported);
+            m.put("types_kept_existing", typesKeptExisting);
+            return m;
+        }
+
+        @Override
+        public void close() {
+            try {
+                applier.close();
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -1527,10 +1878,15 @@ public class BSimService {
             List<CorroborationEvidence.FunctionRow> rows;
             String md5 = programMd5(program);
             String exeName = program != null ? program.getName() : "";
+            String gdtPath = "";
             if (program != null) {
                 rows = extractor.extractAll(program);
+                Path gdt = signatures.exportArchive(program, warnings);
+                if (gdt != null) gdtPath = gdt.toString();
             } else {
-                rows = extractCorroborationViaScript(source, warnings);
+                ScriptExtract extracted = extractCorroborationViaScript(source, warnings);
+                rows = extracted.rows;
+                gdtPath = extracted.gdtPath;
                 if (!rows.isEmpty()) {
                     CorroborationEvidence.FunctionRow first = rows.get(0);
                     if (md5 == null || md5.isBlank()) md5 = first.executableMd5();
@@ -1538,10 +1894,22 @@ public class BSimService {
                 }
             }
             if (rows == null) rows = List.of();
-            store.upsert(md5, exeName, rows);
+            store.upsert(md5, exeName, rows, gdtPath);
+            int dwarf = 0;
+            int analysisOnly = 0;
+            for (CorroborationEvidence.FunctionRow row : rows) {
+                BSimSignatures.Signature sig = row == null ? null : row.signature();
+                if (sig == null || sig.isEmpty()) continue;
+                if (sig.hasDwarf()) dwarf++;
+                else analysisOnly++;
+            }
+            if (!rows.isEmpty() && dwarf == 0) warnings.add(NO_DWARF_WARNING);
             if (body != null) {
                 body.put("corroboration", rows.isEmpty() ? "empty" : "stored");
                 body.put("corroboration_functions", rows.size());
+                if (!gdtPath.isEmpty()) body.put("signature_archive", gdtPath);
+                body.put("signatures_dwarf", dwarf);
+                body.put("signatures_analysis_only", analysisOnly);
             }
         } catch (Exception e) {
             warnings.add("corroboration extract/store failed: "
@@ -1550,15 +1918,19 @@ public class BSimService {
         }
     }
 
-    private List<CorroborationEvidence.FunctionRow> extractCorroborationViaScript(
-            String ghidraUrl, List<String> warnings) {
-        if (ghidraUrl == null || ghidraUrl.isBlank()) return List.of();
+    /** Rows plus the archive path the extract script wrote. */
+    private record ScriptExtract(List<CorroborationEvidence.FunctionRow> rows, String gdtPath) {
+        static final ScriptExtract NONE = new ScriptExtract(List.of(), "");
+    }
+
+    private ScriptExtract extractCorroborationViaScript(String ghidraUrl, List<String> warnings) {
+        if (ghidraUrl == null || ghidraUrl.isBlank()) return ScriptExtract.NONE;
         HeadlessTarget target = HeadlessTarget.parse(ghidraUrl);
         if (target == null || target.fileName == null) {
             warnings.add("corroboration not stored: open the program and re-ingest "
                     + "(identical-MD5 skip still writes corroboration) so listing-level "
                     + "constants can be extracted");
-            return List.of();
+            return ScriptExtract.NONE;
         }
         Path workDir = null;
         try {
@@ -1588,23 +1960,30 @@ public class BSimService {
             args.add("-postScript");
             args.add(EXTRACT_SCRIPT_NAME);
             args.add(outJson.toAbsolutePath().toString());
+            // Where the .gdt goes when the artifact's directory is not writable.
+            args.add(BSimSignatures.fallbackDirectory());
             BSimCli.Result r = analyzeHeadless(BSimCli.INGEST_TIMEOUT, args, null);
             if (!Files.isRegularFile(outJson) || Files.size(outJson) == 0) {
                 warnings.add("corroboration extract script produced no JSON (exit "
                         + r.exitCode + ")");
-                return List.of();
+                return ScriptExtract.NONE;
             }
             Map<String, Object> payload = JsonHelper.parseJson(
                     Files.readString(outJson, StandardCharsets.UTF_8));
             if (payload != null && payload.containsKey("error")) {
                 warnings.add("corroboration extract: " + payload.get("error"));
-                return List.of();
+                return ScriptExtract.NONE;
             }
-            return CorroborationStore.rowsFromExtractPayload(payload, "", "");
+            if (payload != null && payload.get("gdt_error") != null) {
+                warnings.add("signature archive export failed: " + payload.get("gdt_error"));
+            }
+            return new ScriptExtract(
+                    CorroborationStore.rowsFromExtractPayload(payload, "", ""),
+                    CorroborationStore.gdtPathFromExtractPayload(payload));
         } catch (Exception e) {
             warnings.add("corroboration extract via script failed: "
                     + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
-            return List.of();
+            return ScriptExtract.NONE;
         } finally {
             deleteRecursively(workDir);
         }

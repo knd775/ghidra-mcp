@@ -7,6 +7,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
@@ -35,6 +36,30 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
 
     void upsert(String executableMd5, String executableName,
                 List<CorroborationEvidence.FunctionRow> rows) throws Exception;
+
+    /**
+     * Upsert with the executable's signature archive path: every row's
+     * {@code gdt_path} is set to it (the archive is per executable, not per
+     * function). A blank path leaves whatever the rows carry.
+     */
+    default void upsert(String executableMd5, String executableName,
+                        List<CorroborationEvidence.FunctionRow> rows, String gdtPath)
+            throws Exception {
+        upsert(executableMd5, executableName, withGdtPath(rows, gdtPath));
+    }
+
+    static List<CorroborationEvidence.FunctionRow> withGdtPath(
+            List<CorroborationEvidence.FunctionRow> rows, String gdtPath) {
+        if (rows == null) return List.of();
+        if (gdtPath == null || gdtPath.isBlank()) return rows;
+        List<CorroborationEvidence.FunctionRow> out = new ArrayList<>(rows.size());
+        for (CorroborationEvidence.FunctionRow row : rows) {
+            if (row == null) continue;
+            BSimSignatures.Signature sig = row.signature();
+            out.add(sig == null ? row : row.withSignature(sig.withGdtPath(gdtPath)));
+        }
+        return out;
+    }
 
     /**
      * Resolve {@code refExecutable} as an MD5 or an executable name and return
@@ -95,7 +120,8 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                 String rowExe = row.executableName().isEmpty() ? exe : row.executableName();
                 CorroborationEvidence.FunctionRow stored = new CorroborationEvidence.FunctionRow(
                         rowMd5, rowExe, row.functionName(),
-                        row.constants(), row.strings(), row.callees(), row.truncated());
+                        row.constants(), row.strings(), row.callees(), row.truncated(),
+                        row.signature());
                 rows.removeIf(r -> r.executableMd5().equals(rowMd5)
                         && r.functionName().equals(row.functionName()));
                 rows.add(stored);
@@ -212,6 +238,22 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                         ps.setArray(5, c.createArrayOf("text", row.strings().toArray()));
                         ps.setArray(6, c.createArrayOf("text", row.callees().toArray()));
                         ps.setBoolean(7, row.truncated());
+                        BSimSignatures.Signature sig = row.signature();
+                        if (sig == null || sig.isEmpty()) {
+                            ps.setNull(8, Types.VARCHAR);
+                            ps.setNull(9, Types.VARCHAR);
+                            ps.setNull(10, Types.INTEGER);
+                            ps.setBoolean(11, false);
+                            ps.setNull(12, Types.VARCHAR);
+                        } else {
+                            ps.setString(8, sig.prototype());
+                            if (sig.callingConvention().isEmpty()) ps.setNull(9, Types.VARCHAR);
+                            else ps.setString(9, sig.callingConvention());
+                            ps.setInt(10, sig.paramCount());
+                            ps.setBoolean(11, sig.hasDwarf());
+                            if (sig.gdtPath().isEmpty()) ps.setNull(12, Types.VARCHAR);
+                            else ps.setString(12, sig.gdtPath());
+                        }
                         ps.addBatch();
                     }
                     ps.executeBatch();
@@ -342,8 +384,20 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                     + "strings text[] NOT NULL DEFAULT '{}', "
                     + "callees text[] NOT NULL DEFAULT '{}', "
                     + "truncated boolean NOT NULL DEFAULT false, "
+                    + "prototype text, "
+                    + "calling_convention text, "
+                    + "param_count int, "
+                    + "has_dwarf boolean NOT NULL DEFAULT false, "
+                    + "gdt_path text, "
                     + "ingested_at timestamptz NOT NULL DEFAULT now(), "
                     + "PRIMARY KEY (exe_md5, function_name))",
+            // Databases created before signatures existed (idempotent on new ones).
+            "ALTER TABLE corroboration.functions ADD COLUMN IF NOT EXISTS prototype text",
+            "ALTER TABLE corroboration.functions ADD COLUMN IF NOT EXISTS calling_convention text",
+            "ALTER TABLE corroboration.functions ADD COLUMN IF NOT EXISTS param_count int",
+            "ALTER TABLE corroboration.functions ADD COLUMN IF NOT EXISTS has_dwarf boolean "
+                    + "NOT NULL DEFAULT false",
+            "ALTER TABLE corroboration.functions ADD COLUMN IF NOT EXISTS gdt_path text",
             "CREATE INDEX IF NOT EXISTS corroboration_functions_constants_gin "
                     + "ON corroboration.functions USING gin (constants)",
             "CREATE INDEX IF NOT EXISTS corroboration_functions_strings_gin "
@@ -353,18 +407,25 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
     };
 
     static final String UPSERT = "INSERT INTO corroboration.functions "
-            + "(exe_md5, function_name, executable_name, constants, strings, callees, truncated, ingested_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, now()) "
+            + "(exe_md5, function_name, executable_name, constants, strings, callees, truncated, "
+            + "prototype, calling_convention, param_count, has_dwarf, gdt_path, ingested_at) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now()) "
             + "ON CONFLICT (exe_md5, function_name) DO UPDATE SET "
             + "executable_name = EXCLUDED.executable_name, "
             + "constants = EXCLUDED.constants, "
             + "strings = EXCLUDED.strings, "
             + "callees = EXCLUDED.callees, "
             + "truncated = EXCLUDED.truncated, "
+            + "prototype = EXCLUDED.prototype, "
+            + "calling_convention = EXCLUDED.calling_convention, "
+            + "param_count = EXCLUDED.param_count, "
+            + "has_dwarf = EXCLUDED.has_dwarf, "
+            + "gdt_path = EXCLUDED.gdt_path, "
             + "ingested_at = now()";
 
     static final String LOOKUP = "SELECT encode(exe_md5, 'hex') AS md5, function_name, "
-            + "executable_name, constants, strings, callees, truncated "
+            + "executable_name, constants, strings, callees, truncated, "
+            + "prototype, calling_convention, param_count, has_dwarf, gdt_path "
             + "FROM corroboration.functions "
             + "WHERE function_name = ? AND (exe_md5 = ? OR lower(executable_name) = lower(?))";
 
@@ -380,7 +441,17 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                 textArray(rs.getArray("constants")),
                 textArray(rs.getArray("strings")),
                 textArray(rs.getArray("callees")),
-                rs.getBoolean("truncated"));
+                rs.getBoolean("truncated"),
+                readSignature(rs));
+    }
+
+    static BSimSignatures.Signature readSignature(ResultSet rs) throws SQLException {
+        String prototype = rs.getString("prototype");
+        if (prototype == null || prototype.isBlank()) return null;
+        int params = rs.getInt("param_count");
+        if (rs.wasNull()) params = -1;
+        return new BSimSignatures.Signature(prototype, rs.getString("calling_convention"),
+                params, rs.getBoolean("has_dwarf"), rs.getString("gdt_path"));
     }
 
     static List<String> textArray(Array array) throws SQLException {
@@ -424,6 +495,7 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
         String exe = stringOr(payload.get("executable"), fallbackName);
         Object funcs = payload.get("functions");
         if (!(funcs instanceof List<?> list)) return List.of();
+        String gdtPath = gdtPathFromExtractPayload(payload);
         List<CorroborationEvidence.FunctionRow> rows = new ArrayList<>();
         for (Object item : list) {
             if (!(item instanceof Map<?, ?> raw)) continue;
@@ -434,9 +506,36 @@ public interface CorroborationStore extends CorroborationEvidence.Frequencies {
                     stringList(row.get("constants")),
                     stringList(row.get("strings")),
                     stringList(row.get("callees")),
-                    bool(row.get("truncated"))));
+                    bool(row.get("truncated")),
+                    signatureFromExtractRow(row, gdtPath)));
         }
         return rows;
+    }
+
+    /** The archive path the extract script reports, or blank. */
+    static String gdtPathFromExtractPayload(Map<String, Object> payload) {
+        if (payload == null) return "";
+        return stringOr(payload.get("gdt_path"), "");
+    }
+
+    static BSimSignatures.Signature signatureFromExtractRow(Map<String, Object> row, String gdtPath) {
+        if (row == null) return null;
+        String prototype = stringOr(row.get("prototype"), "");
+        if (prototype.isEmpty()) return null;
+        int params = -1;
+        Object pc = row.get("param_count");
+        if (pc instanceof Number n) {
+            params = n.intValue();
+        } else if (pc != null) {
+            try {
+                params = Integer.parseInt(String.valueOf(pc).trim());
+            } catch (NumberFormatException ignored) {
+                params = -1;
+            }
+        }
+        return new BSimSignatures.Signature(prototype,
+                stringOr(row.get("calling_convention"), ""),
+                params, bool(row.get("has_dwarf")), gdtPath);
     }
 
     private static String stringOr(Object o, String fallback) {

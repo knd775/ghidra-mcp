@@ -119,10 +119,13 @@ public class BSimJobs {
         Response result;
         try {
             result = body.call();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             // The job body is the same code that used to run inline, so an
             // exception here is exactly what the synchronous catch blocks
             // used to turn into Response.err — do the same, plus a log.
+            // Errors are caught too: a LinkageError escaping here would kill
+            // the single worker thread and leave the job "running" forever,
+            // with every later job queued behind a ticket nobody can redeem.
             LOG.log(Level.WARNING, "BSim job " + job.id + " (" + job.tool + ") threw", e);
             String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             result = Response.err(msg);
