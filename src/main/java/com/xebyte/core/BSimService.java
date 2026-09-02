@@ -1233,6 +1233,7 @@ public class BSimService {
         private int typesKeptExisting;
         private int typesFallbackLocal;
         private boolean disassociateAfter;
+        private final Map<String, BSimTypeArchives.OpenedArchive> archives = new LinkedHashMap<>();
 
         SignatureRun(String url, Program program, boolean dryRun, double minConfidence,
                      BSimTypeArchives.Mode archiveMode) {
@@ -1373,10 +1374,9 @@ public class BSimService {
                 detail.put("calling_convention", sig.callingConvention());
             }
             String archiveKey = BSimTypeArchives.archiveKeyForHit(hit.executable, sig.gdtPath());
-            BSimTypeArchives.OpenedArchive opened = null;
+            BSimTypeArchives.OpenedArchive opened;
             try {
-                opened = signatures.openForApply(program, programProvider, sig, archiveKey,
-                        archiveMode);
+                opened = archiveFor(archiveKey, sig);
             } catch (Exception e) {
                 detail.put("error", "cannot open type archive: "
                         + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
@@ -1394,53 +1394,57 @@ public class BSimService {
                 detail.put("type_archive", opened.path());
             }
             if (archiveMode == BSimTypeArchives.Mode.LOCAL) disassociateAfter = true;
-            try {
-                if (dryRun) {
-                    BSimSignatures.TypePlan plan = applier.plan(program, target, sig, hit.name,
-                            opened == null ? null : opened.manager());
-                    if (!plan.error().isEmpty()) {
-                        detail.put("error", plan.error());
-                        record(row, detail, "failed");
-                        return;
-                    }
-                    addTypes(detail, plan.imported(), plan.keptExisting());
-                    record(row, detail, "would_apply");
-                    return;
-                }
-                String provenance = BSimSignatures.provenanceLine(hit.executable, hit.confidence);
-                BSimSignatures.Outcome outcome;
-                try {
-                    final Function fn = target;
-                    final BSimSignatures.Signature ref = sig;
-                    final ghidra.program.model.data.DataTypeManager archive =
-                            opened == null ? null : opened.manager();
-                    outcome = threadingStrategy.executeWrite(program,
-                            "BSim apply signature " + hit.name,
-                            () -> applier.apply(program, fn, ref, hit.name, provenance, archive));
-                } catch (Exception e) {
-                    outcome = BSimSignatures.Outcome.failed(
-                            e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
-                }
-                if (outcome == null || !outcome.ok()) {
-                    detail.put("error", outcome == null ? "no outcome" : outcome.error());
+            if (dryRun) {
+                BSimSignatures.TypePlan plan = applier.plan(program, target, sig, hit.name,
+                        opened == null ? null : opened.manager());
+                if (!plan.error().isEmpty()) {
+                    detail.put("error", plan.error());
                     record(row, detail, "failed");
                     return;
                 }
-                if (!outcome.prototype().isEmpty()) detail.put("prototype", outcome.prototype());
-                if (!outcome.callingConvention().isEmpty()) {
-                    detail.put("calling_convention", outcome.callingConvention());
-                }
-                detail.put("provenance", provenance);
-                addTypes(detail, outcome.imported(), outcome.keptExisting());
-                record(row, detail, "applied");
-            } finally {
-                if (opened != null) {
-                    try {
-                        opened.close();
-                    } catch (Exception ignored) {
-                    }
-                }
+                addTypes(detail, plan.imported(), plan.keptExisting());
+                record(row, detail, "would_apply");
+                return;
             }
+            String provenance = BSimSignatures.provenanceLine(hit.executable, hit.confidence);
+            BSimSignatures.Outcome outcome;
+            try {
+                final Function fn = target;
+                final BSimSignatures.Signature ref = sig;
+                final ghidra.program.model.data.DataTypeManager archive =
+                        opened == null ? null : opened.manager();
+                outcome = threadingStrategy.executeWrite(program,
+                        "BSim apply signature " + hit.name,
+                        () -> applier.apply(program, fn, ref, hit.name, provenance, archive));
+            } catch (Exception e) {
+                outcome = BSimSignatures.Outcome.failed(
+                        e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
+            if (outcome == null || !outcome.ok()) {
+                detail.put("error", outcome == null ? "no outcome" : outcome.error());
+                record(row, detail, "failed");
+                return;
+            }
+            if (!outcome.prototype().isEmpty()) detail.put("prototype", outcome.prototype());
+            if (!outcome.callingConvention().isEmpty()) {
+                detail.put("calling_convention", outcome.callingConvention());
+            }
+            detail.put("provenance", provenance);
+            addTypes(detail, outcome.imported(), outcome.keptExisting());
+            record(row, detail, "applied");
+        }
+
+        private BSimTypeArchives.OpenedArchive archiveFor(String archiveKey,
+                                                          BSimSignatures.Signature sig)
+                throws Exception {
+            String key = archiveKey == null ? "" : archiveKey;
+            if (archives.containsKey(key)) {
+                return archives.get(key);
+            }
+            BSimTypeArchives.OpenedArchive opened = signatures.openForApply(
+                    program, programProvider, sig, archiveKey, archiveMode);
+            archives.put(key, opened);
+            return opened;
         }
 
         private void addTypes(Map<String, Object> detail, List<String> imported,
@@ -1468,6 +1472,14 @@ public class BSimService {
 
         @Override
         public void close() {
+            for (BSimTypeArchives.OpenedArchive opened : archives.values()) {
+                if (opened == null) continue;
+                try {
+                    opened.close();
+                } catch (Exception ignored) {
+                }
+            }
+            archives.clear();
             if (!dryRun && disassociateAfter) {
                 try {
                     if (archiveMode == BSimTypeArchives.Mode.LOCAL) {

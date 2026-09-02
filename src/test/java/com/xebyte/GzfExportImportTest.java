@@ -14,7 +14,15 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -54,6 +62,41 @@ public class GzfExportImportTest {
         assertTrue("export should succeed: " + res.error, res.success);
         assertEquals("must pack the exactly-named program, not the substring match",
             "Common.dll", res.programName);
+    }
+
+    /**
+     * {@code self_contained} used to start a transaction on the live Program,
+     * disassociate archives, pack, then {@code endTransaction(tx, false)}.
+     * Ghidra abort of that nested transaction can roll back an unrelated
+     * open analyst transaction. Export must snapshot without touching live
+     * transactions so those edits can still be committed.
+     */
+    @Test
+    public void selfContainedExportLeavesUnrelatedOpenTransactionIntact() throws Exception {
+        HeadlessProgramProvider provider = new HeadlessProgramProvider();
+        Program program = mock(Program.class);
+        when(program.getName()).thenReturn("fw.elf");
+        when(program.startTransaction(anyString())).thenReturn(7);
+        when(program.endTransaction(anyInt(), anyBoolean())).thenReturn(true);
+        doAnswer(invocation -> {
+            File dest = invocation.getArgument(0);
+            Files.write(dest.toPath(), new byte[] {0x1f, (byte) 0x8b});
+            return null;
+        }).when(program).saveToPackedFile(any(File.class), any());
+
+        provider.setCurrentProgram(program);
+
+        int analystTx = program.startTransaction("analyst documentation");
+        Path dir = Files.createTempDirectory("gzf-self-contained");
+        File out = new File(dir.toFile(), "out.gzf");
+        ExportResult res = provider.exportProgramToGzf("fw.elf", out, true);
+
+        assertTrue("self-contained export must not fail by aborting the live program: "
+                + res.error, res.success);
+        verify(program, never()).startTransaction(contains("self-contained"));
+        verify(program, never()).endTransaction(anyInt(), anyBoolean());
+        verify(program, never()).getDataTypeManager();
+        assertTrue(program.endTransaction(analystTx, true));
     }
 
     @Test

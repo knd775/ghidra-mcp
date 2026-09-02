@@ -15,15 +15,19 @@
  */
 package com.xebyte.headless;
 
+import com.xebyte.core.BSimTypeArchives;
 import com.xebyte.core.GhidraIdentity;
 import com.xebyte.core.ProgramImporter;
 import com.xebyte.core.ProgramProvider;
 import com.xebyte.core.ProjectLocks;
 import com.xebyte.core.ProjectVersionControl;
+import db.DBHandle;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.plugin.core.archive.HeadlessArchiveBridge;
 import ghidra.base.project.GhidraProject;
 import ghidra.framework.client.RepositoryAdapter;
+import ghidra.framework.data.DomainObjectAdapterDB;
+import ghidra.framework.data.OpenMode;
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.Project;
@@ -31,6 +35,8 @@ import ghidra.framework.model.ProjectData;
 import ghidra.framework.model.ProjectLocator;
 import ghidra.framework.model.ProjectManager;
 import ghidra.framework.project.DefaultProjectManager;
+import ghidra.framework.store.db.PackedDatabase;
+import ghidra.program.database.ProgramDB;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -38,6 +44,8 @@ import ghidra.util.task.ConsoleTaskMonitor;
 import ghidra.util.task.TaskMonitor;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1351,21 +1359,89 @@ public class HeadlessProgramProvider implements ProgramProvider {
 
     /**
      * Pack {@code program} to {@code output}. When {@code selfContained},
-     * disassociate FILE/PROJECT type archives inside a transaction, pack the
-     * flattened in-memory state, then abort the transaction so the live
-     * program keeps its archive links.
+     * serialize a disposable snapshot, flatten FILE/PROJECT archive links on
+     * that copy, and write the copy. The live Program is never opened for
+     * write and no live transaction is started or aborted — Ghidra abort of a
+     * nested transaction can roll back an unrelated open analyst transaction,
+     * and {@link Program#saveToPackedFile} itself refuses an active
+     * transaction ({@code Unable to lock}).
      */
     private void packProgram(Program program, File output, boolean selfContained) throws Exception {
         if (!selfContained) {
             program.saveToPackedFile(output, monitor);
             return;
         }
-        int tx = program.startTransaction("self-contained export");
+        File scratch = File.createTempFile("ghidra-mcp-export-", ".gzf");
+        if (!scratch.delete()) {
+            throw new IOException("cannot prepare export scratch: " + scratch.getAbsolutePath());
+        }
         try {
-            com.xebyte.core.BSimTypeArchives.disassociateExternal(program.getDataTypeManager());
-            program.saveToPackedFile(output, monitor);
+            snapshotPacked(program, scratch);
+            if (program instanceof DomainObjectAdapterDB) {
+                writeFlattenedPacked(scratch, output);
+            } else {
+                // Offline doubles and non-DB Program implementations cannot
+                // reopen as ProgramDB (PackedDatabase pulls log4j). The
+                // snapshot already avoided mutating the live Program.
+                Files.copy(scratch.toPath(), output.toPath());
+            }
         } finally {
-            program.endTransaction(tx, false);
+            if (scratch.exists() && !scratch.delete()) {
+                scratch.deleteOnExit();
+            }
+        }
+    }
+
+    /**
+     * Capture the live in-memory database without starting or aborting a
+     * Program transaction. {@link Program#saveToPackedFile} cannot lock while
+     * a transaction is open, so a {@link DomainObjectAdapterDB} is packed
+     * from its {@link DBHandle} instead.
+     */
+    private void snapshotPacked(Program program, File dest) throws Exception {
+        if (program instanceof DomainObjectAdapterDB adapter) {
+            PackedDatabase.packDatabase(
+                    adapter.getDBHandle(),
+                    program.getName(),
+                    ProgramDB.CONTENT_TYPE,
+                    dest,
+                    monitor);
+            return;
+        }
+        program.saveToPackedFile(dest, monitor);
+    }
+
+    /**
+     * Re-open a packed snapshot as a disposable Program, strip external
+     * type-archive associations, and write the flattened GZF.
+     */
+    private void writeFlattenedPacked(File packed, File output) throws Exception {
+        PackedDatabase pdb = PackedDatabase.getPackedDatabase(packed, false, monitor);
+        Object consumer = new Object();
+        Program copy = null;
+        try {
+            DBHandle handle = pdb.openForUpdate(monitor);
+            copy = new ProgramDB(handle, OpenMode.UPDATE, monitor, consumer);
+            int tx = copy.startTransaction("self-contained export");
+            boolean ok = false;
+            try {
+                BSimTypeArchives.disassociateExternal(copy.getDataTypeManager());
+                ok = true;
+            } finally {
+                copy.endTransaction(tx, ok);
+            }
+            copy.saveToPackedFile(output, monitor);
+        } finally {
+            if (copy != null) {
+                try {
+                    copy.release(consumer);
+                } catch (Exception ignored) {
+                }
+            }
+            try {
+                pdb.dispose();
+            } catch (Exception ignored) {
+            }
         }
     }
 

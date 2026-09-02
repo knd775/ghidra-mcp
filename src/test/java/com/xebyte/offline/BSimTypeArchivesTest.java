@@ -3,6 +3,7 @@ package com.xebyte.offline;
 import com.xebyte.core.BSimTestEnv;
 import com.xebyte.core.BSimTypeArchives;
 import com.xebyte.core.BSimTypeArchives.Mode;
+import com.xebyte.core.BSimTypeArchives.OpenedArchive;
 import junit.framework.TestCase;
 
 import java.util.LinkedHashMap;
@@ -62,6 +63,15 @@ public class BSimTypeArchivesTest extends TestCase {
         assertEquals(Mode.FILE, BSimTypeArchives.resolveMode("", false));
         BSimTestEnv.setTypeArchiveMode("local");
         assertEquals(Mode.LOCAL, BSimTypeArchives.resolveMode("", true));
+    }
+
+    public void testFileModeWithoutStablePathIsFallbackLocal() {
+        OpenedArchive fallback = OpenedArchive.fallbackLocal(null, "/ref/littlefs.o.gdt");
+        OpenedArchive asFile = OpenedArchive.file(null, "/ref/littlefs.o.gdt");
+        assertTrue(fallback.fallbackLocal());
+        assertTrue(fallback.disassociateAfter());
+        assertFalse(asFile.fallbackLocal());
+        assertFalse(asFile.disassociateAfter());
     }
 
     public void testParseModeRejectsUnknown() {

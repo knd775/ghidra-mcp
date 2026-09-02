@@ -322,8 +322,9 @@ public final class BSimTypeArchives {
 
     /**
      * Open the archive {@code apply_signatures} will resolve from.
-     * Project-mode with a missing DomainFile falls back to the filesystem
-     * {@code .gdt} and marks {@link OpenedArchive#fallbackLocal()}.
+     * Project-mode with a missing DomainFile, and FILE-mode with no published
+     * stable path, fall back to the filesystem {@code .gdt} and mark
+     * {@link OpenedArchive#fallbackLocal()}.
      */
     public static OpenedArchive openForApply(Program program, ProgramProvider provider,
                                              BSimSignatures.Signature sig, String archiveKey,
@@ -357,7 +358,7 @@ public final class BSimTypeArchives {
                         stable.toString());
             }
             FileDataTypeManager file = openFileArchive(sig);
-            return OpenedArchive.file(file, sig == null ? "" : sig.gdtPath());
+            return OpenedArchive.fallbackLocal(file, sig == null ? "" : sig.gdtPath());
         }
         FileDataTypeManager file = openFileArchive(sig);
         return OpenedArchive.local(file, sig == null ? "" : sig.gdtPath());
@@ -479,11 +480,11 @@ public final class BSimTypeArchives {
                     } catch (Exception ignored) {
                     }
                 }
+                disassociateFileArchives(dest);
                 ok = true;
             } finally {
                 dest.endTransaction(tx, ok);
             }
-            disassociateFileArchives(dest);
         } finally {
             src.close();
         }

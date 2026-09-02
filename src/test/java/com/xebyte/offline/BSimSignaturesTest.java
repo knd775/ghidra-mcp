@@ -652,6 +652,34 @@ public class BSimSignaturesTest extends TestCase {
         assertTrue(applier.applied.isEmpty());
     }
 
+    public void testSignatureRunCachesOpenedArchiveByKey() throws Exception {
+        store.upsert(REF_MD5, "littlefs.o", List.of(
+                new FunctionRow(REF_MD5, "littlefs.o", "lfs_mount",
+                        List.of("0x3ff"), List.of(), List.of(), false,
+                        new Signature(PROTOTYPE, "__stdcall", 2, true, "")),
+                new FunctionRow(REF_MD5, "littlefs.o", "lfs_stat",
+                        List.of("0x4ff"), List.of(), List.of(), false,
+                        new Signature(PROTOTYPE, "__stdcall", 2, true, ""))),
+                gdt.toString());
+        FakeApplier applier = new FakeApplier();
+        FakeSupport support = new FakeSupport(applier);
+        String query = "{\"program\":\"fw.elf\",\"results\":["
+                + "{\"function\":\"FUN_1000\",\"address\":\"0x1000\",\"matches\":["
+                + "{\"name\":\"lfs_mount\",\"similarity\":0.6,\"confidence\":101.0,"
+                + "\"executable\":\"littlefs.o\",\"arch\":\"" + ARM + "\","
+                + "\"md5\":\"" + REF_MD5 + "\",\"address\":\"0x2000\"}]},"
+                + "{\"function\":\"FUN_2000\",\"address\":\"0x2000\",\"matches\":["
+                + "{\"name\":\"lfs_stat\",\"similarity\":0.6,\"confidence\":99.0,"
+                + "\"executable\":\"littlefs.o\",\"arch\":\"" + ARM + "\","
+                + "\"md5\":\"" + REF_MD5 + "\",\"address\":\"0x3000\"}]}]}";
+        BSimService svc = applyService(support, query,
+                new StubFunction("FUN_1000", "0x1000"),
+                new StubFunction("FUN_2000", "0x2000"));
+        String json = applyNamed(svc, true, false, true, false, "none", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"applied\":2"));
+        assertEquals(List.of("littlefs"), support.openedKeys);
+    }
+
     public void testMissingProjectArchiveFallsBackLocal() throws Exception {
         seedReference(true, 2);
         FakeApplier applier = new FakeApplier();
@@ -870,6 +898,7 @@ public class BSimSignaturesTest extends TestCase {
 
         boolean projectArchiveMissing;
         final List<String> published = new ArrayList<>();
+        final List<String> openedKeys = new ArrayList<>();
 
         @Override
         public String publishTypeArchive(Program program, ProgramProvider provider,
@@ -892,6 +921,7 @@ public class BSimSignaturesTest extends TestCase {
         public com.xebyte.core.BSimTypeArchives.OpenedArchive openForApply(
                 Program program, ProgramProvider provider, Signature sig, String archiveKey,
                 com.xebyte.core.BSimTypeArchives.Mode mode) {
+            openedKeys.add(archiveKey);
             boolean fallback = mode == com.xebyte.core.BSimTypeArchives.Mode.PROJECT
                     && projectArchiveMissing;
             return com.xebyte.core.BSimTypeArchives.OpenedArchive.stub(
