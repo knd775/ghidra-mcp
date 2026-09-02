@@ -694,7 +694,7 @@ Available on the standalone headless server (`GhidraMCPHeadlessServer`).
 - `checkin_program` - Check an open program back in to the shared Ghidra Server as a new version
 - `close_project` - Close the currently open project
 - `create_project` - Create a new Ghidra project
-- `export_program` - Export an open or project-resident program to a Ghidra Zip File (.gzf)
+- `export_program` - Export a program to a GZF (Ghidra packed-database) file on disk
 - `get_project_info` - Get info about the currently open project
 - `import_program` - Import a Ghidra Zip File (.gzf) into the currently open project as a new DomainFile under target_folder (default '/')
 - `load_program` - Load a binary file into the headless server for analysis
