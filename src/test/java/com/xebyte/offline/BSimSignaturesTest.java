@@ -680,6 +680,44 @@ public class BSimSignaturesTest extends TestCase {
         assertEquals(List.of("littlefs"), support.openedKeys);
     }
 
+    public void testFallbackArchivesCacheByGdtPathNotArchiveKey() throws Exception {
+        Path o2Gdt = tmp.resolve("littlefs-v2.9.3-gcc13-arm-O2.o.gdt");
+        Path osGdt = tmp.resolve("littlefs-v2.9.3-gcc13-arm-Os.o.gdt");
+        Files.writeString(o2Gdt, "o2");
+        Files.writeString(osGdt, "os");
+        String o2Md5 = "bb".repeat(16);
+        String osMd5 = "cc".repeat(16);
+        store.upsert(o2Md5, "littlefs-v2.9.3-gcc13-arm-O2.o", List.of(
+                new FunctionRow(o2Md5, "littlefs-v2.9.3-gcc13-arm-O2.o", "lfs_mount",
+                        List.of("0x3ff"), List.of(), List.of(), false,
+                        new Signature(PROTOTYPE, "__stdcall", 2, true, ""))),
+                o2Gdt.toString());
+        store.upsert(osMd5, "littlefs-v2.9.3-gcc13-arm-Os.o", List.of(
+                new FunctionRow(osMd5, "littlefs-v2.9.3-gcc13-arm-Os.o", "lfs_stat",
+                        List.of("0x4ff"), List.of(), List.of(), false,
+                        new Signature(PROTOTYPE, "__stdcall", 2, true, ""))),
+                osGdt.toString());
+        FakeApplier applier = new FakeApplier();
+        FakeSupport support = new FakeSupport(applier);
+        support.projectArchiveMissing = true;
+        String query = "{\"program\":\"fw.elf\",\"results\":["
+                + "{\"function\":\"FUN_1000\",\"address\":\"0x1000\",\"matches\":["
+                + "{\"name\":\"lfs_mount\",\"similarity\":0.6,\"confidence\":101.0,"
+                + "\"executable\":\"littlefs-v2.9.3-gcc13-arm-O2.o\",\"arch\":\"" + ARM + "\","
+                + "\"md5\":\"" + o2Md5 + "\",\"address\":\"0x2000\"}]},"
+                + "{\"function\":\"FUN_2000\",\"address\":\"0x2000\",\"matches\":["
+                + "{\"name\":\"lfs_stat\",\"similarity\":0.6,\"confidence\":99.0,"
+                + "\"executable\":\"littlefs-v2.9.3-gcc13-arm-Os.o\",\"arch\":\"" + ARM + "\","
+                + "\"md5\":\"" + osMd5 + "\",\"address\":\"0x3000\"}]}]}";
+        BSimService svc = applyService(support, query,
+                new StubFunction("FUN_1000", "0x1000"),
+                new StubFunction("FUN_2000", "0x2000"));
+        String json = applyNamed(svc, true, false, true, false, "none", 5.0, "project").toJson();
+        assertTrue(json, json.contains("\"applied\":2"));
+        assertEquals(List.of("littlefs-v2.9.3", "littlefs-v2.9.3"), support.openedKeys);
+        assertEquals(List.of(o2Gdt.toString(), osGdt.toString()), support.openedGdts);
+    }
+
     public void testMissingProjectArchiveFallsBackLocal() throws Exception {
         seedReference(true, 2);
         FakeApplier applier = new FakeApplier();
@@ -899,6 +937,7 @@ public class BSimSignaturesTest extends TestCase {
         boolean projectArchiveMissing;
         final List<String> published = new ArrayList<>();
         final List<String> openedKeys = new ArrayList<>();
+        final List<String> openedGdts = new ArrayList<>();
 
         @Override
         public String publishTypeArchive(Program program, ProgramProvider provider,
@@ -922,6 +961,7 @@ public class BSimSignaturesTest extends TestCase {
                 Program program, ProgramProvider provider, Signature sig, String archiveKey,
                 com.xebyte.core.BSimTypeArchives.Mode mode) {
             openedKeys.add(archiveKey);
+            openedGdts.add(sig == null ? "" : sig.gdtPath());
             boolean fallback = mode == com.xebyte.core.BSimTypeArchives.Mode.PROJECT
                     && projectArchiveMissing;
             return com.xebyte.core.BSimTypeArchives.OpenedArchive.stub(

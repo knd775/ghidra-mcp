@@ -1437,14 +1437,45 @@ public class BSimService {
         private BSimTypeArchives.OpenedArchive archiveFor(String archiveKey,
                                                           BSimSignatures.Signature sig)
                 throws Exception {
-            String key = archiveKey == null ? "" : archiveKey;
-            if (archives.containsKey(key)) {
-                return archives.get(key);
+            String logical = "key:" + (archiveKey == null ? "" : archiveKey);
+            BSimTypeArchives.OpenedArchive cached = archives.get(logical);
+            if (isCanonicalArchive(cached)) {
+                return cached;
+            }
+            String gdt = resolvedGdtPath(sig);
+            if (!gdt.isEmpty()) {
+                BSimTypeArchives.OpenedArchive byGdt = archives.get("gdt:" + gdt);
+                if (byGdt != null) {
+                    return byGdt;
+                }
             }
             BSimTypeArchives.OpenedArchive opened = signatures.openForApply(
                     program, programProvider, sig, archiveKey, archiveMode);
-            archives.put(key, opened);
+            if (isCanonicalArchive(opened)) {
+                archives.put(logical, opened);
+            } else if (!gdt.isEmpty()) {
+                archives.put("gdt:" + gdt, opened);
+            } else {
+                archives.put(logical, opened);
+            }
             return opened;
+        }
+
+        private static boolean isCanonicalArchive(BSimTypeArchives.OpenedArchive opened) {
+            return opened != null && !opened.fallbackLocal()
+                    && (opened.mode() == BSimTypeArchives.Mode.PROJECT
+                    || opened.mode() == BSimTypeArchives.Mode.FILE);
+        }
+
+        private static String resolvedGdtPath(BSimSignatures.Signature sig) {
+            if (sig == null) return "";
+            String raw = sig.gdtPath();
+            if (raw == null || raw.isBlank()) return "";
+            try {
+                return Path.of(raw.trim()).toAbsolutePath().normalize().toString();
+            } catch (Exception e) {
+                return raw.trim();
+            }
         }
 
         private void addTypes(Map<String, Object> detail, List<String> imported,

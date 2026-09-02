@@ -9,6 +9,7 @@ import org.junit.Test;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -76,8 +77,16 @@ public class GzfExportImportTest {
         HeadlessProgramProvider provider = new HeadlessProgramProvider();
         Program program = mock(Program.class);
         when(program.getName()).thenReturn("fw.elf");
-        when(program.startTransaction(anyString())).thenReturn(7);
-        when(program.endTransaction(anyInt(), anyBoolean())).thenReturn(true);
+        AtomicInteger openTx = new AtomicInteger();
+        when(program.startTransaction(anyString())).thenAnswer(inv -> openTx.incrementAndGet());
+        when(program.endTransaction(anyInt(), anyBoolean())).thenAnswer(inv -> {
+            int id = inv.getArgument(0);
+            if (openTx.get() != id) {
+                return false;
+            }
+            openTx.set(0);
+            return true;
+        });
         doAnswer(invocation -> {
             File dest = invocation.getArgument(0);
             Files.write(dest.toPath(), new byte[] {0x1f, (byte) 0x8b});

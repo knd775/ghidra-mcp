@@ -46,6 +46,8 @@ import ghidra.util.task.TaskMonitor;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1371,10 +1373,15 @@ public class HeadlessProgramProvider implements ProgramProvider {
             program.saveToPackedFile(output, monitor);
             return;
         }
-        File scratch = File.createTempFile("ghidra-mcp-export-", ".gzf");
-        if (!scratch.delete()) {
-            throw new IOException("cannot prepare export scratch: " + scratch.getAbsolutePath());
+        Path scratchDir;
+        try {
+            scratchDir = Files.createTempDirectory("ghidra-mcp-export-",
+                    PosixFilePermissions.asFileAttribute(
+                            PosixFilePermissions.fromString("rwx------")));
+        } catch (UnsupportedOperationException e) {
+            scratchDir = Files.createTempDirectory("ghidra-mcp-export-");
         }
+        File scratch = scratchDir.resolve("snapshot.gzf").toFile();
         try {
             snapshotPacked(program, scratch);
             if (program instanceof DomainObjectAdapterDB) {
@@ -1388,6 +1395,11 @@ public class HeadlessProgramProvider implements ProgramProvider {
         } finally {
             if (scratch.exists() && !scratch.delete()) {
                 scratch.deleteOnExit();
+            }
+            try {
+                Files.deleteIfExists(scratchDir);
+            } catch (IOException e) {
+                scratchDir.toFile().deleteOnExit();
             }
         }
     }
