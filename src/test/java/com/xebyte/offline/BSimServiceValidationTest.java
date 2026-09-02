@@ -556,8 +556,8 @@ public class BSimServiceValidationTest extends TestCase {
     }
 
     public void testApplyRequiresMinConfidence() {
-        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, true, 0.7, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, WAIT);
+        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, true, 0.7, 10, "",
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", WAIT);
         assertTrue(r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("min_confidence"));
@@ -583,10 +583,10 @@ public class BSimServiceValidationTest extends TestCase {
 
         java.lang.reflect.Method apply = BSimService.class.getMethod(
                 "applyMatches", String.class, Double.class, double.class, boolean.class,
-                boolean.class, double.class, int.class, String.class,
+                boolean.class, boolean.class, double.class, int.class, String.class,
                 String.class, String.class, String.class, String.class, int.class,
                 boolean.class, String.class, double.class, boolean.class, double.class,
-                int.class);
+                String.class, int.class);
         Param minConfidence = paramNamed(apply, "min_confidence");
         assertEquals("apply still has no default floor", Param.NO_DEFAULT, minConfidence.defaultValue());
         Param applySim = paramNamed(apply, "similarity_threshold");
@@ -599,6 +599,10 @@ public class BSimServiceValidationTest extends TestCase {
         assertEquals("5.0", conflictMargin.defaultValue());
         Param applySignatures = paramNamed(apply, "apply_signatures");
         assertEquals("signatures are opt-in", "false", applySignatures.defaultValue());
+        Param renameNamed = paramNamed(apply, "rename_named");
+        assertEquals("rename_named is opt-in", "false", renameNamed.defaultValue());
+        Param typeArchiveMode = paramNamed(apply, "type_archive_mode");
+        assertEquals("", typeArchiveMode.defaultValue());
         Param sigFloor = paramNamed(apply, "min_signature_confidence");
         assertEquals("40.0", sigFloor.defaultValue());
     }
@@ -629,10 +633,19 @@ public class BSimServiceValidationTest extends TestCase {
         assertTrue(r.toJson().contains("\"executables\":[]") || r.toJson().contains("\"listed\":0"));
     }
 
+    public void testInvalidTypeArchiveModeIsSynchronousAndSpecific() {
+        Response r = svc.applyMatches("file:/tmp/db", 15.0, 0.8, true, false, true, 0.7, 10, "",
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "disassociate", WAIT);
+        assertTrue(r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("project, file, or local"));
+        assertTrue(commands.isEmpty());
+    }
+
     public void testDryRunDefaultDoesNotNeedAProgramWhenConfidenceMissing() {
         // The confidence check must run before any write or query.
-        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, 0.7, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, WAIT);
+        Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, false, 0.7, 10, "",
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", WAIT);
         assertTrue(r instanceof Response.Err);
         assertTrue(commands.isEmpty());
     }

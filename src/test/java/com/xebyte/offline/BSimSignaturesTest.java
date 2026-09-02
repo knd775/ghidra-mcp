@@ -28,6 +28,7 @@ import ghidra.program.model.lang.LanguageID;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
+import ghidra.program.model.listing.FunctionTag;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
 import junit.framework.TestCase;
@@ -37,8 +38,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 
 /**
@@ -136,6 +139,32 @@ public class BSimSignaturesTest extends TestCase {
         assertTrue(again.endsWith("conf=98.0"));
     }
 
+    public void testNameProvenanceIsDistinctFromSignatureAndIsReclaimable() {
+        String name = BSimSignatures.nameProvenanceLine("littlefs-Os.o", 60.48);
+        assertEquals("[bsim] from littlefs-Os.o conf=60.5", name);
+        assertTrue(BSimSignatures.isBsimProvenanceLine(name));
+        String sigLine = BSimSignatures.provenanceLine("littlefs-O2.o", 159.34);
+        assertTrue(sigLine.startsWith("[bsim-sig]"));
+        assertTrue(BSimSignatures.isBsimProvenanceLine(sigLine));
+        assertTrue(BSimSignatures.hasBsimProvenanceComment(
+                "Hand plate.\n" + name));
+        assertEquals(60.5, BSimSignatures.provenanceConfidence(name).orElse(-1), 0.01);
+        assertTrue(BSimSignatures.provenanceConfidence("[bsim] tag only").isEmpty());
+
+        String mixed = BSimSignatures.mergeNameProvenance(
+                "Hand plate.\n[bsim-sig] from old.o conf=40.0\n[bsim] from old.o conf=10.0",
+                name);
+        assertTrue(mixed.contains("Hand plate."));
+        assertTrue(mixed.contains("[bsim-sig] from old.o conf=40.0"));
+        assertTrue(mixed.contains(name));
+        assertEquals("name marker is replaced, not stacked",
+                1, mixed.split("\\[bsim\\] ", -1).length - 1);
+
+        String stripped = BSimSignatures.stripBsimProvenance(mixed);
+        assertEquals("Hand plate.", stripped);
+        assertEquals("FUN_1000ade8", BSimSignatures.defaultFunctionName(address("0x1000ade8")));
+    }
+
     public void testArchivePathPrefersArtifactDirectoryThenFallback() throws Exception {
         Path uploads = Files.createDirectories(tmp.resolve("uploads"));
         Path beside = BSimSignatures.archivePathFor(
@@ -181,6 +210,21 @@ public class BSimSignaturesTest extends TestCase {
         assertTrue(stored.signature().hasDwarf());
         assertEquals("the archive path is stamped on every row",
                 tmp.resolve("exported.gdt").toString(), stored.signature().gdtPath());
+        assertEquals(List.of("littlefs"), support.published);
+        assertTrue(json, json.contains("\"type_archive\":\"littlefs\""));
+    }
+
+    public void testIngestPublishesLibraryVersionArchiveKey() throws Exception {
+        FunctionRow row = new FunctionRow(REF_MD5, "littlefs-v2.9.3-gcc13-arm-O2.o", "lfs_mount",
+                List.of("0x3ff"), List.of(), List.of(), false,
+                new Signature(PROTOTYPE, "__stdcall", 2, true, ""));
+        FakeSupport support = new FakeSupport(tmp.resolve("exported-keyed.gdt"));
+        BSimService svc = ingestService(row, support);
+        Response r = svc.ingest("postgresql://ghidra-bsim:5432/bsim",
+                "littlefs-v2.9.3-gcc13-arm-O2.o", "", true, false, "", 45);
+        assertFalse("ingest failed: " + r.toJson(), r instanceof Response.Err);
+        assertEquals(List.of("littlefs-v2.9.3"), support.published);
+        assertTrue(r.toJson(), r.toJson().contains("\"type_archive\":\"littlefs-v2.9.3\""));
     }
 
     public void testIngestWithoutDwarfWarnsAndMarksRows() throws Exception {
@@ -492,6 +536,135 @@ public class BSimSignaturesTest extends TestCase {
                 });
     }
 
+    public void testExistingNameElsewhereIsNotApplied() throws Exception {
+        seedReferenceNamed("lfs_dir_relocatingcommit", true, 2);
+        StubFunction holder = bsimHolder("lfs_dir_relocatingcommit", "0x1000ade8", 60.48);
+        StubFunction candidate = new StubFunction("FUN_1000b404", "0x1000b404");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("FUN_1000b404", "0x1000b404", "lfs_dir_relocatingcommit", 159.34),
+                holder, candidate);
+        String json = apply(svc, false, false, 15.0, 40.0, false).toJson();
+        assertTrue(json, json.contains("\"name_exists_elsewhere\":1"));
+        assertTrue(json, json.contains("\"existing_address\":\"0x1000ade8\""));
+        assertTrue(json, json.contains("\"existing_confidence\":60.5"));
+        assertTrue(json, json.contains("\"renamed\":[]"));
+        assertEquals("lfs_dir_relocatingcommit", holder.name);
+        assertEquals("FUN_1000b404", candidate.name);
+        assertTrue("post-run names stay unique", uniqueNames(holder, candidate));
+    }
+
+    public void testBestPlusMarginReassignsBsimHolder() throws Exception {
+        seedReferenceNamed("lfs_dir_relocatingcommit", true, 2);
+        StubFunction holder = bsimHolder("lfs_dir_relocatingcommit", "0x1000ade8", 60.48);
+        StubFunction candidate = new StubFunction("FUN_1000b404", "0x1000b404");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("FUN_1000b404", "0x1000b404", "lfs_dir_relocatingcommit", 159.34),
+                holder, candidate);
+        String json = applyNamed(svc, false, false, false, true, "best", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"reassigned\":1"));
+        assertTrue(json, json.contains("\"resolution\":\"reassigned\""));
+        assertTrue(json, json.contains("\"demoted_to\":\"FUN_1000ade8\""));
+        assertTrue(json, json.contains("\"renamed\":[{"));
+        assertEquals("FUN_1000ade8", holder.name);
+        assertEquals("lfs_dir_relocatingcommit", candidate.name);
+        assertFalse(holder.comment.contains("[bsim]"));
+        assertTrue(holder.tags.isEmpty());
+        assertTrue(candidate.comment.contains("[bsim] from"));
+        assertTrue(candidate.tags.contains("bsim"));
+        assertTrue(uniqueNames(holder, candidate));
+    }
+
+    public void testHandNamedHolderIsNeverDemoted() throws Exception {
+        seedReferenceNamed("lfs_dir_relocatingcommit", true, 2);
+        StubFunction holder = new StubFunction("lfs_dir_relocatingcommit", "0x1000ade8");
+        holder.comment = "Hand analysis of the relocating commit path.";
+        StubFunction candidate = new StubFunction("FUN_1000b404", "0x1000b404");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("FUN_1000b404", "0x1000b404", "lfs_dir_relocatingcommit", 159.34),
+                holder, candidate);
+        String json = applyNamed(svc, false, false, false, true, "best", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"name_exists_elsewhere\":1"));
+        assertTrue(json, json.contains("\"existing_bsim_provenance\":false"));
+        assertFalse(json, json.contains("\"reassigned\":1"));
+        assertEquals("lfs_dir_relocatingcommit", holder.name);
+        assertEquals("FUN_1000b404", candidate.name);
+        assertTrue(holder.comment.contains("Hand analysis"));
+        assertTrue(uniqueNames(holder, candidate));
+    }
+
+    public void testTagOnlyHolderIsNotDemotedWithoutParseableConfidence() throws Exception {
+        seedReferenceNamed("lfs_dir_relocatingcommit", true, 2);
+        StubFunction holder = new StubFunction("lfs_dir_relocatingcommit", "0x1000ade8");
+        holder.tags.add("bsim");
+        StubFunction candidate = new StubFunction("FUN_1000b404", "0x1000b404");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("FUN_1000b404", "0x1000b404", "lfs_dir_relocatingcommit", 159.34),
+                holder, candidate);
+        String json = applyNamed(svc, false, false, false, true, "best", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"name_exists_elsewhere\":1"));
+        assertTrue(json, json.contains("\"existing_bsim_provenance\":true"));
+        assertEquals("lfs_dir_relocatingcommit", holder.name);
+        assertEquals("FUN_1000b404", candidate.name);
+    }
+
+    public void testRenameNamedFalseKeepsHandNameAndStillAppliesSignature() throws Exception {
+        seedReferenceNamed("interpret", true, 2);
+        StubFunction named = new StubFunction("z_interpret", "0x1000");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("z_interpret", "0x1000", "interpret", 88.0), named);
+        String json = applyNamed(svc, true, false, false, false, "none", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"rename_suppressed\":1"));
+        assertTrue(json, json.contains("\"current_name\":\"z_interpret\""));
+        assertTrue(json, json.contains("\"proposed_name\":\"interpret\""));
+        assertTrue(json, json.contains("\"applied\":1"));
+        assertEquals("z_interpret", named.name);
+        assertEquals(List.of("interpret"), applier.applied);
+    }
+
+    public void testRenameNamedTrueOverwritesTheHandName() throws Exception {
+        seedReferenceNamed("interpret", true, 2);
+        StubFunction named = new StubFunction("z_interpret", "0x1000");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("z_interpret", "0x1000", "interpret", 88.0), named);
+        String json = applyNamed(svc, false, false, false, true, "none", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"renamed\":[{"));
+        assertTrue(json, json.contains("\"rename_suppressed\":0"));
+        assertEquals("interpret", named.name);
+    }
+
+    public void testRenameNamedIsIgnoredWhenSkipNamed() throws Exception {
+        seedReferenceNamed("interpret", true, 2);
+        StubFunction named = new StubFunction("z_interpret", "0x1000");
+        FakeApplier applier = new FakeApplier();
+        BSimService svc = applyService(applier,
+                namedMatchJson("z_interpret", "0x1000", "interpret", 88.0), named);
+        String json = applyNamed(svc, true, false, true, true, "none", 5.0, "").toJson();
+        assertTrue(json, json.contains("\"already_named\":1"));
+        assertTrue(json, json.contains("\"rename_suppressed\":0"));
+        assertTrue(json, json.contains("\"applied\":0"));
+        assertEquals("z_interpret", named.name);
+        assertTrue(applier.applied.isEmpty());
+    }
+
+    public void testMissingProjectArchiveFallsBackLocal() throws Exception {
+        seedReference(true, 2);
+        FakeApplier applier = new FakeApplier();
+        FakeSupport support = new FakeSupport(applier);
+        support.projectArchiveMissing = true;
+        BSimService svc = applyService(support, matchJson(101.0, ARM),
+                new StubFunction("FUN_1000"));
+        String json = applyNamed(svc, true, false, true, false, "none", 5.0, "project").toJson();
+        assertTrue(json, json.contains("\"types_fallback_local\":1"));
+        assertTrue(json, json.contains("\"applied\":1"));
+        assertEquals(List.of("lfs_mount"), applier.applied);
+    }
+
     public void testFailedApplicationIsReportedNotHidden() throws Exception {
         seedReference(true, 2);
         FakeApplier applier = new FakeApplier();
@@ -516,8 +689,8 @@ public class BSimSignaturesTest extends TestCase {
     public void testFileBackendSkipsEverySignatureWithAWarning() throws Exception {
         FakeApplier applier = new FakeApplier();
         BSimService svc = applyService(applier, matchJson(101.0, ARM));
-        Response r = svc.applyMatches("file:" + tmp.resolve("h2db"), 15.0, 0.15, true, false,
-                0.0, 10, "", "", "", "", "", 8, false, "none", 5.0, true, 40.0, 45);
+        Response r = svc.applyMatches("file:" + tmp.resolve("h2db"), 15.0, 0.15, true, false, false,
+                0.0, 10, "", "", "", "", "", 8, false, "none", 5.0, true, 40.0, "", 45);
         assertFalse(r.toJson(), r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("\"skipped_no_signature_data\":1"));
@@ -530,8 +703,12 @@ public class BSimSignaturesTest extends TestCase {
     // ------------------------------------------------------------------
 
     private void seedReference(boolean dwarf, int params) throws Exception {
+        seedReferenceNamed("lfs_mount", dwarf, params);
+    }
+
+    private void seedReferenceNamed(String name, boolean dwarf, int params) throws Exception {
         store.upsert(REF_MD5, "littlefs.o", List.of(new FunctionRow(REF_MD5, "littlefs.o",
-                "lfs_mount", List.of("0x3ff"), List.of(), List.of(), false,
+                name, List.of("0x3ff"), List.of(), List.of(), false,
                 new Signature(PROTOTYPE, "__stdcall", params, dwarf, ""))), gdt.toString());
     }
 
@@ -557,8 +734,18 @@ public class BSimSignaturesTest extends TestCase {
     }
 
     private static String matchJson(double confidence, String arch) {
-        return "{\"program\":\"fw.elf\",\"results\":[{\"function\":\"FUN_1000\","
-                + "\"address\":\"0x1000\",\"matches\":[{\"name\":\"lfs_mount\","
+        return namedMatchJson("FUN_1000", "0x1000", "lfs_mount", confidence, arch);
+    }
+
+    private static String namedMatchJson(String function, String address, String name,
+                                         double confidence) {
+        return namedMatchJson(function, address, name, confidence, ARM);
+    }
+
+    private static String namedMatchJson(String function, String address, String name,
+                                         double confidence, String arch) {
+        return "{\"program\":\"fw.elf\",\"results\":[{\"function\":\"" + function + "\","
+                + "\"address\":\"" + address + "\",\"matches\":[{\"name\":\"" + name + "\","
                 + "\"similarity\":0.6,\"confidence\":" + confidence + ","
                 + "\"executable\":\"littlefs.o\",\"arch\":\"" + arch + "\","
                 + "\"md5\":\"" + REF_MD5 + "\",\"address\":\"0x2000\"}]}]}";
@@ -573,8 +760,17 @@ public class BSimSignaturesTest extends TestCase {
                                   double minConfidence, double minSignatureConfidence,
                                   boolean skipNamed) {
         return svc.applyMatches("postgresql://ghidra-bsim:5432/bsim", minConfidence, 0.15,
-                skipNamed, dryRun, 0.0, 10, "", "", "", "", "", 8, false, "none", 5.0,
-                signatures, minSignatureConfidence, 45);
+                skipNamed, false, dryRun, 0.0, 10, "", "", "", "", "", 8, false, "none", 5.0,
+                signatures, minSignatureConfidence, "", 45);
+    }
+
+    private static Response applyNamed(BSimService svc, boolean signatures, boolean dryRun,
+                                       boolean skipNamed, boolean renameNamed,
+                                       String resolveConflicts, double margin,
+                                       String typeArchiveMode) {
+        return svc.applyMatches("postgresql://ghidra-bsim:5432/bsim", 15.0, 0.15,
+                skipNamed, renameNamed, dryRun, 0.0, 10, "", "", "", "", "", 8, false,
+                resolveConflicts, margin, signatures, 40.0, typeArchiveMode, 45);
     }
 
     private BSimService ingestService(FunctionRow row, FakeSupport support) {
@@ -593,14 +789,25 @@ public class BSimSignaturesTest extends TestCase {
     }
 
     private BSimService applyService(FakeApplier applier, String queryJson, String currentName) {
-        Program program = program("fw.elf", new StubFunction(currentName));
-        FunctionRow query = FunctionRow.empty("FUN_1000");
+        return applyService(new FakeSupport(applier), queryJson, new StubFunction(currentName));
+    }
+
+    private BSimService applyService(FakeApplier applier, String queryJson,
+                                     StubFunction... functions) {
+        return applyService(new FakeSupport(applier), queryJson, functions);
+    }
+
+    private BSimService applyService(FakeSupport support, String queryJson,
+                                     StubFunction... functions) {
+        Program program = program("fw.elf", functions);
+        FunctionRow query = FunctionRow.empty(functions.length == 0
+                ? "FUN_1000" : functions[functions.length - 1].name);
         CorroborationExtractor extractor = new CorroborationExtractor() {
             @Override public List<FunctionRow> extractAll(Program p) { return List.of(query); }
             @Override public FunctionRow extractOne(Program p, String f) { return query; }
         };
         return new BSimService(providerOf(program), direct(), recordingCli(queryJson),
-                new BSimJobs(), this::storeFor, extractor, new FakeSupport(applier));
+                new BSimJobs(), this::storeFor, extractor, support);
     }
 
     private CorroborationStore storeFor(String url) {
@@ -661,6 +868,37 @@ public class BSimSignaturesTest extends TestCase {
             return exportTo;
         }
 
+        boolean projectArchiveMissing;
+        final List<String> published = new ArrayList<>();
+
+        @Override
+        public String publishTypeArchive(Program program, ProgramProvider provider,
+                                         String archiveKey, Path fileGdt,
+                                         com.xebyte.core.BSimTypeArchives.Mode mode,
+                                         List<String> warnings) {
+            published.add(archiveKey);
+            return "/refs/types/" + archiveKey + ".gdt";
+        }
+
+        @Override
+        public boolean archiveAvailable(Program program, ProgramProvider provider,
+                                        Signature sig, String archiveKey,
+                                        com.xebyte.core.BSimTypeArchives.Mode mode) {
+            return sig != null && !sig.gdtPath().isEmpty()
+                    && java.nio.file.Files.isRegularFile(java.nio.file.Path.of(sig.gdtPath()));
+        }
+
+        @Override
+        public com.xebyte.core.BSimTypeArchives.OpenedArchive openForApply(
+                Program program, ProgramProvider provider, Signature sig, String archiveKey,
+                com.xebyte.core.BSimTypeArchives.Mode mode) {
+            boolean fallback = mode == com.xebyte.core.BSimTypeArchives.Mode.PROJECT
+                    && projectArchiveMissing;
+            return com.xebyte.core.BSimTypeArchives.OpenedArchive.stub(
+                    fallback ? com.xebyte.core.BSimTypeArchives.Mode.LOCAL : mode,
+                    fallback, sig == null ? "" : sig.gdtPath());
+        }
+
         @Override
         public BSimSignatures.Applier applier(Program program) {
             applier.opened++;
@@ -698,13 +936,15 @@ public class BSimSignaturesTest extends TestCase {
         }
 
         @Override public TypePlan plan(Program program, Function function, Signature sig,
-                                       String refFunction) {
+                                       String refFunction,
+                                       ghidra.program.model.data.DataTypeManager archive) {
             planned.add(refFunction);
             return plan;
         }
 
         @Override public Outcome apply(Program program, Function function, Signature sig,
-                                       String refFunction, String provenanceLine) {
+                                       String refFunction, String provenanceLine,
+                                       ghidra.program.model.data.DataTypeManager archive) {
             applied.add(refFunction);
             provenance.add(provenanceLine);
             return outcome;
@@ -713,27 +953,59 @@ public class BSimSignaturesTest extends TestCase {
         @Override public void close() { closed++; }
     }
 
-    /** The one thing the rename path needs from a Function: a name it can set. */
+    /** Rename + provenance + listing identity. */
     private static final class StubFunction {
         String name;
-        StubFunction(String name) { this.name = name; }
+        String comment = "";
+        final String address;
+        final Set<String> tags = new LinkedHashSet<>();
+        StubFunction(String name) { this(name, "0x1000"); }
+        StubFunction(String name, String address) {
+            this.name = name;
+            this.address = address;
+        }
     }
 
-    private static Program program(String name, StubFunction fn) {
-        Address entry = (Address) Proxy.newProxyInstance(
+    private static StubFunction bsimHolder(String name, String address, double confidence) {
+        StubFunction fn = new StubFunction(name, address);
+        fn.comment = BSimSignatures.nameProvenanceLine("littlefs-Os.o", confidence);
+        fn.tags.add(BSimSignatures.FUNCTION_TAG);
+        return fn;
+    }
+
+    private static boolean uniqueNames(StubFunction... functions) {
+        Set<String> names = new LinkedHashSet<>();
+        for (StubFunction fn : functions) {
+            if (!names.add(fn.name)) return false;
+        }
+        return names.size() == functions.length;
+    }
+
+    private static Address address(String hex) {
+        String shown = hex.startsWith("0x") || hex.startsWith("0X") ? hex : "0x" + hex;
+        int hash = shown.toLowerCase().hashCode();
+        return (Address) Proxy.newProxyInstance(
                 Address.class.getClassLoader(), new Class<?>[] {Address.class},
                 (prox, m, a) -> switch (m.getName()) {
-                    case "toString" -> "0x1000";
-                    case "hashCode" -> 0x1000;
-                    case "equals" -> prox == a[0];
+                    case "toString" -> shown;
+                    case "hashCode" -> hash;
+                    case "equals" -> a[0] != null && shown.equals(a[0].toString());
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
-        Function function = (Function) Proxy.newProxyInstance(
+    }
+
+    private static Function functionProxy(StubFunction fn, Address entry) {
+        return (Function) Proxy.newProxyInstance(
                 Function.class.getClassLoader(), new Class<?>[] {Function.class},
                 (prox, m, a) -> switch (m.getName()) {
                     case "getName" -> fn.name;
                     case "setName" -> { fn.name = (String) a[0]; yield null; }
                     case "getEntryPoint" -> entry;
+                    case "getComment" -> fn.comment;
+                    case "setComment" -> { fn.comment = a[0] == null ? "" : (String) a[0]; yield null; }
+                    case "addTag" -> { fn.tags.add((String) a[0]); yield true; }
+                    case "removeTag" -> { fn.tags.remove((String) a[0]); yield true; }
+                    case "getTags" -> tagSet(fn.tags);
                     case "isThunk" -> false;
                     case "isExternal" -> false;
                     case "toString" -> fn.name;
@@ -741,21 +1013,67 @@ public class BSimSignaturesTest extends TestCase {
                     case "equals" -> prox == a[0];
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
+    }
+
+    private static Set<FunctionTag> tagSet(Set<String> names) {
+        Set<FunctionTag> tags = new LinkedHashSet<>();
+        for (String name : names) {
+            tags.add((FunctionTag) Proxy.newProxyInstance(
+                    FunctionTag.class.getClassLoader(), new Class<?>[] {FunctionTag.class},
+                    (prox, m, a) -> switch (m.getName()) {
+                        case "getName" -> name;
+                        case "toString" -> name;
+                        case "hashCode" -> name.hashCode();
+                        case "equals" -> a[0] instanceof FunctionTag t && name.equals(t.getName());
+                        default -> throw new UnsupportedOperationException(m.getName());
+                    }));
+        }
+        return tags;
+    }
+
+    private static Program program(String name, StubFunction... fns) {
+        if (fns == null || fns.length == 0) {
+            fns = new StubFunction[] { new StubFunction("FUN_1000") };
+        }
+        List<Address> entries = new ArrayList<>();
+        List<Function> functions = new ArrayList<>();
+        Map<String, Address> bySpell = new java.util.LinkedHashMap<>();
+        Map<Address, Function> byEntry = new java.util.IdentityHashMap<>();
+        for (StubFunction fn : fns) {
+            Address entry = address(fn.address);
+            Function function = functionProxy(fn, entry);
+            entries.add(entry);
+            functions.add(function);
+            byEntry.put(entry, function);
+            bySpell.put(fn.address, entry);
+            String bare = fn.address.startsWith("0x") || fn.address.startsWith("0X")
+                    ? fn.address.substring(2) : fn.address;
+            bySpell.put(bare, entry);
+            bySpell.put(bare.toLowerCase(), entry);
+            bySpell.put("0x" + bare, entry);
+            bySpell.put("0X" + bare, entry);
+        }
         FunctionManager fm = (FunctionManager) Proxy.newProxyInstance(
                 FunctionManager.class.getClassLoader(), new Class<?>[] {FunctionManager.class},
                 (prox, m, a) -> switch (m.getName()) {
-                    case "getFunctionCount" -> 3;
-                    // The listing sees the function under its current name,
-                    // so the existing-name conflict check runs as it does live.
-                    case "getFunctions" -> functionsOver(List.of(function));
-                    case "getFunctionAt" -> a[0] == entry ? function : null;
-                    case "getFunctionContaining" -> a[0] == entry ? function : null;
+                    case "getFunctionCount" -> functions.size();
+                    case "getFunctions" -> functionsOver(functions);
+                    case "getFunctionAt", "getFunctionContaining" -> {
+                        Address want = (Address) a[0];
+                        Function hit = byEntry.get(want);
+                        if (hit != null) yield hit;
+                        for (int i = 0; i < entries.size(); i++) {
+                            if (entries.get(i).equals(want)) yield functions.get(i);
+                        }
+                        yield null;
+                    }
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
         AddressFactory af = (AddressFactory) Proxy.newProxyInstance(
                 AddressFactory.class.getClassLoader(), new Class<?>[] {AddressFactory.class},
                 (prox, m, a) -> switch (m.getName()) {
-                    case "getAddress" -> "0x1000".equals(a[0]) || "1000".equals(a[0]) ? entry : null;
+                    case "getAddress" -> bySpell.get(String.valueOf(a[0]));
+                    case "getAddressSpaces" -> new ghidra.program.model.address.AddressSpace[0];
                     default -> throw new UnsupportedOperationException(m.getName());
                 });
         LanguageDescription desc = (LanguageDescription) Proxy.newProxyInstance(
@@ -795,6 +1113,7 @@ public class BSimSignaturesTest extends TestCase {
                     case "getLanguage" -> language;
                     case "getFunctionManager" -> fm;
                     case "getAddressFactory" -> af;
+                    case "getDataTypeManager" -> null;
                     case "getDomainFile" -> domainFile;
                     case "saveToPackedFile" -> {
                         java.io.File f = (java.io.File) args[0];

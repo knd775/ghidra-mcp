@@ -357,6 +357,7 @@
         "min_confidence",
         "min_similarity",
         "skip_named",
+        "rename_named",
         "dry_run",
         "similarity_threshold",
         "max_matches",
@@ -371,9 +372,10 @@
         "conflict_min_confidence_margin",
         "apply_signatures",
         "min_signature_confidence",
+        "type_archive_mode",
         "wait_seconds"
       ],
-      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default — there is no universally safe value. dry_run defaults to true and does not write. skip_named defaults to true (never overwrite an analyst name). Ambiguous matches are never applied. Duplicate proposed names are conflicts and none are applied by default. resolve_conflicts=best may select the highest-confidence candidate only when it clears conflict_min_confidence_margin. Functions flagged unidentifiable (too few LSH features) are skipped unless apply_unidentifiable=true. Optional arch / executable / compiler / exclude_md5 are the same server-side filters as bsim_query. Applied names are the BSim hit names as-is (C linkage, not PascalCase). apply_signatures=true (default false) additionally applies the reference's typed DWARF prototype to each function being renamed, importing struct/typedef types from the reference's .gdt archive with KEEP semantics (a type the target already defines by name is never replaced). A wrong signature propagates through the decompiler, so it has its own gates: min_signature_confidence (>= min_confidence, default 40), same architecture only, DWARF-sourced only, and the reference parameter count must equal what the target's decompiler infers; anything else gets the name only and is counted in the signatures block. Every applied signature carries a [bsim-sig] plate-comment marker naming the reference and confidence. dry_run previews signatures and imports no types. Runs a full-program BSim query first, which takes minutes: expect a job_id, then poll bsim_job_status."
+      "description": "Bulk-rename functions from BSim matches above a caller-chosen confidence floor. min_confidence has no default — there is no universally safe value. dry_run defaults to true and does not write. skip_named defaults to true (never overwrite an analyst name). rename_named defaults to false: when skip_named=false, named functions can still receive signatures without being renamed; disagreements are reported under rename_suppressed. Ambiguous matches are never applied. Duplicate proposed names are conflicts and none are applied by default. A name that already exists on a different function is name_exists_elsewhere and is not applied; resolve_conflicts=best may reassign it only when the holder carries BSim provenance and the new confidence clears conflict_min_confidence_margin. A hand-named holder is never demoted. Functions flagged unidentifiable (too few LSH features) are skipped unless apply_unidentifiable=true. Optional arch / executable / compiler / exclude_md5 are the same server-side filters as bsim_query. Applied names are the BSim hit names as-is (C linkage, not PascalCase). A function that already carries the proposed name is reported under unchanged (count name_unchanged), never as a conflict with itself; with skip_named=false that is how a names-only run is followed by apply_signatures=true. apply_signatures=true (default false) additionally applies the reference's typed DWARF prototype, resolving types from the project archive at /refs/types/<name>-<version>.gdt (type_archive_mode=project, the default when a project is open). file writes a configured stable directory; local disassociates after resolve. A missing project archive falls back to local and is counted as types_fallback_local. KEEP semantics: a type the target already defines by name is never replaced. A wrong signature propagates through the decompiler, so it has its own gates: min_signature_confidence (>= min_confidence, default 40), same architecture only, DWARF-sourced only, and the reference parameter count must equal what the target's decompiler infers; anything else gets the name only and is counted in the signatures block. Every applied name carries a [bsim] plate marker and a bsim function tag; every applied signature carries [bsim-sig]. dry_run previews and writes nothing. Runs a full-program BSim query first, which takes minutes: expect a job_id, then poll bsim_job_status."
     },
     {
       "path": "/bsim_create_db",
@@ -1209,9 +1211,10 @@
       "params": [
         "program_name",
         "output_dir",
-        "output_name"
+        "output_name",
+        "self_contained"
       ],
-      "description": "Export an open or project-resident program to a Ghidra Zip File (.gzf). Looks up the program in the open-programs map first (so it works on file-loaded programs without a project), then falls back to the open project's DomainFile."
+      "description": "Export a program to a GZF (Ghidra packed-database) file on disk. The resulting .gzf can be imported into any Ghidra GUI (File → Import) or back into a project via /import_program. Resolution order: (1) the in-memory program with that name (captures live analyst edits); (2) a DomainFile in the open project (on-disk state). Output is written to `output_dir/output_name` (defaults: /data/exports and `<program>.gzf`). Refuses to overwrite an existing file. self_contained=true disassociates FILE/PROJECT type archives on the exported copy only so it opens in a project that lacks those archives; the program in the project is unchanged."
     },
     {
       "path": "/extract_iocs_with_context",

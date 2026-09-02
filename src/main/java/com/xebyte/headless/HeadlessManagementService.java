@@ -351,7 +351,9 @@ public class HeadlessManagementService {
                 + "/import_program. Resolution order: (1) the in-memory program with that name (captures live "
                 + "analyst edits); (2) a DomainFile in the open project (on-disk state). Output is written to "
                 + "`output_dir/output_name` (defaults: /data/exports and `<program>.gzf`). Refuses to overwrite "
-                + "an existing file.",
+                + "an existing file. self_contained=true disassociates FILE/PROJECT type archives on the "
+                + "exported copy only so it opens in a project that lacks those archives; the program "
+                + "in the project is unchanged.",
             category = "headless")
     public Response exportProgram(
             @Param(value = "program_name", source = ParamSource.BODY,
@@ -359,7 +361,11 @@ public class HeadlessManagementService {
             @Param(value = "output_dir", source = ParamSource.BODY, defaultValue = "/data/exports",
                 description = "Directory the .gzf will be written to. Must already exist.") String outputDir,
             @Param(value = "output_name", source = ParamSource.BODY, defaultValue = "",
-                description = "Output file name. Defaults to `<program>.gzf`. `.gzf` is appended if missing.") String outputName) {
+                description = "Output file name. Defaults to `<program>.gzf`. `.gzf` is appended if missing.") String outputName,
+            @Param(value = "self_contained", source = ParamSource.BODY, defaultValue = "false",
+                description = "Disassociate FILE/PROJECT type archives on the exported .gzf only. "
+                        + "The source program's archive links are left in place.")
+                    boolean selfContained) {
         if (programName == null || programName.isEmpty()) {
             return Response.err("program_name required");
         }
@@ -387,7 +393,8 @@ public class HeadlessManagementService {
             return Response.err("output_name escapes output_dir: " + name);
         }
 
-        HeadlessProgramProvider.ExportResult res = programProvider.exportProgramToGzf(programName, out);
+        HeadlessProgramProvider.ExportResult res =
+                programProvider.exportProgramToGzf(programName, out, selfContained);
         if (!res.success) {
             return Response.err(res.error);
         }
@@ -397,6 +404,7 @@ public class HeadlessManagementService {
         body.put("path", res.outputPath);
         body.put("size_bytes", res.sizeBytes);
         body.put("content_type", "GZF");
+        body.put("self_contained", selfContained);
         return Response.ok(body);
     }
 

@@ -25,10 +25,13 @@ import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.SourceArchive;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.VoidDataType;
+import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionSignature;
+import ghidra.program.model.listing.FunctionTag;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.symbol.SymbolUtilities;
 import ghidra.util.task.TaskMonitor;
 
 import java.io.File;
@@ -41,6 +44,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.Set;
 
 /**
@@ -70,6 +74,14 @@ public final class BSimSignatures {
     public static final String ARCHIVE_SUFFIX = ".gdt";
     /** Plate-comment marker that distinguishes a BSim-applied signature from hand work. */
     public static final String PROVENANCE_TAG = "[bsim-sig]";
+    /**
+     * Plate-comment marker stamped when the tool applies a name. Distinct from
+     * {@link #PROVENANCE_TAG} so a names-only run is still reclaimable, and
+     * from a hand rename, which never gets either line.
+     */
+    public static final String NAME_PROVENANCE_TAG = "[bsim]";
+    /** Function tag attached to every name the tool applies. */
+    public static final String FUNCTION_TAG = "bsim";
     /**
      * Separate, higher floor for signatures. 40 is a starting point, not a
      * calibration: in one real run every match above 40 was a large distinctive
@@ -219,6 +231,116 @@ public final class BSimSignatures {
     public static String provenanceLine(String executable, double confidence) {
         return PROVENANCE_TAG + " from " + (executable == null ? "" : executable)
                 + " conf=" + String.format(Locale.ROOT, "%.1f", confidence);
+    }
+
+    public static String nameProvenanceLine(String executable, double confidence) {
+        return NAME_PROVENANCE_TAG + " from " + (executable == null ? "" : executable)
+                + " conf=" + String.format(Locale.ROOT, "%.1f", confidence);
+    }
+
+    /** A {@code [bsim]} or {@code [bsim-sig]} plate line. */
+    public static boolean isBsimProvenanceLine(String line) {
+        if (line == null) return false;
+        String t = line.trim();
+        return t.startsWith(PROVENANCE_TAG)
+                || t.startsWith(NAME_PROVENANCE_TAG + " ")
+                || t.equals(NAME_PROVENANCE_TAG);
+    }
+
+    public static boolean hasBsimProvenanceComment(String comment) {
+        if (comment == null || comment.isBlank()) return false;
+        for (String line : comment.split("\\R")) {
+            if (isBsimProvenanceLine(line)) return true;
+        }
+        return false;
+    }
+
+    /** Plate marker or the {@link #FUNCTION_TAG} function tag. */
+    public static boolean hasBsimProvenance(Function function) {
+        if (function == null) return false;
+        try {
+            if (hasBsimProvenanceComment(function.getComment())) return true;
+        } catch (Exception ignored) {
+        }
+        try {
+            Set<FunctionTag> tags = function.getTags();
+            if (tags == null) return false;
+            for (FunctionTag tag : tags) {
+                if (tag != null && FUNCTION_TAG.equals(tag.getName())) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    /** Confidence from the last BSim plate marker; empty when unparseable. */
+    public static OptionalDouble provenanceConfidence(String comment) {
+        if (comment == null || comment.isBlank()) return OptionalDouble.empty();
+        OptionalDouble found = OptionalDouble.empty();
+        for (String line : comment.split("\\R")) {
+            if (!isBsimProvenanceLine(line)) continue;
+            String t = line.trim();
+            int i = t.lastIndexOf("conf=");
+            if (i < 0) continue;
+            try {
+                found = OptionalDouble.of(Double.parseDouble(t.substring(i + 5).trim()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Append a {@link #NAME_PROVENANCE_TAG} line, replacing an earlier name
+     * marker. {@link #PROVENANCE_TAG} signature lines and hand text stay.
+     */
+    public static String mergeNameProvenance(String existing, String line) {
+        List<String> kept = new ArrayList<>();
+        if (existing != null && !existing.isBlank()) {
+            for (String l : existing.split("\\R")) {
+                String t = l.trim();
+                if (t.startsWith(NAME_PROVENANCE_TAG + " ") || t.equals(NAME_PROVENANCE_TAG)) {
+                    continue;
+                }
+                kept.add(l);
+            }
+        }
+        while (!kept.isEmpty() && kept.get(kept.size() - 1).isBlank()) {
+            kept.remove(kept.size() - 1);
+        }
+        kept.add(line);
+        return String.join("\n", kept);
+    }
+
+    /** Drop every {@code [bsim]} / {@code [bsim-sig]} line; keep hand text. */
+    public static String stripBsimProvenance(String existing) {
+        if (existing == null || existing.isBlank()) return "";
+        List<String> kept = new ArrayList<>();
+        for (String l : existing.split("\\R")) {
+            if (isBsimProvenanceLine(l)) continue;
+            kept.add(l);
+        }
+        while (!kept.isEmpty() && kept.get(kept.size() - 1).isBlank()) {
+            kept.remove(kept.size() - 1);
+        }
+        while (!kept.isEmpty() && kept.get(0).isBlank()) {
+            kept.remove(0);
+        }
+        return String.join("\n", kept);
+    }
+
+    /** Ghidra's {@code FUN_<addr>} form, so a demoted name is auto-generated again. */
+    public static String defaultFunctionName(Address addr) {
+        if (addr == null) return "FUN_unknown";
+        try {
+            return SymbolUtilities.getDefaultFunctionName(addr);
+        } catch (Exception | LinkageError e) {
+            String hex = addr.toString();
+            int colon = hex.lastIndexOf(':');
+            if (colon >= 0) hex = hex.substring(colon + 1);
+            if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.substring(2);
+            return "FUN_" + hex;
+        }
     }
 
     /** True when the plate comment already carries a marker from this reference. */
@@ -397,11 +519,12 @@ public final class BSimSignatures {
         boolean alreadyApplied(Function function, String executable);
 
         /** Preview the type work without writing. Safe under {@code dry_run}. */
-        TypePlan plan(Program program, Function function, Signature sig, String refFunction);
+        TypePlan plan(Program program, Function function, Signature sig, String refFunction,
+                      DataTypeManager archive);
 
         /** Apply the signature. The caller holds the program transaction. */
         Outcome apply(Program program, Function function, Signature sig, String refFunction,
-                      String provenance);
+                      String provenance, DataTypeManager archive);
 
         @Override
         default void close() {}
@@ -416,6 +539,32 @@ public final class BSimSignatures {
         Path exportArchive(Program program, List<String> warnings);
 
         Applier applier(Program program);
+
+        /**
+         * Publish the file {@code .gdt} as a project / file / local archive.
+         * Default is a no-op so tests that only care about the file path stay
+         * focused.
+         */
+        default String publishTypeArchive(Program program, ProgramProvider provider,
+                                          String archiveKey, Path fileGdt,
+                                          BSimTypeArchives.Mode mode, List<String> warnings) {
+            return null;
+        }
+
+        default boolean archiveAvailable(Program program, ProgramProvider provider,
+                                         Signature sig, String archiveKey,
+                                         BSimTypeArchives.Mode mode) {
+            return sig != null && !sig.gdtPath().isEmpty()
+                    && Files.isRegularFile(Path.of(sig.gdtPath()));
+        }
+
+        default BSimTypeArchives.OpenedArchive openForApply(Program program,
+                                                            ProgramProvider provider,
+                                                            Signature sig, String archiveKey,
+                                                            BSimTypeArchives.Mode mode)
+                throws IOException {
+            return BSimTypeArchives.openForApply(program, provider, sig, archiveKey, mode);
+        }
     }
 
     public static final Support GHIDRA = new Support() {
@@ -433,6 +582,20 @@ public final class BSimSignatures {
                 }
                 return null;
             }
+        }
+
+        @Override
+        public String publishTypeArchive(Program program, ProgramProvider provider,
+                                         String archiveKey, Path fileGdt,
+                                         BSimTypeArchives.Mode mode, List<String> warnings) {
+            return BSimTypeArchives.publish(program, provider, archiveKey, fileGdt, mode, warnings);
+        }
+
+        @Override
+        public boolean archiveAvailable(Program program, ProgramProvider provider,
+                                        Signature sig, String archiveKey,
+                                        BSimTypeArchives.Mode mode) {
+            return BSimTypeArchives.archiveAvailable(program, provider, sig, archiveKey, mode);
         }
 
         @Override
@@ -507,35 +670,26 @@ public final class BSimSignatures {
         }
 
         @Override
-        public TypePlan plan(Program program, Function function, Signature sig, String refFunction) {
-            FileDataTypeManager archive;
-            try {
-                archive = openArchive(sig.gdtPath());
-            } catch (Exception e) {
-                return TypePlan.failed("cannot open " + sig.gdtPath() + ": " + e.getMessage());
+        public TypePlan plan(Program program, Function function, Signature sig, String refFunction,
+                             DataTypeManager archive) {
+            if (archive == null) {
+                return TypePlan.failed("cannot open " + (sig == null ? "" : sig.gdtPath()));
             }
-            try {
-                FunctionDefinition def = findDefinition(archive, refFunction);
-                if (def == null) {
-                    return TypePlan.failed("archive has no signature for " + refFunction);
-                }
-                List<String> imported = new ArrayList<>();
-                List<String> kept = new ArrayList<>();
-                planTypes(def, program.getDataTypeManager(), imported, kept);
-                return new TypePlan(imported, kept, "");
-            } finally {
-                archive.close();
+            FunctionDefinition def = findDefinition(archive, refFunction);
+            if (def == null) {
+                return TypePlan.failed("archive has no signature for " + refFunction);
             }
+            List<String> imported = new ArrayList<>();
+            List<String> kept = new ArrayList<>();
+            planTypes(def, program.getDataTypeManager(), imported, kept);
+            return new TypePlan(imported, kept, "");
         }
 
         @Override
         public Outcome apply(Program program, Function function, Signature sig,
-                             String refFunction, String provenance) {
-            FileDataTypeManager archive;
-            try {
-                archive = openArchive(sig.gdtPath());
-            } catch (Exception e) {
-                return Outcome.failed("cannot open " + sig.gdtPath() + ": " + e.getMessage());
+                             String refFunction, String provenance, DataTypeManager archive) {
+            if (archive == null) {
+                return Outcome.failed("cannot open " + (sig == null ? "" : sig.gdtPath()));
             }
             try {
                 FunctionDefinition def = findDefinition(archive, refFunction);
@@ -595,8 +749,6 @@ public final class BSimSignatures {
                         function.getCallingConventionName(), imported, kept);
             } catch (Exception e) {
                 return Outcome.failed(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
-            } finally {
-                archive.close();
             }
         }
 

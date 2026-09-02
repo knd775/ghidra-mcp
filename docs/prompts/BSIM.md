@@ -398,7 +398,13 @@ because a reference is never opened again afterwards:
   sidecar (falling back to `GHIDRA_MCP_BSIM_ROOT/gdt/<md5>.gdt` when that
   directory is not writable). It holds every struct, typedef, enum and
   function-definition type the DWARF produced, plus one function definition
-  per DWARF-signed function under `/bsim-sig/`.
+  per DWARF-signed function under `/bsim-sig/`. Ingest also publishes the
+  same types as a project archive at `/refs/types/<name>-<version>.gdt`
+  (library + version, never opt flags: `littlefs-v2.9.3-gcc13-arm-O2.o`
+  and the `-Os` twin share `littlefs-v2.9.3`). `GHIDRA_MCP_TYPE_ARCHIVE_MODE`
+  is `project` (default when a project is open), `file` (writes
+  `GHIDRA_MCP_TYPE_ARCHIVE_DIR`, which must be client-resolvable, never a
+  container-internal path), or `local` (do not publish; apply disassociates).
 - Per-function `prototype` (Ghidra's `getPrototypeString(true, true)`, e.g.
   `int lfs_mount(lfs_t * lfs, struct lfs_config * cfg)`), `calling_convention`,
   `param_count`, `has_dwarf` and `gdt_path` columns in
@@ -487,31 +493,47 @@ shows how much data was checked. A leftover H2 `file:` URL reports
 
 ```
 bsim_apply_matches(db_url, program, min_confidence=<required>,
-                   min_similarity=0.8, skip_named=True, dry_run=True,
-                   similarity_threshold=0.0, arch=None, executable=None,
-                   compiler=None, exclude_md5=None, min_feature_count=8,
-                   apply_unidentifiable=False, resolve_conflicts="none",
-                   conflict_min_confidence_margin=5.0,
+                   min_similarity=0.8, skip_named=True, rename_named=False,
+                   dry_run=True, similarity_threshold=0.0, arch=None,
+                   executable=None, compiler=None, exclude_md5=None,
+                   min_feature_count=8, apply_unidentifiable=False,
+                   resolve_conflicts="none", conflict_min_confidence_margin=5.0,
                    apply_signatures=False, min_signature_confidence=40.0,
-                   wait_seconds=45)
+                   type_archive_mode="", wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
 functions you already trust, after unidentifiable functions are out of
 the set — a floor around 10 then becomes meaningful again. `dry_run=True`
 is the default and does not call `setName`. `skip_named=True` will not
-overwrite an analyst's name. An `ambiguous` result is never applied,
-whatever the scores. Unidentifiable functions are skipped and counted
-unless `apply_unidentifiable=true`.
+overwrite an analyst's name. `rename_named` is ignored in that case.
+`skip_named=False` plus `rename_named=False` is how a named function
+receives a signature without a rename; a proposed name that disagrees
+is listed under `rename_suppressed` with both names. `rename_named=True`
+is the previous rename-anything behaviour. An `ambiguous` result is never
+applied, whatever the scores. Unidentifiable functions are skipped and
+counted unless `apply_unidentifiable=true`.
 
 The apply decision is global. Proposed renames are grouped by target name
 after all thresholds and filters. A duplicate group is listed in `conflicts`,
 and its withheld functions contribute to `counts.conflicting`. The default
 `resolve_conflicts="none"` applies none of them. `resolve_conflicts="best"`
 applies only the highest-confidence candidate when its lead over second place
-meets `conflict_min_confidence_margin`. Exact ties are always skipped. A name
-that already belongs to another function is also a conflict and is never
-resolved by `best`.
+meets `conflict_min_confidence_margin`. Exact ties are always skipped.
+
+A name that already exists on a *different* function is
+`name_exists_elsewhere` (both addresses and both scores) and is not
+applied. `resolve_conflicts="best"` may reassign it only when the holder
+carries BSim provenance (`[bsim]` / `[bsim-sig]` plate or a `bsim`
+function tag) *and* a parseable `conf=`, and the new confidence clears
+`conflict_min_confidence_margin`. The holder is demoted to `FUN_<addr>`,
+the marker and tag are stripped, and the stronger candidate takes the
+name. A hand-named holder is never demoted. After any run, no two
+functions share a name. A function that already carries the proposed
+name is `name_unchanged`, never a conflict with itself.
+
+Every applied name gets a `[bsim] from <exe> conf=60.5` plate line and a
+`bsim` function tag. That is what makes a later run reclaimable.
 
 Applied names are the BSim hit names as-is (C linkage, not PascalCase).
 `lfs_bd_read` is the right name here.
@@ -526,14 +548,21 @@ Applying that signature does more than label two parameters: the decompiler
 propagates the types, every access through `lfs` becomes a named field, and
 every *caller* gains typed arguments without being touched.
 
-With `apply_signatures=true`, each function that is being renamed in the same
-run also receives the reference's prototype, read from the data ingest wrote
-(`corroboration.functions` and the `.gdt` archive) — no reference program is
-opened. Types named by the prototype are resolved into the target with
-`KEEP_HANDLER`: a type the target already defines under that name, by hand or
-by an earlier run, is kept and the archive's definition is discarded. That
-makes repeated runs idempotent and protects hand work. Types nested inside an
-imported struct are matched by Ghidra's category path.
+With `apply_signatures=true`, each function that is being renamed (or whose
+rename was suppressed so a signature can still land) receives the
+reference's prototype, read from the data ingest wrote
+(`corroboration.functions` and the project archive at
+`/refs/types/<name>-<version>.gdt`) — no reference program is opened.
+`type_archive_mode` selects `project` / `file` / `local`; a missing
+project archive falls back to the filesystem `.gdt` and is counted as
+`types_fallback_local` (types are then disassociated so the program does
+not record a container path). Types named by the prototype are resolved
+into the target with `KEEP_HANDLER`: a type the target already defines
+under that name, by hand or by an earlier run, is kept and the archive's
+definition is discarded. That makes repeated runs idempotent and protects
+hand work. Types nested inside an imported struct are matched by Ghidra's
+category path. `export_program(self_contained=true)` flattens FILE/PROJECT
+archive links on the exported `.gzf` only; the live program is unchanged.
 
 A wrong name costs one rename. A wrong signature **propagates** — the
 decompiler trusts it, and a bad struct pointer type turns every caller into
@@ -546,18 +575,21 @@ names, and each gate is counted:
 | target and reference `arch` differ (BSim's own tutorial: cross-arch types are unsafe) | `skipped_cross_arch` |
 | reference ingested before signatures existed, or a `file:` H2 database | `skipped_no_signature_data` |
 | reference signature came from analysis, not DWARF (`has_dwarf=false`, built without `-g`) | `skipped_no_dwarf` |
-| the `.gdt` archive is gone | `skipped_no_archive` |
+| the project archive and the filesystem `.gdt` are both gone | `skipped_no_archive` |
 | the function already carries this reference's marker | `skipped_already_applied` |
 | reference `param_count` differs from what the target's decompiler infers (inlined callee, SDK version, `.constprop` variant) | `skipped_param_mismatch` (both counts named) |
 
-In every skipped case the name is still applied. Signature application only
-happens on functions whose name this run applied or confirmed, so with
-`skip_named=true` hand-named functions are untouched by construction. A
-function that already carries the proposed name is reported under
+In every skipped case the name is still applied (unless `rename_named=false`
+suppressed it). Signature application happens on functions whose name this
+run applied, confirmed, or left in place under `rename_suppressed`, so
+with `skip_named=true` hand-named functions are untouched by construction.
+A function that already carries the proposed name is reported under
 `unchanged` (count `name_unchanged`), never as a conflict with itself, and
 still goes through the signature gates. That is the path for a corpus that
-was named before this feature existed: run again with `skip_named=false`
-and `apply_signatures=true`; nothing is renamed and the signatures land.
+was named before signatures existed: run again with `skip_named=false`,
+`rename_named=false`, and `apply_signatures=true`; nothing is renamed and
+the signatures land. `rename_named=true` is required to overwrite a
+hand name such as a Frotz `z_` prefix.
 
 Every applied signature gets a plate-comment marker,
 `[bsim-sig] from pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico.o conf=64.0`,

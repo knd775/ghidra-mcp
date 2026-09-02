@@ -1282,6 +1282,10 @@ public class HeadlessProgramProvider implements ProgramProvider {
      * </ol>
      */
     public ExportResult exportProgramToGzf(String programIdent, File output) {
+        return exportProgramToGzf(programIdent, output, false);
+    }
+
+    public ExportResult exportProgramToGzf(String programIdent, File output, boolean selfContained) {
         if (programIdent == null || programIdent.isEmpty()) {
             return ExportResult.failure("program identifier required");
         }
@@ -1303,7 +1307,7 @@ public class HeadlessProgramProvider implements ProgramProvider {
         Program live = exactOpenProgram(programIdent);
         if (live != null) {
             try {
-                live.saveToPackedFile(output, monitor);
+                packProgram(live, output, selfContained);
                 return ExportResult.success(live.getName(), output.getAbsolutePath(), output.length());
             } catch (Exception e) {
                 Msg.error(this, "saveToPackedFile failed for '" + programIdent + "'", e);
@@ -1327,12 +1331,41 @@ public class HeadlessProgramProvider implements ProgramProvider {
             return ExportResult.failure("Program not found in open programs or project: " + programIdent);
         }
         try {
-            df.packFile(output, monitor);
-            return ExportResult.success(df.getName(), output.getAbsolutePath(), output.length());
+            if (!selfContained) {
+                df.packFile(output, monitor);
+                return ExportResult.success(df.getName(), output.getAbsolutePath(), output.length());
+            }
+            Program opened = (Program) df.getDomainObject(this, false, false, monitor);
+            try {
+                packProgram(opened, output, true);
+                return ExportResult.success(df.getName(), output.getAbsolutePath(), output.length());
+            } finally {
+                opened.release(this);
+            }
         } catch (Exception e) {
             Msg.error(this, "packFile failed for '" + programIdent + "'", e);
             return ExportResult.failure("packFile failed (" + e.getClass().getSimpleName()
                 + "): " + e.getMessage());
+        }
+    }
+
+    /**
+     * Pack {@code program} to {@code output}. When {@code selfContained},
+     * disassociate FILE/PROJECT type archives inside a transaction, pack the
+     * flattened in-memory state, then abort the transaction so the live
+     * program keeps its archive links.
+     */
+    private void packProgram(Program program, File output, boolean selfContained) throws Exception {
+        if (!selfContained) {
+            program.saveToPackedFile(output, monitor);
+            return;
+        }
+        int tx = program.startTransaction("self-contained export");
+        try {
+            com.xebyte.core.BSimTypeArchives.disassociateExternal(program.getDataTypeManager());
+            program.saveToPackedFile(output, monitor);
+        } finally {
+            program.endTransaction(tx, false);
         }
     }
 
