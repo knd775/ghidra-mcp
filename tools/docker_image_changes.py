@@ -7,8 +7,8 @@ Java-only commit paid for all of that.
 Each image's inputs are its Dockerfile, the root ``.dockerignore``, the
 sibling ``<Dockerfile>.dockerignore`` BuildKit reads, and every repo path
 its COPY/ADD instructions read. ``--from`` copies come from another
-stage, not the build context. ``.github/workflows/ghcr.yml`` counts as an
-input for every image so a tagging or cache change still publishes.
+stage, not the build context. Changing ``ghcr.yml`` does not change an
+image. Version tags and ``workflow_dispatch`` still force every image.
 
     git diff --name-only "$BEFORE" HEAD | python -m tools.docker_image_changes
     python -m tools.docker_image_changes --all
@@ -159,8 +159,6 @@ def images_for_files(
     selected = {name: False for name in IMAGES}
     changed = [normalize_repo_path(path) for path in changed_files]
     changed = [path for path in changed if path]
-    if WORKFLOW_PATH in changed:
-        return {name: True for name in IMAGES}
     contexts = image_contexts(repo_root)
     for name, sources in contexts.items():
         selected[name] = any(
