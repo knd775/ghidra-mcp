@@ -126,6 +126,20 @@ public class BSimSignaturesTest extends TestCase {
                 BSimSignatures.relinkReason(BSimSignatures.RelinkDecision.SKIP_NOT_IN_ARCHIVE));
         assertEquals("differs",
                 BSimSignatures.relinkReason(BSimSignatures.RelinkDecision.SKIP_DIFFERS));
+        assertEquals("failed",
+                BSimSignatures.relinkReason(BSimSignatures.RelinkDecision.SKIP_FAILED));
+    }
+
+    public void testRelinkReportCountsFailedAssociationSeparately() {
+        BSimSignatures.RelinkReport report = new BSimSignatures.RelinkReport();
+        report.add(BSimSignatures.RelinkDecision.SKIP_FAILED, "lfs_t", "littlefs-v2.9.3");
+        Map<String, Object> counts = report.toMap();
+        assertEquals(0, counts.get("relinked"));
+        assertEquals(0, counts.get("skipped_not_in_archive"));
+        assertEquals(0, counts.get("skipped_differs"));
+        assertEquals(1, counts.get("failed"));
+        assertEquals("failed", report.skippedRows().get(0).get("reason"));
+        assertEquals("lfs_t", report.skippedRows().get(0).get("type"));
     }
 
     public void testProvenanceExecutableReadsTheLastBsimSigLine() {
@@ -773,6 +787,34 @@ public class BSimSignaturesTest extends TestCase {
         assertTrue(json, json.contains("\"reason\":\"not_in_archive\""));
         assertTrue(json, json.contains("\"reason\":\"differs\""));
         assertEquals(List.of("lfs_t"), support.relinkWrites);
+    }
+
+    public void testRelinkReportsFailedAssociationWithoutCountingAWrite() throws Exception {
+        seedReference(true, 2);
+        StubFunction named = alreadySigned("lfs_mount", "littlefs-v2.9.3-gcc13-arm-O2.o");
+        FakeApplier applier = new FakeApplier();
+        applier.alreadyApplied = true;
+        FakeSupport support = new FakeSupport(applier);
+        support.signatureTypes = List.of("broken_t");
+        support.relinkByName.put("broken_t", BSimSignatures.RelinkDecision.SKIP_FAILED);
+        BSimService svc = applyService(support,
+                namedMatchJson("lfs_mount", "0x1000", "lfs_mount", 101.0), named);
+        String json = apply(svc, true, false, 15.0, 40.0, false, true).toJson();
+        assertTrue(json, json.contains("\"relinked\":0"));
+        assertTrue(json, json.contains("\"failed\":1"));
+        assertTrue(json, json.contains("\"reason\":\"failed\""));
+        assertTrue(support.relinkWrites.isEmpty());
+    }
+
+    public void testRelinkIsAttachedAfterSignatureRunCloses() throws Exception {
+        String src = Files.readString(Path.of("src/main/java/com/xebyte/core/BSimService.java"));
+        int tryStart = src.indexOf("try (SignatureRun sigRun = applySignatures");
+        int attach = src.indexOf("return attachRelink(", tryStart);
+        assertTrue("SignatureRun try-with-resources missing", tryStart >= 0);
+        assertTrue("attachRelink must follow SignatureRun.close()", attach > tryStart);
+        String openRun = src.substring(tryStart, attach);
+        assertFalse("relink must not run while SignatureRun is still open",
+                openRun.contains("relinkAppliedTypes") || openRun.contains("attachRelink"));
     }
 
     public void testRelinkIsIdempotentAndDryRunWritesNothing() throws Exception {

@@ -541,7 +541,7 @@ public final class BSimTypeArchives {
                     warnings.add("type archive: checkout failed for " + existing.getPathname()
                             + ": " + vcError(checkout));
                 }
-                return versionedResult(existing, plan);
+                return PublishResult.NONE;
             }
             weCheckedOut = true;
         }

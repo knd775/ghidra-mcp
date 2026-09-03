@@ -151,7 +151,8 @@ public final class BSimSignatures {
     public enum RelinkDecision {
         RELINK,
         SKIP_NOT_IN_ARCHIVE,
-        SKIP_DIFFERS
+        SKIP_DIFFERS,
+        SKIP_FAILED
     }
 
     public static String reason(Decision d) {
@@ -172,6 +173,7 @@ public final class BSimSignatures {
             case RELINK -> "relinked";
             case SKIP_NOT_IN_ARCHIVE -> "not_in_archive";
             case SKIP_DIFFERS -> "differs";
+            case SKIP_FAILED -> "failed";
         };
     }
 
@@ -991,6 +993,7 @@ public final class BSimSignatures {
         private int relinked;
         private int skippedNotInArchive;
         private int skippedDiffers;
+        private int failed;
         private final Set<String> archives = new LinkedHashSet<>();
         private final List<Map<String, Object>> skipped = new ArrayList<>();
 
@@ -1003,12 +1006,12 @@ public final class BSimSignatures {
                 relinked++;
                 return;
             }
-            String reason = relinkReason(decision);
             if (decision == RelinkDecision.SKIP_NOT_IN_ARCHIVE) skippedNotInArchive++;
-            else skippedDiffers++;
+            else if (decision == RelinkDecision.SKIP_DIFFERS) skippedDiffers++;
+            else failed++;
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("type", typeName == null ? "" : typeName);
-            row.put("reason", reason);
+            row.put("reason", relinkReason(decision));
             if (archiveKey != null && !archiveKey.isBlank()) row.put("archive", archiveKey);
             skipped.add(row);
         }
@@ -1018,6 +1021,7 @@ public final class BSimSignatures {
             m.put("relinked", relinked);
             m.put("skipped_not_in_archive", skippedNotInArchive);
             m.put("skipped_differs", skippedDiffers);
+            m.put("failed", failed);
             m.put("archives", new ArrayList<>(archives));
             return m;
         }
@@ -1115,11 +1119,13 @@ public final class BSimSignatures {
                 local != null && archived != null && structurallyIdentical(local, archived));
         if (decision != RelinkDecision.RELINK || dryRun) return decision;
         try {
-            applyRelink(local, program.getDataTypeManager(), archive);
+            if (applyRelink(local, program.getDataTypeManager(), archive)) {
+                return RelinkDecision.RELINK;
+            }
         } catch (Exception ignored) {
             // Association is best-effort; the type stays as it was.
         }
-        return decision;
+        return RelinkDecision.SKIP_FAILED;
     }
 
     static boolean structurallyIdentical(DataType local, DataType archived) {
@@ -1152,15 +1158,15 @@ public final class BSimSignatures {
         return any;
     }
 
-    static void applyRelink(DataType local, DataTypeManager target, DataTypeManager archive) {
-        if (local == null || target == null || archive == null) return;
+    static boolean applyRelink(DataType local, DataTypeManager target, DataTypeManager archive) {
+        if (local == null || target == null || archive == null) return false;
         SourceArchive archiveSource;
         try {
             archiveSource = archive.getLocalSourceArchive();
         } catch (Exception e) {
-            return;
+            return false;
         }
-        if (archiveSource == null) return;
+        if (archiveSource == null) return false;
         SourceArchive resolved;
         try {
             resolved = target.resolveSourceArchive(archiveSource);
@@ -1168,7 +1174,7 @@ public final class BSimSignatures {
             resolved = archiveSource;
         }
         if (resolved == null) resolved = archiveSource;
-        if (alreadyLinked(local, resolved)) return;
+        if (alreadyLinked(local, resolved)) return true;
         try {
             SourceArchive current = local.getSourceArchive();
             if (current != null && BSimTypeArchives.isExternalArchive(current)
@@ -1179,7 +1185,9 @@ public final class BSimSignatures {
         }
         try {
             local.setSourceArchive(resolved);
-        } catch (Exception ignored) {
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 

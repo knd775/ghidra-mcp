@@ -734,21 +734,25 @@ public class BSimService {
         Map<String, Object> payload = JsonHelper.parseJson(queried.toJson());
         List<BSimMatches.FunctionResult> results =
                 BSimMatches.parseQueryPayload(payload, program.getExecutableMD5());
+        Response applied;
         try (SignatureRun sigRun = applySignatures
                 ? new SignatureRun(url, program, dryRun, minSignatureConfidence, archiveMode)
                 : null) {
-            return applyResults(program, results, minConfidence, minSimilarity, skipNamed,
+            applied = applyResults(program, results, minConfidence, minSimilarity, skipNamed,
                     renameNamed, dryRun, applyUnidentifiable, resolveConflicts,
-                    conflictMinConfidenceMargin, sigRun, archiveMode, relinkTypes);
+                    conflictMinConfidenceMargin, sigRun);
         }
+        // After SignatureRun.close(): FILE/LOCAL disassociation would
+        // otherwise strip associations relink just wrote, while the
+        // response still counted them as relinked.
+        return attachRelink(applied, program, archiveMode, dryRun, relinkTypes);
     }
 
     private Response applyResults(Program program, List<BSimMatches.FunctionResult> results,
                                   Double minConfidence, double minSimilarity, boolean skipNamed,
                                   boolean renameNamed, boolean dryRun, boolean applyUnidentifiable,
                                   String resolveConflicts, double conflictMinConfidenceMargin,
-                                  SignatureRun sigRun, BSimTypeArchives.Mode archiveMode,
-                                  boolean relinkTypes) {
+                                  SignatureRun sigRun) {
 
         List<Map<String, Object>> renamed = new ArrayList<>();
         List<Map<String, Object>> wouldRename = new ArrayList<>();
@@ -986,22 +990,32 @@ public class BSimService {
             body.put("signature_details", sigRun.details);
             if (!sigRun.warnings.isEmpty()) body.put("warnings", sigRun.warnings);
         }
-        if (relinkTypes) {
-            List<String> relinkWarnings = new ArrayList<>();
-            BSimSignatures.RelinkReport relink = relinkAppliedTypes(
-                    program, archiveMode, dryRun, relinkWarnings);
-            body.put("relink_types", true);
-            body.put("relink", relink.toMap());
-            List<Map<String, Object>> skippedRows = relink.skippedRows();
-            if (!skippedRows.isEmpty()) body.put("relink_skipped", skippedRows);
-            if (!relinkWarnings.isEmpty()) {
-                List<String> merged = new ArrayList<>();
-                if (body.get("warnings") instanceof List<?> raw) {
-                    for (Object item : raw) merged.add(String.valueOf(item));
-                }
-                merged.addAll(relinkWarnings);
-                body.put("warnings", merged);
+        return Response.ok(body);
+    }
+
+    private Response attachRelink(Response applied, Program program,
+                                  BSimTypeArchives.Mode archiveMode, boolean dryRun,
+                                  boolean relinkTypes) {
+        if (!relinkTypes || !(applied instanceof Response.Ok ok)) return applied;
+        if (!(ok.data() instanceof Map<?, ?> raw)) return applied;
+        Map<String, Object> body = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : raw.entrySet()) {
+            if (e.getKey() != null) body.put(String.valueOf(e.getKey()), e.getValue());
+        }
+        List<String> relinkWarnings = new ArrayList<>();
+        BSimSignatures.RelinkReport relink = relinkAppliedTypes(
+                program, archiveMode, dryRun, relinkWarnings);
+        body.put("relink_types", true);
+        body.put("relink", relink.toMap());
+        List<Map<String, Object>> skippedRows = relink.skippedRows();
+        if (!skippedRows.isEmpty()) body.put("relink_skipped", skippedRows);
+        if (!relinkWarnings.isEmpty()) {
+            List<String> merged = new ArrayList<>();
+            if (body.get("warnings") instanceof List<?> existing) {
+                for (Object item : existing) merged.add(String.valueOf(item));
             }
+            merged.addAll(relinkWarnings);
+            body.put("warnings", merged);
         }
         return Response.ok(body);
     }

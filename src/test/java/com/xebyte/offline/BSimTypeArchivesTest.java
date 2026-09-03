@@ -111,4 +111,16 @@ public class BSimTypeArchivesTest extends TestCase {
         assertEquals(BSimTypeArchives.VcAction.NONE, alreadyOut.beforeWrite());
         assertEquals(BSimTypeArchives.VcAction.CHECKIN, alreadyOut.afterWrite());
     }
+
+    public void testFailedCheckoutIsNotReportedAsThisPublication() throws Exception {
+        String src = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/com/xebyte/core/BSimTypeArchives.java"));
+        int start = src.indexOf("if (!vcOk(checkout))");
+        assertTrue("checkout-failure branch missing", start >= 0);
+        String branch = src.substring(start, src.indexOf("weCheckedOut = true", start));
+        assertTrue("failed checkout must not quote the old DomainFile version",
+                branch.contains("return PublishResult.NONE;"));
+        assertFalse(branch.contains("versionedResult"));
+        assertFalse(BSimTypeArchives.PublishResult.NONE.published());
+    }
 }

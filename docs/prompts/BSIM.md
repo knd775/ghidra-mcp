@@ -685,8 +685,9 @@ opens the archive named by that line under the current
 - if the archive has a type of the same name and
   `DataType.isEquivalent` says they match, the local type's source
   archive is set to the project (or file) archive;
-- if the archive lacks the type, or an analyst has edited the local
-  definition, it is left alone and listed under `relink_skipped`.
+- if the archive lacks the type, an analyst has edited the local
+  definition, or the association write fails, it is left alone and
+  listed under `relink_skipped`.
 
 Nothing else changes: not the function name, not the prototype, not
 the type's fields. A second run reports the same counts. `dry_run`
