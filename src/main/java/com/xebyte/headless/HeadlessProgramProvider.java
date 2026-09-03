@@ -1441,24 +1441,34 @@ public class HeadlessProgramProvider implements ProgramProvider {
         flushMasterTable(live);
         BufferMgr mgr = bufferMgrOf(live);
         Path raw = dest.toPath().resolveSibling("snapshot.bf");
-        LocalBufferFile buffers = new LocalBufferFile(raw.toFile(), live.getBufferSize());
-        boolean copied = false;
+        DBHandle copy = null;
         try {
-            mgr.saveAs(buffers, false, monitor);
-            copied = true;
-        } finally {
-            if (copied) {
-                buffers.close();
-            } else {
-                buffers.delete();
+            LocalBufferFile buffers = new LocalBufferFile(raw.toFile(), live.getBufferSize());
+            boolean copied = false;
+            try {
+                mgr.saveAs(buffers, false, monitor);
+                copied = true;
+            } finally {
+                if (copied) {
+                    buffers.close();
+                } else {
+                    buffers.delete();
+                }
             }
-        }
-        DBHandle copy = new DBHandle(raw.toFile());
-        try {
+            copy = new DBHandle(raw.toFile());
             PackedDatabase.packDatabase(copy, name, ProgramDB.CONTENT_TYPE, dest, monitor);
         } finally {
-            copy.close();
-            Files.deleteIfExists(raw);
+            if (copy != null) {
+                try {
+                    copy.close();
+                } catch (Exception ignored) {
+                }
+            }
+            try {
+                Files.deleteIfExists(raw);
+            } catch (IOException e) {
+                raw.toFile().deleteOnExit();
+            }
         }
     }
 

@@ -19,6 +19,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -67,6 +68,8 @@ public class SelfContainedExportGhidraTest {
     public void selfContainedExportSucceedsWithOpenProgramTransaction() throws Exception {
         int tx = program.startTransaction("analyst documentation");
         boolean closed = false;
+        Path dir = null;
+        File out = null;
         try {
             program.getListing().setComment(builder.addr("0x1000"), CodeUnit.PLATE_COMMENT,
                     "keep me");
@@ -75,8 +78,8 @@ public class SelfContainedExportGhidraTest {
 
             HeadlessProgramProvider provider = new HeadlessProgramProvider();
             provider.setCurrentProgram(program);
-            Path dir = Files.createTempDirectory("gzf-self-contained-ghidra");
-            File out = dir.resolve("out.gzf").toFile();
+            dir = Files.createTempDirectory("gzf-self-contained-ghidra");
+            out = dir.resolve("out.gzf").toFile();
             ExportResult res = provider.exportProgramToGzf(program.getName(), out, true);
 
             assertTrue("self-contained export must succeed with an open ProgramDB transaction: "
@@ -91,6 +94,16 @@ public class SelfContainedExportGhidraTest {
         } finally {
             if (!closed) {
                 program.endTransaction(tx, false);
+            }
+            if (out != null && out.exists() && !out.delete()) {
+                out.deleteOnExit();
+            }
+            if (dir != null) {
+                try {
+                    Files.deleteIfExists(dir);
+                } catch (IOException e) {
+                    dir.toFile().deleteOnExit();
+                }
             }
         }
     }
