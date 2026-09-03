@@ -30,6 +30,8 @@ import pathlib
 import pytest
 import yaml
 
+from tools.docker_image_changes import IMAGES
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
@@ -176,18 +178,36 @@ def test_ghcr_workflow_publishes_headless_bridge_builder_and_bsim():
     assert "docker/Dockerfile.builder" in text
     assert "docker/Dockerfile.bsim" in text
     assert "packages: write" in text
-    headless = jobs["headless"]
-    assert "pull_request" in str(headless.get("if", "")), (
-        "the headless image downloads Ghidra; it must not build on every PR"
+    on = _triggers(doc)
+    assert "pull_request" not in on, (
+        "ghcr.yml publishes images; it has no reason to run on pull requests. "
+        "A PR trigger shows up as skipped jobs on every matching PR."
     )
-    builder = jobs["builder"]
-    assert "pull_request" in str(builder.get("if", "")), (
-        "the builder image fetches ARM GNU tarballs; it must not build on every PR"
+    assert "pull_request" not in text, (
+        "leftover pull_request guards mean the workflow still thinks PRs exist"
     )
-    bsim = jobs["bsim"]
-    assert "pull_request" in str(bsim.get("if", "")), (
-        "the BSim image sparse-clones Ghidra for lshvector; it must not build on every PR"
-    )
+
+
+def test_ghcr_jobs_skip_when_image_inputs_did_not_change():
+    """A Java-only push must not download ARM tarballs or sparse-clone Ghidra."""
+    path = WORKFLOWS / "ghcr.yml"
+    doc = _load("ghcr.yml")
+    jobs = doc["jobs"]
+    text = path.read_text(encoding="utf-8")
+    assert "changes" in jobs
+    assert "python3 -m tools.docker_image_changes" in text
+    assert "--all" in text
+    assert "git diff --name-only" in text
+    for name in IMAGES:
+        job = jobs[name]
+        needs = job.get("needs")
+        if isinstance(needs, str):
+            needs = [needs]
+        assert "changes" in needs, f"{name} must wait for the change detector"
+        condition = str(job.get("if", ""))
+        assert f"needs.changes.outputs.{name}" in condition, (
+            f"{name} must skip when its COPY inputs did not change"
+        )
 
 
 def test_tests_workflow_smokes_bsim_postgres_image():

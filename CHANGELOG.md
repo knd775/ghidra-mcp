@@ -6,6 +6,15 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### GHCR images rebuild only when their inputs change
+
+Pushing to `main`/`dev`/`develop` used to build and push all four images
+every time. A Java-only commit still downloaded the ARM GNU tarballs and
+sparse-cloned Ghidra for lshvector. Each image now builds only when a
+file it `COPY`s changed, or when `ghcr.yml` itself changed. Version tags
+and manual dispatch still build every image. The workflow no longer runs
+on pull requests.
+
 ### BSim: project type archives are version-controlled on ingest
 
 `bsim_ingest` created `/refs/types/<name>-<version>.gdt` in the

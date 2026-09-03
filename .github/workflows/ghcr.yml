@@ -4,18 +4,6 @@ on:
   push:
     branches: [ main, dev, develop ]
     tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ main, dev, develop ]
-    paths:
-      - docker/Dockerfile.bridge
-      - python/**
-      - pyproject.toml
-      - uv.lock
-      - README.md
-      - LICENSE
-      - NOTICE
-      - CHANGELOG.md
-      - .github/workflows/ghcr.yml
   workflow_dispatch:
 
 # OSSF Scorecard Token-Permissions: default to read-only. Jobs that push
@@ -23,16 +11,65 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ghcr-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+# Do not cancel at the workflow level. A docs-only push would start this
+# workflow, skip every image job, and kill an in-progress builder that
+# is actually changing. Each image job has its own concurrency group.
 env:
   REGISTRY: ghcr.io
 
 jobs:
+  changes:
+    name: Detect which images would change
+    runs-on: ubuntu-latest
+    outputs:
+      bridge: ${{ steps.detect.outputs.bridge }}
+      headless: ${{ steps.detect.outputs.headless }}
+      builder: ${{ steps.detect.outputs.builder }}
+      bsim: ${{ steps.detect.outputs.bsim }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        fetch-depth: 0
+
+    - id: detect
+      name: Compare this push against each image's COPY inputs
+      run: |
+        set -euo pipefail
+        out() { python3 -m tools.docker_image_changes "$@" >> "$GITHUB_OUTPUT"; }
+
+        # Tags and a human dispatch always publish. A missing before SHA
+        # is a new branch (or a fetch we cannot do) and is fail-closed.
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+           || [ "${{ github.ref_type }}" = "tag" ]; then
+          out --all
+          exit 0
+        fi
+
+        before="${{ github.event.before }}"
+
+        if [ -z "${before}" ] \
+           || [ "${before}" = "0000000000000000000000000000000000000000" ]; then
+          out --all
+          exit 0
+        fi
+
+        if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+          if ! git fetch --depth=1 origin "${before}"; then
+            echo "could not fetch ${before}; building every image" >&2
+            out --all
+            exit 0
+          fi
+        fi
+
+        git diff --name-only "${before}" HEAD | out
+
   bridge:
     name: Bridge image
+    needs: [changes]
+    if: needs.changes.outputs.bridge == 'true'
+    concurrency:
+      group: ghcr-bridge-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,7 +85,6 @@ jobs:
     - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
 
     - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
-      if: github.event_name != 'pull_request'
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
@@ -60,7 +96,6 @@ jobs:
         images: ${{ env.IMAGE }}
         tags: |
           type=ref,event=branch
-          type=ref,event=pr
           type=sha
           type=semver,pattern={{version}}
           type=raw,value=latest,enable={{is_default_branch}}
@@ -69,7 +104,7 @@ jobs:
       with:
         context: .
         file: docker/Dockerfile.bridge
-        push: ${{ github.event_name != 'pull_request' }}
+        push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha,scope=bridge
@@ -77,9 +112,12 @@ jobs:
 
   headless:
     name: Headless image
-    # The Java image downloads Ghidra. Build it when we are going to push,
-    # not on every documentation PR.
-    if: github.event_name != 'pull_request'
+    # Downloads Ghidra. Skip pushes that do not touch a file this image COPYs.
+    needs: [changes]
+    if: needs.changes.outputs.headless == 'true'
+    concurrency:
+      group: ghcr-headless-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -123,8 +161,12 @@ jobs:
   builder:
     name: Builder image
     # Fetches pinned ARM GNU tarballs from developer.arm.com. Same rule as
-    # headless: build when we are going to push, not on documentation PRs.
-    if: github.event_name != 'pull_request'
+    # headless: build when the image would change.
+    needs: [changes]
+    if: needs.changes.outputs.builder == 'true'
+    concurrency:
+      group: ghcr-builder-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -169,8 +211,12 @@ jobs:
   bsim:
     name: BSim PostgreSQL image
     # Sparse-clones Ghidra for lshvector. Same rule as headless/builder:
-    # build when we are going to push, not on documentation PRs.
-    if: github.event_name != 'pull_request'
+    # build when the image would change.
+    needs: [changes]
+    if: needs.changes.outputs.bsim == 'true'
+    concurrency:
+      group: ghcr-bsim-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

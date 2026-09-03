@@ -62,7 +62,8 @@ docker build -t ghcr.io/knd775/ghidra-mcp-bsim:dev -f docker/Dockerfile.bsim .
 
 Or `docker compose -f docker/docker-compose.yml build`.
 
-Images are also published to GHCR on push to `main`/`dev`/`develop`:
+Images are published to GHCR when a push to `main`/`dev`/`develop` changes
+that image's `COPY` inputs, and on version tags or manual dispatch:
 
 ```text
 ghcr.io/<owner>/ghidra-mcp-headless
