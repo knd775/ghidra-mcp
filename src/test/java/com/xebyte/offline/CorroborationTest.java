@@ -329,7 +329,7 @@ public class CorroborationTest extends TestCase {
 
         Response r = svc.applyMatches("postgresql://ghidra-bsim:5432/embedded",
                 15.0, 0.15, false, false, false, 0.0, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", 45);
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", false, 45);
 
         assertFalse(r instanceof Response.Err);
         String json = r.toJson();
@@ -348,7 +348,7 @@ public class CorroborationTest extends TestCase {
         Response resolved = marginSvc.applyMatches(
                 "postgresql://ghidra-bsim:5432/embedded",
                 15.0, 0.15, false, false, true, 0.0, 10, "",
-                "", "", "", "", 8, false, "best", 4.0, false, 40.0, "", 45);
+                "", "", "", "", 8, false, "best", 4.0, false, 40.0, "", false, 45);
         String resolvedJson = resolved.toJson();
         assertTrue(resolvedJson, resolvedJson.contains("\"resolved_best\":1"));
         assertTrue(resolvedJson, resolvedJson.contains("\"would_rename\":[{"));
@@ -361,7 +361,7 @@ public class CorroborationTest extends TestCase {
         Response tied = tiedSvc.applyMatches(
                 "postgresql://ghidra-bsim:5432/embedded",
                 15.0, 0.15, false, false, true, 0.0, 10, "",
-                "", "", "", "", 8, false, "best", 0.0, false, 40.0, "", 45);
+                "", "", "", "", 8, false, "best", 0.0, false, 40.0, "", false, 45);
         String tiedJson = tied.toJson();
         assertTrue(tiedJson, tiedJson.contains("\"skipped_insufficient_margin\":1"));
         assertTrue(tiedJson, tiedJson.contains("\"would_rename\":[]"));

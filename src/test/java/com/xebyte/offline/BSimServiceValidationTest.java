@@ -557,7 +557,7 @@ public class BSimServiceValidationTest extends TestCase {
 
     public void testApplyRequiresMinConfidence() {
         Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, true, 0.7, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", WAIT);
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", false, WAIT);
         assertTrue(r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("min_confidence"));
@@ -586,7 +586,7 @@ public class BSimServiceValidationTest extends TestCase {
                 boolean.class, boolean.class, double.class, int.class, String.class,
                 String.class, String.class, String.class, String.class, int.class,
                 boolean.class, String.class, double.class, boolean.class, double.class,
-                String.class, int.class);
+                String.class, boolean.class, int.class);
         Param minConfidence = paramNamed(apply, "min_confidence");
         assertEquals("apply still has no default floor", Param.NO_DEFAULT, minConfidence.defaultValue());
         Param applySim = paramNamed(apply, "similarity_threshold");
@@ -603,6 +603,8 @@ public class BSimServiceValidationTest extends TestCase {
         assertEquals("rename_named is opt-in", "false", renameNamed.defaultValue());
         Param typeArchiveMode = paramNamed(apply, "type_archive_mode");
         assertEquals("", typeArchiveMode.defaultValue());
+        Param relinkTypes = paramNamed(apply, "relink_types");
+        assertEquals("relink is opt-in", "false", relinkTypes.defaultValue());
         Param sigFloor = paramNamed(apply, "min_signature_confidence");
         assertEquals("40.0", sigFloor.defaultValue());
     }
@@ -635,7 +637,7 @@ public class BSimServiceValidationTest extends TestCase {
 
     public void testInvalidTypeArchiveModeIsSynchronousAndSpecific() {
         Response r = svc.applyMatches("file:/tmp/db", 15.0, 0.8, true, false, true, 0.7, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "disassociate", WAIT);
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "disassociate", false, WAIT);
         assertTrue(r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("project, file, or local"));
@@ -645,7 +647,7 @@ public class BSimServiceValidationTest extends TestCase {
     public void testDryRunDefaultDoesNotNeedAProgramWhenConfidenceMissing() {
         // The confidence check must run before any write or query.
         Response r = svc.applyMatches("file:/tmp/db", null, 0.8, true, false, false, 0.7, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", WAIT);
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", false, WAIT);
         assertTrue(r instanceof Response.Err);
         assertTrue(commands.isEmpty());
     }

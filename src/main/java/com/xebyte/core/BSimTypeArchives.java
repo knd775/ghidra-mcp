@@ -48,6 +48,8 @@ public final class BSimTypeArchives {
     public static final String ARCHIVE_SUFFIX = ".gdt";
     public static final String MODE_ENV = "GHIDRA_MCP_TYPE_ARCHIVE_MODE";
     public static final String DIR_ENV = "GHIDRA_MCP_TYPE_ARCHIVE_DIR";
+    public static final String UNVERSIONED_NOTE =
+            "project is not server-bound; archive is local to this project";
 
     /** Test-only. {@code null} means read the real environment. Blank means unset. */
     static volatile String modeOverride;
@@ -70,6 +72,79 @@ public final class BSimTypeArchives {
         PROJECT,
         FILE,
         LOCAL
+    }
+
+    /** Version-control step around a project-archive write. */
+    public enum VcAction {
+        NONE,
+        ADD,
+        CHECKOUT,
+        CHECKIN
+    }
+
+    /**
+     * What {@link #publish} should do on a server-bound project so the
+     * archive is visible to every client, not just the headless copy.
+     */
+    public record VcPlan(VcAction beforeWrite, VcAction afterWrite, boolean expectVersioned,
+                         String note) {
+        public VcPlan {
+            beforeWrite = beforeWrite == null ? VcAction.NONE : beforeWrite;
+            afterWrite = afterWrite == null ? VcAction.NONE : afterWrite;
+            note = note == null ? "" : note;
+        }
+    }
+
+    /**
+     * Result of publishing a type archive. {@code path} is the repository
+     * or filesystem path; {@code versioned}/{@code version}/{@code note}
+     * are filled for {@link Mode#PROJECT} so ingest can say whether GUI
+     * clients will see the archive.
+     */
+    public record PublishResult(String path, boolean versioned, Integer version, String note) {
+        public static final PublishResult NONE = new PublishResult(null, false, null, null);
+
+        public PublishResult {
+            path = path == null ? "" : path;
+            note = note == null ? "" : note;
+        }
+
+        public static PublishResult of(String path) {
+            if (path == null || path.isBlank()) return NONE;
+            return new PublishResult(path, false, null, "");
+        }
+
+        public static PublishResult local(String path) {
+            if (path == null || path.isBlank()) {
+                return new PublishResult("", false, null, UNVERSIONED_NOTE);
+            }
+            return new PublishResult(path, false, null, UNVERSIONED_NOTE);
+        }
+
+        public static PublishResult versioned(String path, int version) {
+            return new PublishResult(path, true, version, "");
+        }
+
+        public boolean published() {
+            return path != null && !path.isBlank();
+        }
+    }
+
+    /**
+     * Checkout-then-checkin on a versioned archive; add after the first
+     * write. A local project is the whole story — say so, do not pretend
+     * the archive is shared.
+     */
+    public static VcPlan planVersionControl(boolean serverBound, boolean fileExists,
+                                            boolean versioned, boolean checkedOut) {
+        if (!serverBound) {
+            return new VcPlan(VcAction.NONE, VcAction.NONE, false, UNVERSIONED_NOTE);
+        }
+        if (!fileExists || !versioned) {
+            return new VcPlan(VcAction.NONE, VcAction.ADD, true, "");
+        }
+        return new VcPlan(checkedOut ? VcAction.NONE : VcAction.CHECKOUT,
+                VcAction.CHECKIN, true, "");
     }
 
     private BSimTypeArchives() {}
@@ -373,38 +448,38 @@ public final class BSimTypeArchives {
 
     /**
      * Publish the file {@code .gdt} into the configured destination.
-     * {@code project} writes/updates {@link #PROJECT_FOLDER}; {@code file}
-     * copies into {@link #DIR_ENV}; {@code local} writes nothing.
-     *
-     * @return repository or filesystem path recorded for the sidecar, or
-     *         {@code null} when nothing was published
+     * {@code project} writes/updates {@link #PROJECT_FOLDER} and, when the
+     * project is server-bound, adds or checks in the archive so every GUI
+     * client can see it. {@code file} copies into {@link #DIR_ENV}.
+     * {@code local} writes nothing.
      */
-    public static String publish(Program program, ProgramProvider provider, String archiveKey,
-                                 Path fileGdt, Mode mode, List<String> warnings) {
+    public static PublishResult publish(Program program, ProgramProvider provider,
+                                        String archiveKey, Path fileGdt, Mode mode,
+                                        List<String> warnings) {
         if (archiveKey == null || archiveKey.isBlank()) {
             if (warnings != null) {
                 warnings.add("type archive: empty archive key; not publishing");
             }
-            return null;
+            return PublishResult.NONE;
         }
         if (fileGdt == null || !Files.isRegularFile(fileGdt)) {
             if (warnings != null) {
                 warnings.add("type archive: file .gdt missing; not publishing " + archiveKey);
             }
-            return null;
+            return PublishResult.NONE;
         }
         try {
             return switch (mode) {
                 case PROJECT -> publishProject(program, provider, archiveKey, fileGdt, warnings);
-                case FILE -> publishFile(archiveKey, fileGdt, warnings);
-                case LOCAL -> null;
+                case FILE -> PublishResult.of(publishFile(archiveKey, fileGdt, warnings));
+                case LOCAL -> PublishResult.NONE;
             };
         } catch (Exception e) {
             if (warnings != null) {
                 warnings.add("type archive publish failed for " + archiveKey + ": "
                         + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
             }
-            return null;
+            return PublishResult.NONE;
         }
     }
 
@@ -425,21 +500,50 @@ public final class BSimTypeArchives {
         return dest.toString();
     }
 
-    static String publishProject(Program program, ProgramProvider provider, String archiveKey,
-                                 Path fileGdt, List<String> warnings) throws Exception {
+    static PublishResult publishProject(Program program, ProgramProvider provider,
+                                        String archiveKey, Path fileGdt,
+                                        List<String> warnings) throws Exception {
         DomainFolder folder = projectTypesFolder(program, provider);
         if (folder == null) {
             if (warnings != null) {
                 warnings.add("type archive: no project open; not publishing "
                         + archiveKey + " as a project archive");
             }
-            if (dirEnv() != null) return publishFile(archiveKey, fileGdt, warnings);
-            return null;
+            if (dirEnv() != null) {
+                return PublishResult.of(publishFile(archiveKey, fileGdt, warnings));
+            }
+            return PublishResult.NONE;
         }
         String fileName = archiveFileName(archiveKey);
         DomainFile existing = folder.getFile(fileName);
         if (existing == null && fileName.endsWith(ARCHIVE_SUFFIX)) {
             existing = folder.getFile(fileName.substring(0, fileName.length() - ARCHIVE_SUFFIX.length()));
+        }
+        Project project = projectOf(program, provider);
+        boolean serverBound = ProjectVersionControl.repositoryOf(project) != null;
+        boolean versioned = false;
+        boolean checkedOut = false;
+        if (existing != null) {
+            try {
+                versioned = existing.isVersioned();
+                checkedOut = existing.isCheckedOut();
+            } catch (Exception ignored) {
+            }
+        }
+        VcPlan plan = planVersionControl(serverBound, existing != null, versioned, checkedOut);
+        String comment = "BSim type archive " + archiveKey;
+        boolean weCheckedOut = false;
+        if (plan.beforeWrite() == VcAction.CHECKOUT) {
+            Map<String, Object> checkout = ProjectVersionControl.checkout(
+                    project, existing.getPathname(), true, TaskMonitor.DUMMY, false);
+            if (!vcOk(checkout)) {
+                if (warnings != null) {
+                    warnings.add("type archive: checkout failed for " + existing.getPathname()
+                            + ": " + vcError(checkout));
+                }
+                return versionedResult(existing, plan);
+            }
+            weCheckedOut = true;
         }
         DataTypeArchive archive;
         if (existing != null) {
@@ -448,6 +552,7 @@ public final class BSimTypeArchives {
                 if (opened instanceof ghidra.framework.model.DomainObject obj) {
                     obj.release(CONSUMER);
                 }
+                if (weCheckedOut) undoCheckoutQuietly(project, existing.getPathname());
                 throw new IOException("existing " + existing.getPathname()
                         + " is not a data type archive");
             }
@@ -455,14 +560,116 @@ public final class BSimTypeArchives {
         } else {
             archive = new DataTypeArchiveDB(folder, fileName, CONSUMER);
         }
+        DomainFile saved;
         try {
             copyFileArchiveInto(fileGdt, archive.getDataTypeManager());
-            archive.save("BSim type archive " + archiveKey, TaskMonitor.DUMMY);
-            DomainFile saved = archive.getDomainFile();
-            return saved != null ? saved.getPathname() : projectPath(archiveKey);
+            archive.save(comment, TaskMonitor.DUMMY);
+            saved = archive.getDomainFile();
+        } catch (Exception e) {
+            if (weCheckedOut && existing != null) {
+                undoCheckoutQuietly(project, existing.getPathname());
+            }
+            throw e;
         } finally {
             archive.release(CONSUMER);
         }
+        String path = saved != null ? saved.getPathname() : projectPath(archiveKey);
+        if (saved == null) {
+            return serverBound ? PublishResult.of(path) : PublishResult.local(path);
+        }
+        return finishVersionControl(project, saved, plan, comment, warnings);
+    }
+
+    static PublishResult finishVersionControl(Project project, DomainFile saved, VcPlan plan,
+                                              String comment, List<String> warnings) {
+        if (plan.afterWrite() == VcAction.ADD) {
+            Map<String, Object> added = ProjectVersionControl.add(
+                    project, saved.getPathname(), comment, false, TaskMonitor.DUMMY, false);
+            if (vcOk(added)) {
+                return PublishResult.versioned(saved.getPathname(), vcVersion(added, saved));
+            }
+            if (warnings != null) {
+                warnings.add("type archive: add to version control failed for "
+                        + saved.getPathname() + ": " + vcError(added));
+            }
+            return versionedResult(saved, plan);
+        }
+        if (plan.afterWrite() == VcAction.CHECKIN) {
+            Map<String, Object> checkin = ProjectVersionControl.checkin(
+                    project, saved.getPathname(), comment, false, TaskMonitor.DUMMY, false);
+            if (vcOk(checkin)) {
+                return PublishResult.versioned(saved.getPathname(), vcVersion(checkin, saved));
+            }
+            if (warnings != null) {
+                warnings.add("type archive: checkin failed for " + saved.getPathname()
+                        + ": " + vcError(checkin));
+            }
+            return versionedResult(saved, plan);
+        }
+        if (!plan.expectVersioned()) {
+            return PublishResult.local(saved.getPathname());
+        }
+        return versionedResult(saved, plan);
+    }
+
+    static PublishResult versionedResult(DomainFile file, VcPlan plan) {
+        if (file == null) {
+            return plan.expectVersioned() ? PublishResult.NONE : PublishResult.local("");
+        }
+        String path = file.getPathname();
+        boolean versioned = false;
+        Integer version = null;
+        try {
+            versioned = file.isVersioned();
+            version = file.getVersion();
+        } catch (Exception ignored) {
+        }
+        if (versioned && version != null) {
+            return PublishResult.versioned(path, version);
+        }
+        return plan.expectVersioned() ? PublishResult.of(path) : PublishResult.local(path);
+    }
+
+    static boolean vcOk(Map<String, Object> result) {
+        return result != null && Boolean.TRUE.equals(result.get("success"));
+    }
+
+    static String vcError(Map<String, Object> result) {
+        if (result == null) return "no result";
+        Object error = result.get("error");
+        if (error != null && !String.valueOf(error).isBlank()) return String.valueOf(error);
+        Object status = result.get("status");
+        return status == null ? "failed" : String.valueOf(status);
+    }
+
+    static int vcVersion(Map<String, Object> result, DomainFile file) {
+        if (result != null) {
+            Object v = result.get("version");
+            if (v instanceof Number n) return n.intValue();
+        }
+        try {
+            return file.getVersion();
+        } catch (Exception e) {
+            return 1;
+        }
+    }
+
+    static void undoCheckoutQuietly(Project project, String path) {
+        try {
+            ProjectVersionControl.undoCheckout(project, path, false, false);
+        } catch (Exception ignored) {
+        }
+    }
+
+    static Project projectOf(Program program, ProgramProvider provider) {
+        if (provider != null) {
+            try {
+                Project project = provider.getProject();
+                if (project != null) return project;
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
     }
 
     static void copyFileArchiveInto(Path fileGdt, DataTypeManager dest) throws IOException {

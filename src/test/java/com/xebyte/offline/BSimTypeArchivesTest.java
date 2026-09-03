@@ -82,4 +82,33 @@ public class BSimTypeArchivesTest extends TestCase {
             assertTrue(e.getMessage(), e.getMessage().contains("project, file, or local"));
         }
     }
+
+    public void testPlanVersionControlAddsThenChecksInOnAServerBoundProject() {
+        BSimTypeArchives.VcPlan local = BSimTypeArchives.planVersionControl(
+                false, true, false, false);
+        assertEquals(BSimTypeArchives.VcAction.NONE, local.beforeWrite());
+        assertEquals(BSimTypeArchives.VcAction.NONE, local.afterWrite());
+        assertFalse(local.expectVersioned());
+        assertEquals(BSimTypeArchives.UNVERSIONED_NOTE, local.note());
+
+        BSimTypeArchives.VcPlan created = BSimTypeArchives.planVersionControl(
+                true, false, false, false);
+        assertEquals(BSimTypeArchives.VcAction.NONE, created.beforeWrite());
+        assertEquals(BSimTypeArchives.VcAction.ADD, created.afterWrite());
+        assertTrue(created.expectVersioned());
+
+        BSimTypeArchives.VcPlan unversionedExisting = BSimTypeArchives.planVersionControl(
+                true, true, false, false);
+        assertEquals(BSimTypeArchives.VcAction.ADD, unversionedExisting.afterWrite());
+
+        BSimTypeArchives.VcPlan update = BSimTypeArchives.planVersionControl(
+                true, true, true, false);
+        assertEquals(BSimTypeArchives.VcAction.CHECKOUT, update.beforeWrite());
+        assertEquals(BSimTypeArchives.VcAction.CHECKIN, update.afterWrite());
+
+        BSimTypeArchives.VcPlan alreadyOut = BSimTypeArchives.planVersionControl(
+                true, true, true, true);
+        assertEquals(BSimTypeArchives.VcAction.NONE, alreadyOut.beforeWrite());
+        assertEquals(BSimTypeArchives.VcAction.CHECKIN, alreadyOut.afterWrite());
+    }
 }
