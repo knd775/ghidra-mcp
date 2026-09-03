@@ -22,6 +22,8 @@ import com.xebyte.core.ProgramProvider;
 import com.xebyte.core.ProjectLocks;
 import com.xebyte.core.ProjectVersionControl;
 import db.DBHandle;
+import db.buffers.BufferMgr;
+import db.buffers.LocalBufferFile;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.plugin.core.archive.HeadlessArchiveBridge;
 import ghidra.base.project.GhidraProject;
@@ -45,6 +47,7 @@ import ghidra.util.task.TaskMonitor;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -1407,20 +1410,95 @@ public class HeadlessProgramProvider implements ProgramProvider {
     /**
      * Capture the live in-memory database without starting or aborting a
      * Program transaction. {@link Program#saveToPackedFile} cannot lock while
-     * a transaction is open, so a {@link DomainObjectAdapterDB} is packed
-     * from its {@link DBHandle} instead.
+     * a transaction is open. {@link PackedDatabase#packDatabase} calls
+     * {@link DBHandle#saveAs}, which throws {@code Can't save during
+     * transaction} on the live handle — so an open analyst transaction is
+     * snapshotted through {@link BufferMgr#saveAs} onto a disposable copy.
      */
     private void snapshotPacked(Program program, File dest) throws Exception {
         if (program instanceof DomainObjectAdapterDB adapter) {
-            PackedDatabase.packDatabase(
-                    adapter.getDBHandle(),
-                    program.getName(),
-                    ProgramDB.CONTENT_TYPE,
-                    dest,
-                    monitor);
+            DBHandle live = adapter.getDBHandle();
+            if (live.isTransactionActive()) {
+                snapshotOpenTransaction(live, program.getName(), dest);
+            } else {
+                PackedDatabase.packDatabase(
+                        live, program.getName(), ProgramDB.CONTENT_TYPE, dest, monitor);
+            }
             return;
         }
         program.saveToPackedFile(dest, monitor);
+    }
+
+    /**
+     * Copy current buffer pages (including uncommitted dirty ones) without
+     * calling {@link DBHandle#saveAs} on the live handle, then pack the copy.
+     */
+    private void snapshotOpenTransaction(DBHandle live, String name, File dest)
+            throws Exception {
+        // DBHandle.saveAs flushes MasterTable inside a short transaction so
+        // new table roots (e.g. first comment record) are reachable. Do that
+        // flush on the already-open analyst transaction, then copy pages.
+        flushMasterTable(live);
+        BufferMgr mgr = bufferMgrOf(live);
+        Path raw = dest.toPath().resolveSibling("snapshot.bf");
+        LocalBufferFile buffers = new LocalBufferFile(raw.toFile(), live.getBufferSize());
+        boolean copied = false;
+        try {
+            mgr.saveAs(buffers, false, monitor);
+            copied = true;
+        } finally {
+            if (copied) {
+                buffers.close();
+            } else {
+                buffers.delete();
+            }
+        }
+        DBHandle copy = new DBHandle(raw.toFile());
+        try {
+            PackedDatabase.packDatabase(copy, name, ProgramDB.CONTENT_TYPE, dest, monitor);
+        } finally {
+            copy.close();
+            Files.deleteIfExists(raw);
+        }
+    }
+
+    /**
+     * Persist dirty table-root metadata so uncommitted rows remain reachable
+     * after {@link BufferMgr#saveAs}. Does not commit or abort the live
+     * transaction.
+     */
+    private static void flushMasterTable(DBHandle handle) throws IOException {
+        try {
+            Method getMaster = DBHandle.class.getDeclaredMethod("getMasterTable");
+            getMaster.setAccessible(true);
+            Object master = getMaster.invoke(handle);
+            Method flush = master.getClass().getDeclaredMethod("flush");
+            flush.setAccessible(true);
+            flush.invoke(master);
+        } catch (ReflectiveOperationException e) {
+            throw new IOException(
+                    "cannot snapshot program database during an open transaction", e);
+        }
+    }
+
+    /**
+     * {@link DBHandle#getBufferMgr()} is package-private. The live handle
+     * must not be passed to {@code saveAs}; {@link BufferMgr#saveAs} copies
+     * pages without starting or aborting a database transaction.
+     */
+    private static BufferMgr bufferMgrOf(DBHandle handle) throws IOException {
+        try {
+            Method method = DBHandle.class.getDeclaredMethod("getBufferMgr");
+            method.setAccessible(true);
+            Object mgr = method.invoke(handle);
+            if (!(mgr instanceof BufferMgr)) {
+                throw new IOException("program database has no buffer manager");
+            }
+            return (BufferMgr) mgr;
+        } catch (ReflectiveOperationException e) {
+            throw new IOException(
+                    "cannot snapshot program database during an open transaction", e);
+        }
     }
 
     /**
@@ -1442,7 +1520,16 @@ public class HeadlessProgramProvider implements ProgramProvider {
             } finally {
                 copy.endTransaction(tx, ok);
             }
-            copy.saveToPackedFile(output, monitor);
+            // Same write as DomainObjectAdapterDB.saveToPackedFile, without
+            // the ContentHandler lookup (unregistered in ProgramBuilder tests)
+            // or the DomainObject lock. Flatten already committed, so the
+            // copy handle is not transactional.
+            PackedDatabase.packDatabase(
+                    ((DomainObjectAdapterDB) copy).getDBHandle(),
+                    copy.getName(),
+                    ProgramDB.CONTENT_TYPE,
+                    output,
+                    monitor);
         } finally {
             if (copy != null) {
                 try {
