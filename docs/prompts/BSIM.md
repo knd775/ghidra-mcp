@@ -401,7 +401,14 @@ because a reference is never opened again afterwards:
   per DWARF-signed function under `/bsim-sig/`. Ingest also publishes the
   same types as a project archive at `/refs/types/<name>-<version>.gdt`
   (library + version, never opt flags: `littlefs-v2.9.3-gcc13-arm-O2.o`
-  and the `-Os` twin share `littlefs-v2.9.3`). `GHIDRA_MCP_TYPE_ARCHIVE_MODE`
+  and the `-Os` twin share `littlefs-v2.9.3`). On a server-bound project
+  ingest adds that DomainFile to version control (checkout / update /
+  checkin on a later ingest of the same library+version) so every GUI
+  client can see it; the response reports `type_archive_versioned` and
+  `type_archive_version`. A local project is the whole story and says
+  `type_archive_versioned: false` with a note. Leaving the archive
+  unversioned looks shared and is not: `server_repository_files("/refs/types")`
+  is empty and no one is told. `GHIDRA_MCP_TYPE_ARCHIVE_MODE`
   is `project` (default when a project is open), `file` (writes
   `GHIDRA_MCP_TYPE_ARCHIVE_DIR`, which must be client-resolvable, never a
   container-internal path), or `local` (do not publish; apply disassociates).
@@ -499,7 +506,7 @@ bsim_apply_matches(db_url, program, min_confidence=<required>,
                    min_feature_count=8, apply_unidentifiable=False,
                    resolve_conflicts="none", conflict_min_confidence_margin=5.0,
                    apply_signatures=False, min_signature_confidence=40.0,
-                   type_archive_mode="", wait_seconds=45)
+                   type_archive_mode="", relink_types=False, wait_seconds=45)
 ```
 
 `min_confidence` has no default. Pick one from query results on
@@ -510,7 +517,32 @@ overwrite an analyst's name. `rename_named` is ignored in that case.
 `skip_named=False` plus `rename_named=False` is how a named function
 receives a signature without a rename; a proposed name that disagrees
 is listed under `rename_suppressed` with both names. `rename_named=True`
-is the previous rename-anything behaviour. An `ambiguous` result is never
+is the previous rename-anything behaviour. Keep the default. The first
+live run with it suppressed 13 renames; every one was wrong (application
+code matched to an SDK callback by degenerate shape, and distinct opcode
+handlers collapsed onto the helper they all call). The two earlier
+renames that happened to be correct (`z_interpret` → `interpret`,
+`z_branch` → `branch`) are what the same mechanism does when it is
+lucky. `rename_suppressed` shows the disagreement and leaves the
+decision with the analyst.
+
+| Current name (correct) | BSim proposed | What it actually is |
+|---|---|---|
+| `host_tx_enqueue` | `sleep_until_callback` | serial TX ring buffer |
+| `phone_start_dial` | `sleep_until_callback` | phone mode entry |
+| `phone_start_challenge` | `sleep_until_callback` | phone mode entry |
+| `serial_cmd_dispatch` | `sleep_until_callback` | serial command handler |
+| `z_op_ret` | `ret` | opcode handler that *calls* `ret` |
+| `z_op_ret_popped` | `ret` | distinct opcode handler |
+| `z_op_rfalse` | `ret` | distinct opcode handler |
+| `z_op_rtrue` | `ret` | distinct opcode handler |
+| `z_ret` | `ret` | the wrapper, not the callee |
+| `z_op_extended` | `load_operand` | opcode handler |
+| `z_op_check_arg_count` | `branch` | opcode handler |
+| `z_op_encode_text` | `translate_from_zscii` | opcode handler |
+| `z_op_print_char` | `translate_from_zscii` | opcode handler |
+
+An `ambiguous` result is never
 applied, whatever the scores. Unidentifiable functions are skipped and
 counted unless `apply_unidentifiable=true`.
 
@@ -576,7 +608,7 @@ names, and each gate is counted:
 | reference ingested before signatures existed, or a `file:` H2 database | `skipped_no_signature_data` |
 | reference signature came from analysis, not DWARF (`has_dwarf=false`, built without `-g`) | `skipped_no_dwarf` |
 | the project archive and the filesystem `.gdt` are both gone | `skipped_no_archive` |
-| the function already carries this reference's marker | `skipped_already_applied` |
+| the function already carries this reference's marker | `skipped_already_applied` (use `relink_types=true` to attach those types to the current archive without re-applying the signature) |
 | reference `param_count` differs from what the target's decompiler infers (inlined callee, SDK version, `.constprop` variant) | `skipped_param_mismatch` (both counts named) |
 
 In every skipped case the name is still applied (unless `rename_named=false`
@@ -637,6 +669,35 @@ source is `IMPORTED`: that signature is Ghidra's own library archive
 skips those functions for the same reason. The 40 default is a starting
 point, not a calibration — in one real run every match above 40 was a large
 distinctive function and the band between 15 and 40 was mixed.
+
+#### Relink already-applied types (`relink_types=true`)
+
+A program typed before project archives existed — or whose types were
+disassociated by hand — still carries `[bsim-sig]`, so
+`apply_signatures=true` reports `skipped_already_applied` and imports
+nothing. The signatures stay correct; the Data Type Manager shows
+`lfs_t` and `i2c_inst_t` as the program's own types with no provenance.
+
+`relink_types=true` walks every function with a `[bsim-sig]` marker,
+opens the archive named by that line under the current
+`type_archive_mode`, and for each named type in the current signature:
+
+- if the archive has a type of the same name and
+  `DataType.isEquivalent` says they match, the local type's source
+  archive is set to the project (or file) archive;
+- if the archive lacks the type, an analyst has edited the local
+  definition, or the association write fails, it is left alone and
+  listed under `relink_skipped`.
+
+Nothing else changes: not the function name, not the prototype, not
+the type's fields. A second run reports the same counts. `dry_run`
+previews and writes nothing.
+
+```
+{"relink": {"relinked": 71, "skipped_not_in_archive": 3,
+            "skipped_differs": 1,
+            "archives": ["littlefs-v2.9.3", "frotz-2.54", "pico-sdk-2.1.0"]}}
+```
 
 ### `bsim_list_corpus`
 

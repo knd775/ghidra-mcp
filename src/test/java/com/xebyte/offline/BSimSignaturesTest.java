@@ -73,6 +73,7 @@ public class BSimSignaturesTest extends TestCase {
         BSimTestEnv.setAllowlist("postgresql://ghidra-bsim:5432/bsim");
         BSimTestEnv.setPassword("secret");
         BSimTestEnv.setUser("bsim");
+        BSimTestEnv.setTypeArchiveMode("project");
     }
 
     @Override
@@ -110,6 +111,48 @@ public class BSimSignaturesTest extends TestCase {
                 BSimSignatures.decide(64.0, 40.0, ARM, ARM, dwarf, true, false, null));
         assertEquals(Decision.APPLY,
                 BSimSignatures.decide(40.0, 40.0, ARM, ARM, dwarf, true, false, 2));
+    }
+
+    public void testDecideRelinkRequiresStructuralIdentity() {
+        assertEquals(BSimSignatures.RelinkDecision.SKIP_NOT_IN_ARCHIVE,
+                BSimSignatures.decideRelink(false, true));
+        assertEquals(BSimSignatures.RelinkDecision.SKIP_NOT_IN_ARCHIVE,
+                BSimSignatures.decideRelink(false, false));
+        assertEquals(BSimSignatures.RelinkDecision.SKIP_DIFFERS,
+                BSimSignatures.decideRelink(true, false));
+        assertEquals(BSimSignatures.RelinkDecision.RELINK,
+                BSimSignatures.decideRelink(true, true));
+        assertEquals("not_in_archive",
+                BSimSignatures.relinkReason(BSimSignatures.RelinkDecision.SKIP_NOT_IN_ARCHIVE));
+        assertEquals("differs",
+                BSimSignatures.relinkReason(BSimSignatures.RelinkDecision.SKIP_DIFFERS));
+        assertEquals("failed",
+                BSimSignatures.relinkReason(BSimSignatures.RelinkDecision.SKIP_FAILED));
+    }
+
+    public void testRelinkReportCountsFailedAssociationSeparately() {
+        BSimSignatures.RelinkReport report = new BSimSignatures.RelinkReport();
+        report.add(BSimSignatures.RelinkDecision.SKIP_FAILED, "lfs_t", "littlefs-v2.9.3");
+        Map<String, Object> counts = report.toMap();
+        assertEquals(0, counts.get("relinked"));
+        assertEquals(0, counts.get("skipped_not_in_archive"));
+        assertEquals(0, counts.get("skipped_differs"));
+        assertEquals(1, counts.get("failed"));
+        assertEquals("failed", report.skippedRows().get(0).get("reason"));
+        assertEquals("lfs_t", report.skippedRows().get(0).get("type"));
+    }
+
+    public void testProvenanceExecutableReadsTheLastBsimSigLine() {
+        assertEquals("", BSimSignatures.provenanceExecutable(null));
+        assertEquals("", BSimSignatures.provenanceExecutable("Hand plate."));
+        assertEquals("littlefs-v2.9.3-gcc13-arm-O2.o",
+                BSimSignatures.provenanceExecutable(
+                        BSimSignatures.provenanceLine("littlefs-v2.9.3-gcc13-arm-O2.o", 101.0)));
+        assertEquals("pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico.o",
+                BSimSignatures.provenanceExecutable(
+                        "Mounts.\n[bsim-sig] from old.o conf=40.0\n"
+                                + BSimSignatures.provenanceLine(
+                                "pico-sdk-hardware_i2c-2.1.0-gcc13-arm-O2-pico.o", 64.0)));
     }
 
     public void testSameArchIsCaseInsensitiveAndUnknownIsDifferent() {
@@ -212,6 +255,8 @@ public class BSimSignaturesTest extends TestCase {
                 tmp.resolve("exported.gdt").toString(), stored.signature().gdtPath());
         assertEquals(List.of("littlefs"), support.published);
         assertTrue(json, json.contains("\"type_archive\":\"littlefs\""));
+        assertTrue(json, json.contains("\"type_archive_versioned\":true"));
+        assertTrue(json, json.contains("\"type_archive_version\":1"));
     }
 
     public void testIngestPublishesLibraryVersionArchiveKey() throws Exception {
@@ -225,6 +270,39 @@ public class BSimSignaturesTest extends TestCase {
         assertFalse("ingest failed: " + r.toJson(), r instanceof Response.Err);
         assertEquals(List.of("littlefs-v2.9.3"), support.published);
         assertTrue(r.toJson(), r.toJson().contains("\"type_archive\":\"littlefs-v2.9.3\""));
+        assertTrue(r.toJson(), r.toJson().contains("\"type_archive_version\":1"));
+    }
+
+    public void testSecondIngestOfSameArchiveReportsANewVersion() throws Exception {
+        FunctionRow row = new FunctionRow(REF_MD5, "littlefs-v2.9.3-gcc13-arm-O2.o", "lfs_mount",
+                List.of("0x3ff"), List.of(), List.of(), false,
+                new Signature(PROTOTYPE, "__stdcall", 2, true, ""));
+        FakeSupport support = new FakeSupport(tmp.resolve("exported-v2.gdt"));
+        BSimService svc = ingestService(row, support);
+        svc.ingest("postgresql://ghidra-bsim:5432/bsim",
+                "littlefs-v2.9.3-gcc13-arm-O2.o", "", true, false, "", 45);
+        Response r = svc.ingest("postgresql://ghidra-bsim:5432/bsim",
+                "littlefs-v2.9.3-gcc13-arm-O2.o", "", true, false, "", 45);
+        assertFalse("second ingest failed: " + r.toJson(), r instanceof Response.Err);
+        assertEquals(List.of("littlefs-v2.9.3", "littlefs-v2.9.3"), support.published);
+        assertTrue(r.toJson(), r.toJson().contains("\"type_archive_version\":2"));
+        assertTrue(r.toJson(), r.toJson().contains("\"type_archive_versioned\":true"));
+    }
+
+    public void testIngestOnLocalProjectReportsArchiveUnversioned() throws Exception {
+        FunctionRow row = new FunctionRow(REF_MD5, "littlefs.o", "lfs_mount",
+                List.of("0x3ff"), List.of(), List.of(), false,
+                new Signature(PROTOTYPE, "__stdcall", 2, true, ""));
+        FakeSupport support = new FakeSupport(tmp.resolve("exported-local.gdt"));
+        support.publishVersioned = false;
+        BSimService svc = ingestService(row, support);
+        Response r = svc.ingest("postgresql://ghidra-bsim:5432/bsim", "littlefs.o",
+                "", true, false, "", 45);
+        assertFalse("ingest failed: " + r.toJson(), r instanceof Response.Err);
+        String json = r.toJson();
+        assertTrue(json, json.contains("\"type_archive_versioned\":false"));
+        assertTrue(json, json.contains(com.xebyte.core.BSimTypeArchives.UNVERSIONED_NOTE));
+        assertFalse(json, json.contains("\"type_archive_version\":"));
     }
 
     public void testIngestWithoutDwarfWarnsAndMarksRows() throws Exception {
@@ -652,6 +730,113 @@ public class BSimSignaturesTest extends TestCase {
         assertTrue(applier.applied.isEmpty());
     }
 
+    public void testRelinkTypesDefaultOffOmitsTheBlock() throws Exception {
+        seedReference(true, 2);
+        StubFunction named = alreadySigned("lfs_mount", "littlefs-v2.9.3-gcc13-arm-O2.o");
+        FakeApplier applier = new FakeApplier();
+        applier.alreadyApplied = true;
+        FakeSupport support = new FakeSupport(applier);
+        support.signatureTypes = List.of("lfs_t");
+        BSimService svc = applyService(support,
+                namedMatchJson("lfs_mount", "0x1000", "lfs_mount", 101.0), named);
+        String json = apply(svc, true, false, 15.0, 40.0, false, false).toJson();
+        assertTrue(json, json.contains("\"skipped_already_applied\":1"));
+        assertFalse(json, json.contains("\"relink\""));
+        assertFalse(json, json.contains("relink_skipped"));
+        assertTrue(support.relinkWrites.isEmpty());
+    }
+
+    public void testRelinkTypesOnAlreadyAppliedDoesNotReapply() throws Exception {
+        seedReference(true, 2);
+        StubFunction named = alreadySigned("lfs_mount", "littlefs-v2.9.3-gcc13-arm-O2.o");
+        FakeApplier applier = new FakeApplier();
+        applier.alreadyApplied = true;
+        FakeSupport support = new FakeSupport(applier);
+        support.signatureTypes = List.of("lfs_t", "i2c_inst_t");
+        BSimService svc = applyService(support,
+                namedMatchJson("lfs_mount", "0x1000", "lfs_mount", 101.0), named);
+        String json = apply(svc, true, false, 15.0, 40.0, false, true).toJson();
+        assertTrue(json, json.contains("\"skipped_already_applied\":1"));
+        assertTrue(json, json.contains("\"applied\":0"));
+        assertTrue(json, json.contains("\"types_imported\":0"));
+        assertTrue(json, json.contains("\"relinked\":2"));
+        assertTrue(json, json.contains("\"skipped_not_in_archive\":0"));
+        assertTrue(json, json.contains("\"skipped_differs\":0"));
+        assertTrue(json, json.contains("\"littlefs-v2.9.3\""));
+        assertTrue(applier.applied.isEmpty());
+        assertEquals(List.of("lfs_t", "i2c_inst_t"), support.relinkWrites);
+        assertEquals("lfs_mount", named.name);
+    }
+
+    public void testRelinkSkipsMissingAndDifferingTypes() throws Exception {
+        seedReference(true, 2);
+        StubFunction named = alreadySigned("lfs_mount", "littlefs-v2.9.3-gcc13-arm-O2.o");
+        FakeApplier applier = new FakeApplier();
+        applier.alreadyApplied = true;
+        FakeSupport support = new FakeSupport(applier);
+        support.signatureTypes = List.of("lfs_t", "missing_t", "edited_t");
+        support.relinkByName.put("missing_t", BSimSignatures.RelinkDecision.SKIP_NOT_IN_ARCHIVE);
+        support.relinkByName.put("edited_t", BSimSignatures.RelinkDecision.SKIP_DIFFERS);
+        BSimService svc = applyService(support,
+                namedMatchJson("lfs_mount", "0x1000", "lfs_mount", 101.0), named);
+        String json = apply(svc, true, false, 15.0, 40.0, false, true).toJson();
+        assertTrue(json, json.contains("\"relinked\":1"));
+        assertTrue(json, json.contains("\"skipped_not_in_archive\":1"));
+        assertTrue(json, json.contains("\"skipped_differs\":1"));
+        assertTrue(json, json.contains("\"relink_skipped\""));
+        assertTrue(json, json.contains("\"reason\":\"not_in_archive\""));
+        assertTrue(json, json.contains("\"reason\":\"differs\""));
+        assertEquals(List.of("lfs_t"), support.relinkWrites);
+    }
+
+    public void testRelinkReportsFailedAssociationWithoutCountingAWrite() throws Exception {
+        seedReference(true, 2);
+        StubFunction named = alreadySigned("lfs_mount", "littlefs-v2.9.3-gcc13-arm-O2.o");
+        FakeApplier applier = new FakeApplier();
+        applier.alreadyApplied = true;
+        FakeSupport support = new FakeSupport(applier);
+        support.signatureTypes = List.of("broken_t");
+        support.relinkByName.put("broken_t", BSimSignatures.RelinkDecision.SKIP_FAILED);
+        BSimService svc = applyService(support,
+                namedMatchJson("lfs_mount", "0x1000", "lfs_mount", 101.0), named);
+        String json = apply(svc, true, false, 15.0, 40.0, false, true).toJson();
+        assertTrue(json, json.contains("\"relinked\":0"));
+        assertTrue(json, json.contains("\"failed\":1"));
+        assertTrue(json, json.contains("\"reason\":\"failed\""));
+        assertTrue(support.relinkWrites.isEmpty());
+    }
+
+    public void testRelinkIsAttachedAfterSignatureRunCloses() throws Exception {
+        String src = Files.readString(Path.of("src/main/java/com/xebyte/core/BSimService.java"));
+        int tryStart = src.indexOf("try (SignatureRun sigRun = applySignatures");
+        int attach = src.indexOf("return attachRelink(", tryStart);
+        assertTrue("SignatureRun try-with-resources missing", tryStart >= 0);
+        assertTrue("attachRelink must follow SignatureRun.close()", attach > tryStart);
+        String openRun = src.substring(tryStart, attach);
+        assertFalse("relink must not run while SignatureRun is still open",
+                openRun.contains("relinkAppliedTypes") || openRun.contains("attachRelink"));
+    }
+
+    public void testRelinkIsIdempotentAndDryRunWritesNothing() throws Exception {
+        seedReference(true, 2);
+        StubFunction named = alreadySigned("lfs_mount", "littlefs-v2.9.3-gcc13-arm-O2.o");
+        FakeApplier applier = new FakeApplier();
+        applier.alreadyApplied = true;
+        FakeSupport support = new FakeSupport(applier);
+        support.signatureTypes = List.of("lfs_t", "lfs_config");
+        BSimService svc = applyService(support,
+                namedMatchJson("lfs_mount", "0x1000", "lfs_mount", 101.0), named);
+        String dry = apply(svc, true, true, 15.0, 40.0, false, true).toJson();
+        assertTrue(dry, dry.contains("\"relinked\":2"));
+        assertTrue("dry run must not write associations", support.relinkWrites.isEmpty());
+        String first = apply(svc, true, false, 15.0, 40.0, false, true).toJson();
+        String second = apply(svc, true, false, 15.0, 40.0, false, true).toJson();
+        assertTrue(first, first.contains("\"relinked\":2"));
+        assertTrue(second, second.contains("\"relinked\":2"));
+        assertTrue(second, second.contains("\"skipped_differs\":0"));
+        assertEquals(List.of("lfs_t", "lfs_config", "lfs_t", "lfs_config"), support.relinkWrites);
+    }
+
     public void testSignatureRunCachesOpenedArchiveByKey() throws Exception {
         store.upsert(REF_MD5, "littlefs.o", List.of(
                 new FunctionRow(REF_MD5, "littlefs.o", "lfs_mount",
@@ -756,7 +941,7 @@ public class BSimSignaturesTest extends TestCase {
         FakeApplier applier = new FakeApplier();
         BSimService svc = applyService(applier, matchJson(101.0, ARM));
         Response r = svc.applyMatches("file:" + tmp.resolve("h2db"), 15.0, 0.15, true, false, false,
-                0.0, 10, "", "", "", "", "", 8, false, "none", 5.0, true, 40.0, "", 45);
+                0.0, 10, "", "", "", "", "", 8, false, "none", 5.0, true, 40.0, "", false, 45);
         assertFalse(r.toJson(), r instanceof Response.Err);
         String json = r.toJson();
         assertTrue(json, json.contains("\"skipped_no_signature_data\":1"));
@@ -825,18 +1010,33 @@ public class BSimSignaturesTest extends TestCase {
     private static Response apply(BSimService svc, boolean signatures, boolean dryRun,
                                   double minConfidence, double minSignatureConfidence,
                                   boolean skipNamed) {
+        return apply(svc, signatures, dryRun, minConfidence, minSignatureConfidence, skipNamed,
+                false);
+    }
+
+    private static Response apply(BSimService svc, boolean signatures, boolean dryRun,
+                                  double minConfidence, double minSignatureConfidence,
+                                  boolean skipNamed, boolean relinkTypes) {
         return svc.applyMatches("postgresql://ghidra-bsim:5432/bsim", minConfidence, 0.15,
                 skipNamed, false, dryRun, 0.0, 10, "", "", "", "", "", 8, false, "none", 5.0,
-                signatures, minSignatureConfidence, "", 45);
+                signatures, minSignatureConfidence, "", relinkTypes, 45);
     }
 
     private static Response applyNamed(BSimService svc, boolean signatures, boolean dryRun,
                                        boolean skipNamed, boolean renameNamed,
                                        String resolveConflicts, double margin,
                                        String typeArchiveMode) {
+        return applyNamed(svc, signatures, dryRun, skipNamed, renameNamed, resolveConflicts,
+                margin, typeArchiveMode, false);
+    }
+
+    private static Response applyNamed(BSimService svc, boolean signatures, boolean dryRun,
+                                       boolean skipNamed, boolean renameNamed,
+                                       String resolveConflicts, double margin,
+                                       String typeArchiveMode, boolean relinkTypes) {
         return svc.applyMatches("postgresql://ghidra-bsim:5432/bsim", 15.0, 0.15,
                 skipNamed, renameNamed, dryRun, 0.0, 10, "", "", "", "", "", 8, false,
-                resolveConflicts, margin, signatures, 40.0, typeArchiveMode, 45);
+                resolveConflicts, margin, signatures, 40.0, typeArchiveMode, relinkTypes, 45);
     }
 
     private BSimService ingestService(FunctionRow row, FakeSupport support) {
@@ -935,17 +1135,43 @@ public class BSimSignaturesTest extends TestCase {
         }
 
         boolean projectArchiveMissing;
+        boolean publishVersioned = true;
         final List<String> published = new ArrayList<>();
+        final Map<String, Integer> publishedVersions = new java.util.LinkedHashMap<>();
         final List<String> openedKeys = new ArrayList<>();
         final List<String> openedGdts = new ArrayList<>();
+        List<String> signatureTypes = List.of();
+        final Map<String, BSimSignatures.RelinkDecision> relinkByName =
+                new java.util.LinkedHashMap<>();
+        final List<String> relinkWrites = new ArrayList<>();
 
         @Override
-        public String publishTypeArchive(Program program, ProgramProvider provider,
-                                         String archiveKey, Path fileGdt,
-                                         com.xebyte.core.BSimTypeArchives.Mode mode,
-                                         List<String> warnings) {
+        public com.xebyte.core.BSimTypeArchives.PublishResult publishTypeArchive(
+                Program program, ProgramProvider provider, String archiveKey, Path fileGdt,
+                com.xebyte.core.BSimTypeArchives.Mode mode, List<String> warnings) {
             published.add(archiveKey);
-            return "/refs/types/" + archiveKey + ".gdt";
+            String path = "/refs/types/" + archiveKey + ".gdt";
+            if (!publishVersioned) {
+                return com.xebyte.core.BSimTypeArchives.PublishResult.local(path);
+            }
+            int version = publishedVersions.merge(archiveKey, 1, Integer::sum);
+            return com.xebyte.core.BSimTypeArchives.PublishResult.versioned(path, version);
+        }
+
+        @Override
+        public List<String> namedSignatureTypes(Function function) {
+            return signatureTypes;
+        }
+
+        @Override
+        public BSimSignatures.RelinkDecision relinkNamedType(Program program, String typeName,
+                ghidra.program.model.data.DataTypeManager archive, boolean dryRun) {
+            BSimSignatures.RelinkDecision decision = relinkByName.getOrDefault(typeName,
+                    BSimSignatures.RelinkDecision.RELINK);
+            if (!dryRun && decision == BSimSignatures.RelinkDecision.RELINK) {
+                relinkWrites.add(typeName);
+            }
+            return decision;
         }
 
         @Override
@@ -1034,6 +1260,13 @@ public class BSimSignaturesTest extends TestCase {
             this.name = name;
             this.address = address;
         }
+    }
+
+    private static StubFunction alreadySigned(String name, String executable) {
+        StubFunction fn = new StubFunction(name, "0x1000");
+        fn.comment = BSimSignatures.provenanceLine(executable, 101.0);
+        fn.tags.add(BSimSignatures.FUNCTION_TAG);
+        return fn;
     }
 
     private static StubFunction bsimHolder(String name, String address, double confidence) {

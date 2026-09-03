@@ -17,10 +17,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalDouble;
+import java.util.Set;
 
 /**
  * MCP wrappers around Ghidra's {@code bsim} CLI.
@@ -262,8 +264,11 @@ public class BSimService {
                     + "each function's typed prototype (DWARF only: has_dwarf) and exports the "
                     + "program's data types to <artifact>.gdt beside the artifact and to a project "
                     + "archive at /refs/types/<name>-<version>.gdt (keyed by library and version, "
-                    + "not build flags), so bsim_apply_matches(apply_signatures=true) never opens "
-                    + "the reference and GUI clients resolve types from the repository. Refuses a "
+                    + "not build flags). On a server-bound project the archive is added to version "
+                    + "control (checkout/update/checkin on later ingests) so GUI clients see it; "
+                    + "the response reports type_archive_versioned and type_archive_version. "
+                    + "A local project says type_archive_versioned=false. "
+                    + "bsim_apply_matches(apply_signatures=true) never opens the reference. Refuses a "
                     + "source with no functions, and a pointer-size mismatch against a sized "
                     + "template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed "
                     + "pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but "
@@ -554,7 +559,12 @@ public class BSimService {
                     + "reference parameter count must equal what the target's decompiler infers; "
                     + "anything else gets the name only and is counted in the signatures block. "
                     + "Every applied name carries a [bsim] plate marker and a bsim function tag; "
-                    + "every applied signature carries [bsim-sig]. dry_run previews and writes nothing. "
+                    + "every applied signature carries [bsim-sig]. "
+                    + "relink_types=true re-associates types on functions that already carry "
+                    + "[bsim-sig] with the current type_archive_mode, without re-applying the "
+                    + "signature: a structurally identical archive type replaces the local "
+                    + "association; a missing or edited type is reported under relink_skipped. "
+                    + "dry_run previews and writes nothing. "
                     + "Runs a full-program BSim query first, which takes minutes: expect a job_id, "
                     + "then poll bsim_job_status.",
             category = "bsim")
@@ -572,7 +582,9 @@ public class BSimService {
             @Param(value = "rename_named", source = ParamSource.BODY, defaultValue = "false",
                     description = "When skip_named=false, may an already-named function still be "
                             + "renamed? Default false: named functions keep their names and can "
-                            + "still receive signatures. Has no effect when skip_named=true.")
+                            + "still receive signatures. Has no effect when skip_named=true. "
+                            + "Keep the default — the first live run suppressed 13 renames and "
+                            + "all 13 were wrong.")
                     boolean renameNamed,
             @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "true",
                     description = "Preview without renaming. Default true. Honored in this method; "
@@ -633,6 +645,13 @@ public class BSimService {
                             + "then project when a project is open, else file if "
                             + "GHIDRA_MCP_TYPE_ARCHIVE_DIR is set, else local.")
                     String typeArchiveMode,
+            @Param(value = "relink_types", source = ParamSource.BODY, defaultValue = "false",
+                    description = "Re-associate types on functions that already carry [bsim-sig] "
+                            + "with the current type_archive_mode, without re-applying the "
+                            + "signature or changing a definition. Default false. A type that "
+                            + "exists in the archive and is structurally identical is relinked; "
+                            + "otherwise it is left local and listed under relink_skipped.")
+                    boolean relinkTypes,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         if (minConfidence == null) {
@@ -680,6 +699,7 @@ public class BSimService {
             request.put("apply_signatures", applySignatures);
             request.put("rename_named", renameNamed);
             request.put("type_archive_mode", archiveMode.name().toLowerCase(Locale.ROOT));
+            request.put("relink_types", relinkTypes);
             if (applySignatures) request.put("min_signature_confidence", minSignatureConfidence);
             BSimJobs.Job job = jobs.submit("bsim_apply_matches", request,
                     () -> runApplyMatches(url, program, minConfidence, minSimilarity,
@@ -687,7 +707,7 @@ public class BSimService {
                             arch, executable, compiler, excludeMd5,
                             minFeatureCount, applyUnidentifiable, conflictMode,
                             conflictMinConfidenceMargin, applySignatures,
-                            minSignatureConfidence, archiveMode));
+                            minSignatureConfidence, archiveMode, relinkTypes));
             return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -705,7 +725,7 @@ public class BSimService {
                                      boolean applyUnidentifiable, String resolveConflicts,
                                      double conflictMinConfidenceMargin,
                                      boolean applySignatures, double minSignatureConfidence,
-                                     BSimTypeArchives.Mode archiveMode)
+                                     BSimTypeArchives.Mode archiveMode, boolean relinkTypes)
             throws Exception {
         QuerySpec spec = new QuerySpec("", querySimilarity, 0.0, maxMatches,
                 arch, executable, compiler, excludeMd5, minFeatureCount, 0);
@@ -714,13 +734,18 @@ public class BSimService {
         Map<String, Object> payload = JsonHelper.parseJson(queried.toJson());
         List<BSimMatches.FunctionResult> results =
                 BSimMatches.parseQueryPayload(payload, program.getExecutableMD5());
+        Response applied;
         try (SignatureRun sigRun = applySignatures
                 ? new SignatureRun(url, program, dryRun, minSignatureConfidence, archiveMode)
                 : null) {
-            return applyResults(program, results, minConfidence, minSimilarity, skipNamed,
+            applied = applyResults(program, results, minConfidence, minSimilarity, skipNamed,
                     renameNamed, dryRun, applyUnidentifiable, resolveConflicts,
                     conflictMinConfidenceMargin, sigRun);
         }
+        // After SignatureRun.close(): FILE/LOCAL disassociation would
+        // otherwise strip associations relink just wrote, while the
+        // response still counted them as relinked.
+        return attachRelink(applied, program, archiveMode, dryRun, relinkTypes);
     }
 
     private Response applyResults(Program program, List<BSimMatches.FunctionResult> results,
@@ -964,6 +989,33 @@ public class BSimService {
             body.put("signatures", sigRun.summary());
             body.put("signature_details", sigRun.details);
             if (!sigRun.warnings.isEmpty()) body.put("warnings", sigRun.warnings);
+        }
+        return Response.ok(body);
+    }
+
+    private Response attachRelink(Response applied, Program program,
+                                  BSimTypeArchives.Mode archiveMode, boolean dryRun,
+                                  boolean relinkTypes) {
+        if (!relinkTypes || !(applied instanceof Response.Ok ok)) return applied;
+        if (!(ok.data() instanceof Map<?, ?> raw)) return applied;
+        Map<String, Object> body = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : raw.entrySet()) {
+            if (e.getKey() != null) body.put(String.valueOf(e.getKey()), e.getValue());
+        }
+        List<String> relinkWarnings = new ArrayList<>();
+        BSimSignatures.RelinkReport relink = relinkAppliedTypes(
+                program, archiveMode, dryRun, relinkWarnings);
+        body.put("relink_types", true);
+        body.put("relink", relink.toMap());
+        List<Map<String, Object>> skippedRows = relink.skippedRows();
+        if (!skippedRows.isEmpty()) body.put("relink_skipped", skippedRows);
+        if (!relinkWarnings.isEmpty()) {
+            List<String> merged = new ArrayList<>();
+            if (body.get("warnings") instanceof List<?> existing) {
+                for (Object item : existing) merged.add(String.valueOf(item));
+            }
+            merged.addAll(relinkWarnings);
+            body.put("warnings", merged);
         }
         return Response.ok(body);
     }
@@ -1525,6 +1577,123 @@ public class BSimService {
                 applier.close();
             } catch (Exception ignored) {
             }
+        }
+    }
+
+    /**
+     * Functions that already carry {@code [bsim-sig]} keep their signatures;
+     * this only points matching local types at the current archive.
+     */
+    private BSimSignatures.RelinkReport relinkAppliedTypes(Program program,
+                                                           BSimTypeArchives.Mode archiveMode,
+                                                           boolean dryRun,
+                                                           List<String> warnings) {
+        BSimSignatures.RelinkReport report = new BSimSignatures.RelinkReport();
+        if (program == null) return report;
+        BSimTypeArchives.Mode mode = archiveMode == null ? BSimTypeArchives.Mode.LOCAL : archiveMode;
+        Set<String> seen = new LinkedHashSet<>();
+        Map<String, BSimTypeArchives.OpenedArchive> opened = new LinkedHashMap<>();
+        try {
+            FunctionManager fm = program.getFunctionManager();
+            if (fm == null) return report;
+            Iterable<Function> functions;
+            try {
+                functions = fm.getFunctions(true);
+            } catch (Exception e) {
+                return report;
+            }
+            if (functions == null) return report;
+            List<Runnable> writes = new ArrayList<>();
+            for (Function function : functions) {
+                if (function == null) continue;
+                String comment;
+                try {
+                    comment = function.getComment();
+                } catch (Exception e) {
+                    continue;
+                }
+                if (!BSimSignatures.hasProvenance(comment, null)) continue;
+                String executable = BSimSignatures.provenanceExecutable(comment);
+                String fromExe = BSimTypeArchives.archiveKeyFromExecutable(executable);
+                final String archiveKey = fromExe.isEmpty() ? executable : fromExe;
+                BSimTypeArchives.OpenedArchive archive = archiveForRelink(
+                        program, archiveKey, mode, opened, warnings);
+                if (archive != null) report.addArchive(archiveKey);
+                List<String> types;
+                try {
+                    types = signatures.namedSignatureTypes(function);
+                } catch (Exception e) {
+                    types = List.of();
+                }
+                if (types == null) types = List.of();
+                for (String typeName : types) {
+                    if (typeName == null || typeName.isBlank() || !seen.add(typeName)) continue;
+                    if (archive == null) {
+                        report.add(BSimSignatures.RelinkDecision.SKIP_NOT_IN_ARCHIVE,
+                                typeName, archiveKey);
+                        continue;
+                    }
+                    final String name = typeName;
+                    final BSimTypeArchives.OpenedArchive src = archive;
+                    if (dryRun) {
+                        report.add(signatures.relinkNamedType(program, name, src.manager(), true),
+                                name, archiveKey);
+                    } else {
+                        writes.add(() -> report.add(
+                                signatures.relinkNamedType(program, name, src.manager(), false),
+                                name, archiveKey));
+                    }
+                }
+            }
+            if (!dryRun && !writes.isEmpty()) {
+                try {
+                    threadingStrategy.executeWrite(program, "BSim relink types", () -> {
+                        for (Runnable write : writes) write.run();
+                        return null;
+                    });
+                } catch (Exception e) {
+                    warnings.add("relink_types failed: "
+                            + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+                }
+            }
+        } finally {
+            for (BSimTypeArchives.OpenedArchive archive : opened.values()) {
+                if (archive == null) continue;
+                try {
+                    archive.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return report;
+    }
+
+    private BSimTypeArchives.OpenedArchive archiveForRelink(Program program, String archiveKey,
+                                                            BSimTypeArchives.Mode mode,
+                                                            Map<String, BSimTypeArchives.OpenedArchive> opened,
+                                                            List<String> warnings) {
+        if (archiveKey == null || archiveKey.isBlank()) return null;
+        if (opened.containsKey(archiveKey)) return opened.get(archiveKey);
+        try {
+            BSimTypeArchives.OpenedArchive archive = signatures.openForApply(
+                    program, programProvider, null, archiveKey, mode);
+            if (archive == null || archive.fallbackLocal() || archive.disassociateAfter()) {
+                if (archive != null) {
+                    try {
+                        archive.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+                opened.put(archiveKey, null);
+                return null;
+            }
+            opened.put(archiveKey, archive);
+            return archive;
+        } catch (Exception e) {
+            opened.put(archiveKey, null);
+            warnings.add("relink: cannot open " + archiveKey + ": "
+                    + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            return null;
         }
     }
 
@@ -2256,15 +2425,25 @@ public class BSimService {
                 } catch (Exception ignored) {
                 }
                 BSimTypeArchives.Mode mode = BSimTypeArchives.resolveMode("", projectOpen);
-                String published = signatures.publishTypeArchive(program, programProvider,
-                        archiveKey, Path.of(gdtPath), mode, warnings);
-                recordArtifactTypeArchive(program, archiveKey, published);
+                BSimTypeArchives.PublishResult published = signatures.publishTypeArchive(
+                        program, programProvider, archiveKey, Path.of(gdtPath), mode, warnings);
+                recordArtifactTypeArchive(program, archiveKey,
+                        published == null ? null : published.path());
                 if (body != null) {
                     body.put("type_archive", archiveKey);
-                    if (published != null && !published.isEmpty()) {
-                        body.put("type_archive_path", published);
+                    if (published != null && published.published()) {
+                        body.put("type_archive_path", published.path());
                     }
                     body.put("type_archive_mode", mode.name().toLowerCase(Locale.ROOT));
+                    if (mode == BSimTypeArchives.Mode.PROJECT && published != null) {
+                        body.put("type_archive_versioned", published.versioned());
+                        if (published.version() != null) {
+                            body.put("type_archive_version", published.version());
+                        }
+                        if (published.note() != null && !published.note().isBlank()) {
+                            body.put("type_archive_note", published.note());
+                        }
+                    }
                 }
             }
             int dwarf = 0;
