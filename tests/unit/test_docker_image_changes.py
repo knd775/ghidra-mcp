@@ -134,8 +134,29 @@ def test_lshvector_lock_rebuilds_bsim():
     ) == _on("bsim")
 
 
-def test_workflow_change_rebuilds_every_image():
-    assert images_for_files([WORKFLOW_PATH], REPO_ROOT) == _on(*IMAGES)
+def test_workflow_change_does_not_rebuild():
+    # Measured 2026-09-03: merging #22 onto dev rebuilt all four images
+    # because ghcr.yml was treated as an input for every image. The
+    # workflow file does not COPY into any of them.
+    assert images_for_files([WORKFLOW_PATH], REPO_ROOT) == _on()
+
+
+def test_landing_the_skip_logic_only_rebuilds_bridge():
+    # Files from the #22 merge onto dev. CHANGELOG.md is COPY'd into the
+    # bridge wheel. Nothing else here is an image input.
+    assert images_for_files(
+        [
+            ".github/workflows/README.md",
+            ".github/workflows/ghcr.yml",
+            "AGENTS.md",
+            "CHANGELOG.md",
+            "docker/README.md",
+            "tests/unit/test_ci_workflow_triggers.py",
+            "tests/unit/test_docker_image_changes.py",
+            "tools/docker_image_changes.py",
+        ],
+        REPO_ROOT,
+    ) == _on("bridge")
 
 
 def test_root_dockerignore_rebuilds_every_image():

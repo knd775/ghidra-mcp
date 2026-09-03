@@ -10,10 +10,11 @@ Complete version history for the Ghidra MCP Server project.
 
 Pushing to `main`/`dev`/`develop` used to build and push all four images
 every time. A Java-only commit still downloaded the ARM GNU tarballs and
-sparse-cloned Ghidra for lshvector. Each image now builds only when a
-file it `COPY`s changed, or when `ghcr.yml` itself changed. Version tags
-and manual dispatch still build every image. The workflow no longer runs
-on pull requests.
+sparse-cloned Ghidra for lshvector. Each image now builds only when its
+Dockerfile, a dockerignore that applies to it, or a file it `COPY`s
+changed. Changing `ghcr.yml` alone does not rebuild. Version tags and
+manual dispatch still build every image. The workflow no longer runs on
+pull requests.
 
 ### BSim: project type archives are version-controlled on ingest
 
