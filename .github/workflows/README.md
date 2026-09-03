@@ -8,7 +8,7 @@ workflows for GhidraMCP.
 | Workflow | Trigger | Runner | Purpose |
 |----------|---------|--------|---------|
 | `tests.yml` | Push, pull request, and `workflow_dispatch` to `main`/`develop` | GitHub-hosted Ubuntu | Merge-gating Maven build, Python 3.12 unit tests, BSim PostgreSQL image smoke (`CREATE EXTENSION lshvector` + non-SSL reject), and docs checks. Same-repo PRs also rewrite README API Reference and "N MCP tools" counts onto the PR branch (`sync-generated-docs` job) so main never lands stale. |
-| `ghcr.yml` | Push to `main`/`dev`/`develop` and version tags; manual dispatch | GitHub-hosted Ubuntu | Build and push `ghidra-mcp-headless`, `ghidra-mcp-bridge`, `ghidra-mcp-builder`, and `ghidra-mcp-bsim` to GHCR when that image's Dockerfile `COPY` inputs or dockerignore files changed. Changing `ghcr.yml` alone does not rebuild. Version tags and manual dispatch build every image. Does not run on pull requests. |
+| `ghcr.yml` | Push to `main`/`dev`/`develop` and version tags; manual dispatch | GitHub-hosted Ubuntu | Build and push `ghidra-mcp-headless`, `ghidra-mcp-bridge`, `ghidra-mcp-builder`, and `ghidra-mcp-bsim` to GHCR when that image's Dockerfile, applicable dockerignore files, or `COPY` inputs changed. Changing `ghcr.yml` alone does not rebuild. Version tags and manual dispatch build every image. Does not run on pull requests. |
 | `build.yml` | Project build triggers | GitHub-hosted | Build-focused CI path. |
 | `release-regression.yml` | Manual, reusable workflow call, PR label | Self-hosted Windows | Live Ghidra deploy and benchmark regression. |
 | `release.yml` | Version tags or manual dispatch | GitHub-hosted, optional self-hosted regression | Stable release artifact creation. |
