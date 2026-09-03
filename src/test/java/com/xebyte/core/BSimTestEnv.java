@@ -29,11 +29,21 @@ public final class BSimTestEnv {
         BSimUrls.templatesOverride = templates;
     }
 
+    public static void setTypeArchiveMode(String mode) {
+        BSimTypeArchives.modeOverride = mode;
+    }
+
+    public static void setTypeArchiveDir(String dir) {
+        BSimTypeArchives.dirOverride = dir;
+    }
+
     public static void clear() {
         BSimUrls.allowlistOverride = null;
         BSimUrls.rootOverride = null;
         BSimUrls.userOverride = null;
         BSimUrls.passwordOverride = null;
         BSimUrls.templatesOverride = null;
+        BSimTypeArchives.modeOverride = null;
+        BSimTypeArchives.dirOverride = null;
     }
 }

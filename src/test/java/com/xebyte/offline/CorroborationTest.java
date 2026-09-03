@@ -328,8 +328,8 @@ public class CorroborationTest extends TestCase {
         BSimService svc = queryService(row("FUN_1", List.of(), List.of(), List.of()), resultJson);
 
         Response r = svc.applyMatches("postgresql://ghidra-bsim:5432/embedded",
-                15.0, 0.15, false, false, 0.0, 10, "",
-                "", "", "", "", 8, false, "none", 5.0, false, 40.0, 45);
+                15.0, 0.15, false, false, false, 0.0, 10, "",
+                "", "", "", "", 8, false, "none", 5.0, false, 40.0, "", 45);
 
         assertFalse(r instanceof Response.Err);
         String json = r.toJson();
@@ -347,8 +347,8 @@ public class CorroborationTest extends TestCase {
                 duplicateApplyPayload(60.48, 55.58));
         Response resolved = marginSvc.applyMatches(
                 "postgresql://ghidra-bsim:5432/embedded",
-                15.0, 0.15, false, true, 0.0, 10, "",
-                "", "", "", "", 8, false, "best", 4.0, false, 40.0, 45);
+                15.0, 0.15, false, false, true, 0.0, 10, "",
+                "", "", "", "", 8, false, "best", 4.0, false, 40.0, "", 45);
         String resolvedJson = resolved.toJson();
         assertTrue(resolvedJson, resolvedJson.contains("\"resolved_best\":1"));
         assertTrue(resolvedJson, resolvedJson.contains("\"would_rename\":[{"));
@@ -360,8 +360,8 @@ public class CorroborationTest extends TestCase {
                 duplicateApplyPayload(41.11, 41.11));
         Response tied = tiedSvc.applyMatches(
                 "postgresql://ghidra-bsim:5432/embedded",
-                15.0, 0.15, false, true, 0.0, 10, "",
-                "", "", "", "", 8, false, "best", 0.0, false, 40.0, 45);
+                15.0, 0.15, false, false, true, 0.0, 10, "",
+                "", "", "", "", 8, false, "best", 0.0, false, 40.0, "", 45);
         String tiedJson = tied.toJson();
         assertTrue(tiedJson, tiedJson.contains("\"skipped_insufficient_margin\":1"));
         assertTrue(tiedJson, tiedJson.contains("\"would_rename\":[]"));

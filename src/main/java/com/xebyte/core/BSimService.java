@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalDouble;
 
 /**
  * MCP wrappers around Ghidra's {@code bsim} CLI.
@@ -259,8 +260,10 @@ public class BSimService {
                     + "corroboration schema (same PostgreSQL database, not BSim's tables) so "
                     + "corroborate_match does not need the reference program later. Also stores "
                     + "each function's typed prototype (DWARF only: has_dwarf) and exports the "
-                    + "program's data types to <artifact>.gdt beside the artifact, so "
-                    + "bsim_apply_matches(apply_signatures=true) never opens the reference. Refuses a "
+                    + "program's data types to <artifact>.gdt beside the artifact and to a project "
+                    + "archive at /refs/types/<name>-<version>.gdt (keyed by library and version, "
+                    + "not build flags), so bsim_apply_matches(apply_signatures=true) never opens "
+                    + "the reference and GUI clients resolve types from the repository. Refuses a "
                     + "source with no functions, and a pointer-size mismatch against a sized "
                     + "template (medium_32 / medium_64 / large_32). medium_nosize accepts mixed "
                     + "pointer sizes. Identical-MD5 re-ingest is skipped (BSim keys on MD5 but "
@@ -523,10 +526,15 @@ public class BSimService {
             description = "Bulk-rename functions from BSim matches above a caller-chosen confidence "
                     + "floor. min_confidence has no default — there is no universally safe value. "
                     + "dry_run defaults to true and does not write. skip_named defaults to true "
-                    + "(never overwrite an analyst name). Ambiguous matches are never applied. "
+                    + "(never overwrite an analyst name). rename_named defaults to false: when "
+                    + "skip_named=false, named functions can still receive signatures without "
+                    + "being renamed; disagreements are reported under rename_suppressed. "
+                    + "Ambiguous matches are never applied. "
                     + "Duplicate proposed names are conflicts and none are applied by default. "
-                    + "resolve_conflicts=best may select the highest-confidence candidate only "
-                    + "when it clears conflict_min_confidence_margin. "
+                    + "A name that already exists on a different function is name_exists_elsewhere "
+                    + "and is not applied; resolve_conflicts=best may reassign it only when the "
+                    + "holder carries BSim provenance and the new confidence clears "
+                    + "conflict_min_confidence_margin. A hand-named holder is never demoted. "
                     + "Functions flagged unidentifiable (too few LSH features) are skipped unless "
                     + "apply_unidentifiable=true. Optional arch / executable / compiler / "
                     + "exclude_md5 are the same server-side filters as bsim_query. Applied names "
@@ -535,15 +543,18 @@ public class BSimService {
                     + "name_unchanged), never as a conflict with itself; with skip_named=false that "
                     + "is how a names-only run is followed by apply_signatures=true. "
                     + "apply_signatures=true (default false) additionally applies the reference's "
-                    + "typed DWARF prototype to each function being renamed, importing struct/typedef "
-                    + "types from the reference's .gdt archive with KEEP semantics (a type the target "
-                    + "already defines by name is never replaced). A wrong signature propagates through "
+                    + "typed DWARF prototype, resolving types from the project archive at "
+                    + "/refs/types/<name>-<version>.gdt (type_archive_mode=project, the default "
+                    + "when a project is open). file writes a configured stable directory; local "
+                    + "disassociates after resolve. A missing project archive falls back to local "
+                    + "and is counted as types_fallback_local. KEEP semantics: a type the target "
+                    + "already defines by name is never replaced. A wrong signature propagates through "
                     + "the decompiler, so it has its own gates: min_signature_confidence (>= "
                     + "min_confidence, default 40), same architecture only, DWARF-sourced only, and the "
                     + "reference parameter count must equal what the target's decompiler infers; "
                     + "anything else gets the name only and is counted in the signatures block. "
-                    + "Every applied signature carries a [bsim-sig] plate-comment marker naming the "
-                    + "reference and confidence. dry_run previews signatures and imports no types. "
+                    + "Every applied name carries a [bsim] plate marker and a bsim function tag; "
+                    + "every applied signature carries [bsim-sig]. dry_run previews and writes nothing. "
                     + "Runs a full-program BSim query first, which takes minutes: expect a job_id, "
                     + "then poll bsim_job_status.",
             category = "bsim")
@@ -558,6 +569,11 @@ public class BSimService {
             @Param(value = "skip_named", source = ParamSource.BODY, defaultValue = "true",
                     description = "Skip functions that already have a user-defined name")
                     boolean skipNamed,
+            @Param(value = "rename_named", source = ParamSource.BODY, defaultValue = "false",
+                    description = "When skip_named=false, may an already-named function still be "
+                            + "renamed? Default false: named functions keep their names and can "
+                            + "still receive signatures. Has no effect when skip_named=true.")
+                    boolean renameNamed,
             @Param(value = "dry_run", source = ParamSource.BODY, defaultValue = "true",
                     description = "Preview without renaming. Default true. Honored in this method; "
                             + "a true dry_run does not call setName.")
@@ -612,6 +628,11 @@ public class BSimService {
                     description = "Confidence floor for signatures; must be >= min_confidence. "
                             + "Default 40 is a starting point, not a calibration.")
                     double minSignatureConfidence,
+            @Param(value = "type_archive_mode", source = ParamSource.BODY, defaultValue = "",
+                    description = "project | file | local. Blank uses GHIDRA_MCP_TYPE_ARCHIVE_MODE, "
+                            + "then project when a project is open, else file if "
+                            + "GHIDRA_MCP_TYPE_ARCHIVE_DIR is set, else local.")
+                    String typeArchiveMode,
             @Param(value = "wait_seconds", source = ParamSource.BODY, defaultValue = "45",
                     description = WAIT_SECONDS_DESCRIPTION) int waitSeconds) {
         if (minConfidence == null) {
@@ -635,6 +656,13 @@ public class BSimService {
                         + ") must be >= min_confidence (" + minConfidence + "): a signature "
                         + "propagates through every caller, so it needs the stricter floor.");
             }
+            boolean projectOpen = false;
+            try {
+                projectOpen = programProvider.getProject() != null;
+            } catch (Exception ignored) {
+            }
+            BSimTypeArchives.Mode archiveMode = BSimTypeArchives.resolveMode(
+                    typeArchiveMode, projectOpen);
             String url = BSimUrls.requireBsimUrl(dbUrl);
             String pgCred = BSimUrls.missingPostgresCredential(url);
             if (pgCred != null) return Response.err(pgCred);
@@ -650,14 +678,16 @@ public class BSimService {
             request.put("resolve_conflicts", conflictMode);
             request.put("conflict_min_confidence_margin", conflictMinConfidenceMargin);
             request.put("apply_signatures", applySignatures);
+            request.put("rename_named", renameNamed);
+            request.put("type_archive_mode", archiveMode.name().toLowerCase(Locale.ROOT));
             if (applySignatures) request.put("min_signature_confidence", minSignatureConfidence);
             BSimJobs.Job job = jobs.submit("bsim_apply_matches", request,
                     () -> runApplyMatches(url, program, minConfidence, minSimilarity,
-                            skipNamed, dryRun, querySimilarity, maxMatches,
+                            skipNamed, renameNamed, dryRun, querySimilarity, maxMatches,
                             arch, executable, compiler, excludeMd5,
                             minFeatureCount, applyUnidentifiable, conflictMode,
                             conflictMinConfidenceMargin, applySignatures,
-                            minSignatureConfidence));
+                            minSignatureConfidence, archiveMode));
             return jobs.awaitOrTicket(job, waitSeconds);
         } catch (IllegalArgumentException e) {
             return Response.err(e.getMessage());
@@ -668,13 +698,14 @@ public class BSimService {
 
     /** The query + decide + rename body of {@code bsim_apply_matches}; runs on the job worker. */
     private Response runApplyMatches(String url, Program program, Double minConfidence,
-                                     double minSimilarity, boolean skipNamed, boolean dryRun,
-                                     double querySimilarity, int maxMatches,
+                                     double minSimilarity, boolean skipNamed, boolean renameNamed,
+                                     boolean dryRun, double querySimilarity, int maxMatches,
                                      String arch, String executable, String compiler,
                                      String excludeMd5, int minFeatureCount,
                                      boolean applyUnidentifiable, String resolveConflicts,
                                      double conflictMinConfidenceMargin,
-                                     boolean applySignatures, double minSignatureConfidence)
+                                     boolean applySignatures, double minSignatureConfidence,
+                                     BSimTypeArchives.Mode archiveMode)
             throws Exception {
         QuerySpec spec = new QuerySpec("", querySimilarity, 0.0, maxMatches,
                 arch, executable, compiler, excludeMd5, minFeatureCount, 0);
@@ -684,16 +715,17 @@ public class BSimService {
         List<BSimMatches.FunctionResult> results =
                 BSimMatches.parseQueryPayload(payload, program.getExecutableMD5());
         try (SignatureRun sigRun = applySignatures
-                ? new SignatureRun(url, program, dryRun, minSignatureConfidence) : null) {
+                ? new SignatureRun(url, program, dryRun, minSignatureConfidence, archiveMode)
+                : null) {
             return applyResults(program, results, minConfidence, minSimilarity, skipNamed,
-                    dryRun, applyUnidentifiable, resolveConflicts,
+                    renameNamed, dryRun, applyUnidentifiable, resolveConflicts,
                     conflictMinConfidenceMargin, sigRun);
         }
     }
 
     private Response applyResults(Program program, List<BSimMatches.FunctionResult> results,
                                   Double minConfidence, double minSimilarity, boolean skipNamed,
-                                  boolean dryRun, boolean applyUnidentifiable,
+                                  boolean renameNamed, boolean dryRun, boolean applyUnidentifiable,
                                   String resolveConflicts, double conflictMinConfidenceMargin,
                                   SignatureRun sigRun) {
 
@@ -701,6 +733,8 @@ public class BSimService {
         List<Map<String, Object>> wouldRename = new ArrayList<>();
         List<Map<String, Object>> unchanged = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
+        List<Map<String, Object>> renameSuppressed = new ArrayList<>();
+        List<Map<String, Object>> reassignments = new ArrayList<>();
         Map<String, Integer> counts = new LinkedHashMap<>();
         counts.put("queried", results.size());
         counts.put("renamed", 0);
@@ -712,6 +746,10 @@ public class BSimService {
         counts.put("below_confidence", 0);
         counts.put("ambiguous", 0);
         counts.put("conflicting", 0);
+        counts.put("name_exists_elsewhere", 0);
+        counts.put("rename_suppressed", 0);
+        counts.put("reassigned", 0);
+        counts.put("would_reassign", 0);
         counts.put("no_matches", 0);
         counts.put("self_match", 0);
         counts.put("function_not_found", 0);
@@ -720,10 +758,9 @@ public class BSimService {
         List<ApplyCandidate> candidates = new ArrayList<>();
 
         for (BSimMatches.FunctionResult fr : results) {
-            // Conflict grouping needs no Listing lookup. Resolve here only
-            // when the current name is part of the decision, then defer any
-            // remaining lookup until a candidate has survived grouping.
-            Function func = skipNamed ? resolveApplyTarget(program, fr) : null;
+            // Resolve when the current name is part of the decision: skip_named
+            // or rename_named=false (a named function must keep its name).
+            Function func = (skipNamed || !renameNamed) ? resolveApplyTarget(program, fr) : null;
             String currentName = func != null ? func.getName() : fr.function;
             BSimMatches.ApplyAction action = BSimMatches.decide(
                     fr, currentName, skipNamed, minSimilarity, minConfidence, applyUnidentifiable);
@@ -744,7 +781,27 @@ public class BSimService {
                 skipped.add(skip);
                 continue;
             }
-            candidates.add(new ApplyCandidate(fr, func, fr.best()));
+            BSimMatches.Hit best = fr.best();
+            if (!skipNamed && !renameNamed && func != null
+                    && !ServiceUtils.isAutoGeneratedName(func.getName())
+                    && best != null && !best.name.equals(func.getName())) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("function", func.getName());
+                if (fr.address != null && !fr.address.isEmpty()) row.put("address", fr.address);
+                row.put("current_name", func.getName());
+                row.put("proposed_name", best.name);
+                row.put("reason", "rename_suppressed");
+                row.put("similarity", best.similarity);
+                row.put("confidence", best.confidence);
+                row.put("executable", best.executable);
+                renameSuppressed.add(row);
+                counts.computeIfPresent("rename_suppressed", (key, value) -> value + 1);
+                if (sigRun != null) {
+                    sigRun.consider(new ApplyCandidate(fr, func, best), func, row);
+                }
+                continue;
+            }
+            candidates.add(new ApplyCandidate(fr, func, best));
         }
 
         Map<String, List<ApplyCandidate>> byName = new LinkedHashMap<>();
@@ -759,31 +816,22 @@ public class BSimService {
         int disabledConflictGroups = 0;
         int insufficientMarginGroups = 0;
         int existingNameGroups = 0;
+        int reassignedGroups = 0;
         for (Map.Entry<String, List<ApplyCandidate>> entry : byName.entrySet()) {
             List<ApplyCandidate> group = entry.getValue();
             List<Function> existing = new ArrayList<>(
                     existingByName.getOrDefault(entry.getKey(), List.of()));
+            resolveGroupTargets(program, group);
             if (!existing.isEmpty()) {
                 // A function that already carries the proposed name is not a
                 // conflict with itself. With skip_named=false every function
                 // named by an earlier run came back "conflicting" (measured
                 // live 2026-09-01), so a names-only pass could never be
                 // followed by apply_signatures=true.
-                for (int i = 0; i < group.size(); i++) {
-                    ApplyCandidate candidate = group.get(i);
-                    Function own = candidate.function;
-                    if (own == null) {
-                        try {
-                            own = resolveApplyTarget(program, candidate.result);
-                        } catch (Exception e) {
-                            own = null;
-                        }
-                        if (own != null) {
-                            group.set(i, new ApplyCandidate(candidate.result, own, candidate.hit));
-                        }
+                for (ApplyCandidate candidate : group) {
+                    if (candidate.function != null) {
+                        existing.removeIf(f -> sameFunction(f, candidate.function));
                     }
-                    final Function self = own;
-                    if (self != null) existing.removeIf(f -> sameFunction(f, self));
                 }
             }
             if (group.size() == 1 && existing.isEmpty()) {
@@ -800,33 +848,62 @@ public class BSimService {
                 return a.result.function.compareTo(b.result.function);
             });
             ApplyCandidate leader = group.get(0);
-            double margin = group.size() > 1
-                    ? leader.hit.confidence - group.get(1).hit.confidence : 0.0;
-            boolean resolved = existing.isEmpty() && "best".equals(resolveConflicts)
-                    && margin > 0.0 && margin >= conflictMinConfidenceMargin;
+            double intraMargin = group.size() > 1
+                    ? leader.hit.confidence - group.get(1).hit.confidence : Double.POSITIVE_INFINITY;
+            boolean leaderClear = group.size() == 1
+                    || ("best".equals(resolveConflicts)
+                    && intraMargin > 0.0 && intraMargin >= conflictMinConfidenceMargin);
+            List<ExistingHolder> holders = holdersOf(existing);
 
             Map<String, Object> conflict = new LinkedHashMap<>();
             conflict.put("name", entry.getKey());
-            conflict.put("confidence_margin", margin);
+            conflict.put("confidence_margin", group.size() > 1 ? intraMargin : 0.0);
             conflict.put("required_margin", conflictMinConfidenceMargin);
             List<Map<String, Object>> conflictCandidates = new ArrayList<>();
             for (ApplyCandidate candidate : group) {
                 conflictCandidates.add(candidate.conflictMap());
             }
             conflict.put("candidates", conflictCandidates);
-            if (!existing.isEmpty()) {
+            if (!holders.isEmpty()) {
                 List<Map<String, Object>> existingFunctions = new ArrayList<>();
-                for (Function function : existing) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("function", function.getName());
-                    if (function.getEntryPoint() != null) {
-                        row.put("address", function.getEntryPoint().toString());
-                    }
-                    existingFunctions.add(row);
+                for (ExistingHolder holder : holders) {
+                    existingFunctions.add(holder.toMap());
                 }
                 conflict.put("existing_functions", existingFunctions);
             }
 
+            if (!holders.isEmpty()) {
+                boolean canReassign = "best".equals(resolveConflicts) && leaderClear
+                        && canDemoteHolders(holders, leader.hit.confidence,
+                        conflictMinConfidenceMargin);
+                if (canReassign) {
+                    reassignedGroups++;
+                    conflict.put("resolution", "reassigned");
+                    conflict.put("selected_function", leader.result.function);
+                    Map<String, Object> reassignment = demoteHolders(program, holders, leader,
+                            dryRun);
+                    reassignments.add(reassignment);
+                    counts.computeIfPresent(dryRun ? "would_reassign" : "reassigned",
+                            (key, value) -> value + 1);
+                    applyCandidate(program, leader, dryRun, renamed, wouldRename, unchanged,
+                            skipped, counts, sigRun);
+                    for (int i = 1; i < group.size(); i++) {
+                        skipConflict(group.get(i), "best_not_selected", intraMargin,
+                                skipped, counts);
+                    }
+                } else {
+                    existingNameGroups++;
+                    conflict.put("resolution", "name_exists_elsewhere");
+                    for (ApplyCandidate candidate : group) {
+                        skipNameExistsElsewhere(candidate, holders, skipped, counts);
+                    }
+                }
+                conflicts.add(conflict);
+                continue;
+            }
+
+            boolean resolved = "best".equals(resolveConflicts)
+                    && intraMargin > 0.0 && intraMargin >= conflictMinConfidenceMargin;
             if (resolved) {
                 resolvedConflictGroups++;
                 conflict.put("resolution", "best");
@@ -834,15 +911,12 @@ public class BSimService {
                 applyCandidate(program, leader, dryRun, renamed, wouldRename, unchanged, skipped,
                         counts, sigRun);
                 for (int i = 1; i < group.size(); i++) {
-                    skipConflict(group.get(i), "best_not_selected", margin,
+                    skipConflict(group.get(i), "best_not_selected", intraMargin,
                             skipped, counts);
                 }
             } else {
                 String resolution;
-                if (!existing.isEmpty()) {
-                    existingNameGroups++;
-                    resolution = "name_already_exists";
-                } else if ("best".equals(resolveConflicts)) {
+                if ("best".equals(resolveConflicts)) {
                     insufficientMarginGroups++;
                     resolution = "insufficient_margin";
                 } else {
@@ -851,7 +925,7 @@ public class BSimService {
                 }
                 conflict.put("resolution", resolution);
                 for (ApplyCandidate candidate : group) {
-                    skipConflict(candidate, resolution, margin, skipped, counts);
+                    skipConflict(candidate, resolution, intraMargin, skipped, counts);
                 }
             }
             conflicts.add(conflict);
@@ -863,6 +937,7 @@ public class BSimService {
         body.put("min_confidence", minConfidence);
         body.put("min_similarity", minSimilarity);
         body.put("skip_named", skipNamed);
+        body.put("rename_named", renameNamed);
         body.put("resolve_conflicts", resolveConflicts);
         body.put("conflict_min_confidence_margin", conflictMinConfidenceMargin);
         body.put("counts", counts);
@@ -872,6 +947,7 @@ public class BSimService {
         conflictSummary.put("skipped_disabled", disabledConflictGroups);
         conflictSummary.put("skipped_insufficient_margin", insufficientMarginGroups);
         conflictSummary.put("skipped_existing_name", existingNameGroups);
+        conflictSummary.put("reassigned", reassignedGroups);
         body.put("conflict_summary", conflictSummary);
         body.put("conflicts", conflicts);
         body.put("unidentifiable_skipped", counts.get("unidentifiable"));
@@ -879,9 +955,12 @@ public class BSimService {
         body.put("would_rename", wouldRename);
         body.put("unchanged", unchanged);
         body.put("skipped", skipped);
+        body.put("rename_suppressed", renameSuppressed);
+        body.put("reassignments", reassignments);
         if (sigRun != null) {
             body.put("apply_signatures", true);
             body.put("min_signature_confidence", sigRun.minConfidence);
+            body.put("type_archive_mode", sigRun.archiveMode.name().toLowerCase(Locale.ROOT));
             body.put("signatures", sigRun.summary());
             body.put("signature_details", sigRun.details);
             if (!sigRun.warnings.isEmpty()) body.put("warnings", sigRun.warnings);
@@ -916,6 +995,138 @@ public class BSimService {
         if (a == null || b == null) return false;
         if (a.equals(b)) return true;
         return a.getEntryPoint() != null && a.getEntryPoint().equals(b.getEntryPoint());
+    }
+
+    private void resolveGroupTargets(Program program, List<ApplyCandidate> group) {
+        for (int i = 0; i < group.size(); i++) {
+            ApplyCandidate candidate = group.get(i);
+            if (candidate.function != null) continue;
+            Function own = null;
+            try {
+                own = resolveApplyTarget(program, candidate.result);
+            } catch (Exception ignored) {
+            }
+            if (own != null) {
+                group.set(i, new ApplyCandidate(candidate.result, own, candidate.hit));
+            }
+        }
+    }
+
+    private record ExistingHolder(Function function, String address, Double confidence,
+                                  boolean bsimProvenance) {
+        Map<String, Object> toMap() {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("function", function.getName());
+            if (address != null && !address.isEmpty()) row.put("address", address);
+            if (confidence != null) row.put("confidence", confidence);
+            row.put("bsim_provenance", bsimProvenance);
+            return row;
+        }
+    }
+
+    private static List<ExistingHolder> holdersOf(List<Function> existing) {
+        List<ExistingHolder> holders = new ArrayList<>();
+        for (Function function : existing) {
+            String address = "";
+            try {
+                if (function.getEntryPoint() != null) {
+                    address = function.getEntryPoint().toString();
+                }
+            } catch (Exception ignored) {
+            }
+            String comment = "";
+            try {
+                comment = function.getComment();
+            } catch (Exception ignored) {
+            }
+            OptionalDouble parsed = BSimSignatures.provenanceConfidence(comment);
+            holders.add(new ExistingHolder(function, address,
+                    parsed.isPresent() ? parsed.getAsDouble() : null,
+                    BSimSignatures.hasBsimProvenance(function)));
+        }
+        return holders;
+    }
+
+    private static boolean canDemoteHolders(List<ExistingHolder> holders, double candidateConfidence,
+                                            double requiredMargin) {
+        if (holders.isEmpty()) return false;
+        for (ExistingHolder holder : holders) {
+            if (!holder.bsimProvenance || holder.confidence == null) return false;
+            double margin = candidateConfidence - holder.confidence;
+            if (!(margin > 0.0 && margin >= requiredMargin)) return false;
+        }
+        return true;
+    }
+
+    private Map<String, Object> demoteHolders(Program program, List<ExistingHolder> holders,
+                                              ApplyCandidate winner, boolean dryRun) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("name", winner.hit.name);
+        row.put("to_function", winner.result.function);
+        if (winner.result.address != null && !winner.result.address.isEmpty()) {
+            row.put("to_address", winner.result.address);
+        }
+        row.put("to_confidence", winner.hit.confidence);
+        List<Map<String, Object>> from = new ArrayList<>();
+        for (ExistingHolder holder : holders) {
+            Map<String, Object> one = holder.toMap();
+            String restored = BSimSignatures.defaultFunctionName(holder.function.getEntryPoint());
+            one.put("demoted_to", restored);
+            from.add(one);
+        }
+        row.put("from", from);
+        if (!from.isEmpty()) {
+            row.put("from_address", from.get(0).get("address"));
+            row.put("from_confidence", from.get(0).get("confidence"));
+            row.put("demoted_to", from.get(0).get("demoted_to"));
+        }
+        row.put("dry_run", dryRun);
+        if (dryRun) return row;
+        try {
+            threadingStrategy.executeWrite(program, "BSim reassign " + winner.hit.name, () -> {
+                for (ExistingHolder holder : holders) {
+                    Function f = holder.function;
+                    f.setName(BSimSignatures.defaultFunctionName(f.getEntryPoint()),
+                            SourceType.DEFAULT);
+                    try {
+                        f.setComment(BSimSignatures.stripBsimProvenance(f.getComment()));
+                    } catch (Exception ignored) {
+                    }
+                    try {
+                        f.removeTag(BSimSignatures.FUNCTION_TAG);
+                    } catch (Exception ignored) {
+                    }
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            row.put("error", e.getMessage());
+        }
+        return row;
+    }
+
+    private static void skipNameExistsElsewhere(ApplyCandidate candidate,
+                                                List<ExistingHolder> holders,
+                                                List<Map<String, Object>> skipped,
+                                                Map<String, Integer> counts) {
+        Map<String, Object> row = candidate.row();
+        row.put("reason", "name_exists_elsewhere");
+        if (!holders.isEmpty()) {
+            ExistingHolder first = holders.get(0);
+            row.put("existing_function", first.function.getName());
+            if (first.address != null && !first.address.isEmpty()) {
+                row.put("existing_address", first.address);
+            }
+            if (first.confidence != null) row.put("existing_confidence", first.confidence);
+            row.put("existing_bsim_provenance", first.bsimProvenance);
+            if (holders.size() > 1) {
+                List<Map<String, Object>> all = new ArrayList<>();
+                for (ExistingHolder holder : holders) all.add(holder.toMap());
+                row.put("existing_functions", all);
+            }
+        }
+        skipped.add(row);
+        counts.computeIfPresent("name_exists_elsewhere", (key, value) -> value + 1);
     }
 
     private static Map<String, List<Function>> existingFunctionsByName(
@@ -973,10 +1184,22 @@ public class BSimService {
         }
         try {
             final Function renameTarget = target;
+            final String provenance = BSimSignatures.nameProvenanceLine(
+                    candidate.hit.executable, candidate.hit.confidence);
             threadingStrategy.executeWrite(program, "BSim apply " + candidate.hit.name, () -> {
                 renameTarget.setName(candidate.hit.name, SourceType.USER_DEFINED);
+                try {
+                    renameTarget.setComment(BSimSignatures.mergeNameProvenance(
+                            renameTarget.getComment(), provenance));
+                } catch (Exception ignored) {
+                }
+                try {
+                    renameTarget.addTag(BSimSignatures.FUNCTION_TAG);
+                } catch (Exception ignored) {
+                }
                 return null;
             });
+            row.put("provenance", provenance);
             renamed.add(row);
             counts.computeIfPresent("renamed", (key, value) -> value + 1);
             // Signatures ride on a name that was (or already is) applied, so
@@ -999,6 +1222,7 @@ public class BSimService {
         final Program program;
         final boolean dryRun;
         final double minConfidence;
+        final BSimTypeArchives.Mode archiveMode;
         final CorroborationStore store;
         final BSimSignatures.Applier applier;
         final String targetArch;
@@ -1007,11 +1231,16 @@ public class BSimService {
         final List<String> warnings = new ArrayList<>();
         private int typesImported;
         private int typesKeptExisting;
+        private int typesFallbackLocal;
+        private boolean disassociateAfter;
+        private final Map<String, BSimTypeArchives.OpenedArchive> archives = new LinkedHashMap<>();
 
-        SignatureRun(String url, Program program, boolean dryRun, double minConfidence) {
+        SignatureRun(String url, Program program, boolean dryRun, double minConfidence,
+                     BSimTypeArchives.Mode archiveMode) {
             this.program = program;
             this.dryRun = dryRun;
             this.minConfidence = minConfidence;
+            this.archiveMode = archiveMode == null ? BSimTypeArchives.Mode.LOCAL : archiveMode;
             this.store = stores.open(url);
             this.applier = signatures.applier(program);
             this.targetArch = applier.targetArch(program);
@@ -1019,7 +1248,8 @@ public class BSimService {
                     "skipped_below_confidence", "skipped_cross_arch",
                     "skipped_param_mismatch", "skipped_no_dwarf",
                     "skipped_no_signature_data", "skipped_no_archive",
-                    "skipped_already_applied", "skipped_target_unresolved", "failed")) {
+                    "skipped_already_applied", "skipped_target_unresolved", "failed",
+                    "types_fallback_local")) {
                 counts.put(key, 0);
             }
             if (!store.writable()) {
@@ -1046,8 +1276,10 @@ public class BSimService {
                             + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
                 }
             }
-            boolean archiveExists = sig != null && !sig.gdtPath().isEmpty()
-                    && Files.isRegularFile(Path.of(sig.gdtPath()));
+            String archiveKey = BSimTypeArchives.archiveKeyForHit(
+                    hit.executable, sig == null ? "" : sig.gdtPath());
+            boolean archiveExists = signatures.archiveAvailable(
+                    program, programProvider, sig, archiveKey, archiveMode);
             boolean already = target != null && applier.alreadyApplied(target, hit.executable);
             BSimSignatures.Decision decision = BSimSignatures.decide(hit.confidence, minConfidence,
                     targetArch, hit.arch, sig, archiveExists, already, null);
@@ -1141,8 +1373,30 @@ public class BSimService {
             if (!sig.callingConvention().isEmpty()) {
                 detail.put("calling_convention", sig.callingConvention());
             }
+            String archiveKey = BSimTypeArchives.archiveKeyForHit(hit.executable, sig.gdtPath());
+            BSimTypeArchives.OpenedArchive opened;
+            try {
+                opened = archiveFor(archiveKey, sig);
+            } catch (Exception e) {
+                detail.put("error", "cannot open type archive: "
+                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+                record(row, detail, "failed");
+                return;
+            }
+            if (opened != null && opened.fallbackLocal()) {
+                typesFallbackLocal++;
+                counts.merge("types_fallback_local", 1, Integer::sum);
+                detail.put("types_fallback_local", true);
+                disassociateAfter = true;
+            }
+            if (opened != null && opened.disassociateAfter()) disassociateAfter = true;
+            if (opened != null && !opened.path().isEmpty()) {
+                detail.put("type_archive", opened.path());
+            }
+            if (archiveMode == BSimTypeArchives.Mode.LOCAL) disassociateAfter = true;
             if (dryRun) {
-                BSimSignatures.TypePlan plan = applier.plan(program, target, sig, hit.name);
+                BSimSignatures.TypePlan plan = applier.plan(program, target, sig, hit.name,
+                        opened == null ? null : opened.manager());
                 if (!plan.error().isEmpty()) {
                     detail.put("error", plan.error());
                     record(row, detail, "failed");
@@ -1157,9 +1411,11 @@ public class BSimService {
             try {
                 final Function fn = target;
                 final BSimSignatures.Signature ref = sig;
+                final ghidra.program.model.data.DataTypeManager archive =
+                        opened == null ? null : opened.manager();
                 outcome = threadingStrategy.executeWrite(program,
                         "BSim apply signature " + hit.name,
-                        () -> applier.apply(program, fn, ref, hit.name, provenance));
+                        () -> applier.apply(program, fn, ref, hit.name, provenance, archive));
             } catch (Exception e) {
                 outcome = BSimSignatures.Outcome.failed(
                         e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -1176,6 +1432,50 @@ public class BSimService {
             detail.put("provenance", provenance);
             addTypes(detail, outcome.imported(), outcome.keptExisting());
             record(row, detail, "applied");
+        }
+
+        private BSimTypeArchives.OpenedArchive archiveFor(String archiveKey,
+                                                          BSimSignatures.Signature sig)
+                throws Exception {
+            String logical = "key:" + (archiveKey == null ? "" : archiveKey);
+            BSimTypeArchives.OpenedArchive cached = archives.get(logical);
+            if (isCanonicalArchive(cached)) {
+                return cached;
+            }
+            String gdt = resolvedGdtPath(sig);
+            if (!gdt.isEmpty()) {
+                BSimTypeArchives.OpenedArchive byGdt = archives.get("gdt:" + gdt);
+                if (byGdt != null) {
+                    return byGdt;
+                }
+            }
+            BSimTypeArchives.OpenedArchive opened = signatures.openForApply(
+                    program, programProvider, sig, archiveKey, archiveMode);
+            if (isCanonicalArchive(opened)) {
+                archives.put(logical, opened);
+            } else if (!gdt.isEmpty()) {
+                archives.put("gdt:" + gdt, opened);
+            } else {
+                archives.put(logical, opened);
+            }
+            return opened;
+        }
+
+        private static boolean isCanonicalArchive(BSimTypeArchives.OpenedArchive opened) {
+            return opened != null && !opened.fallbackLocal()
+                    && (opened.mode() == BSimTypeArchives.Mode.PROJECT
+                    || opened.mode() == BSimTypeArchives.Mode.FILE);
+        }
+
+        private static String resolvedGdtPath(BSimSignatures.Signature sig) {
+            if (sig == null) return "";
+            String raw = sig.gdtPath();
+            if (raw == null || raw.isBlank()) return "";
+            try {
+                return Path.of(raw.trim()).toAbsolutePath().normalize().toString();
+            } catch (Exception e) {
+                return raw.trim();
+            }
         }
 
         private void addTypes(Map<String, Object> detail, List<String> imported,
@@ -1197,11 +1497,30 @@ public class BSimService {
             Map<String, Object> m = new LinkedHashMap<>(counts);
             m.put("types_imported", typesImported);
             m.put("types_kept_existing", typesKeptExisting);
+            m.put("types_fallback_local", typesFallbackLocal);
             return m;
         }
 
         @Override
         public void close() {
+            for (BSimTypeArchives.OpenedArchive opened : archives.values()) {
+                if (opened == null) continue;
+                try {
+                    opened.close();
+                } catch (Exception ignored) {
+                }
+            }
+            archives.clear();
+            if (!dryRun && disassociateAfter) {
+                try {
+                    if (archiveMode == BSimTypeArchives.Mode.LOCAL) {
+                        BSimTypeArchives.disassociateExternal(program.getDataTypeManager());
+                    } else {
+                        BSimTypeArchives.disassociateFileArchives(program.getDataTypeManager());
+                    }
+                } catch (Exception ignored) {
+                }
+            }
             try {
                 applier.close();
             } catch (Exception ignored) {
@@ -1505,11 +1824,15 @@ public class BSimService {
     }
 
     private Function resolveApplyTarget(Program program, BSimMatches.FunctionResult fr) {
-        if (fr.address != null && !fr.address.isEmpty()) {
-            Function byAddr = ServiceUtils.resolveFunction(program, fr.address);
-            if (byAddr != null) return byAddr;
+        try {
+            if (fr.address != null && !fr.address.isEmpty()) {
+                Function byAddr = ServiceUtils.resolveFunction(program, fr.address);
+                if (byAddr != null) return byAddr;
+            }
+            return ServiceUtils.resolveFunction(program, fr.function);
+        } catch (Exception e) {
+            return null;
         }
-        return ServiceUtils.resolveFunction(program, fr.function);
     }
 
     private Response precheckProgram(Program program, String dbUrl, List<String> warnings)
@@ -1794,6 +2117,30 @@ public class BSimService {
         }
     }
 
+    static void recordArtifactTypeArchive(Program program, String archiveKey, String publishedPath) {
+        if (program == null || archiveKey == null || archiveKey.isBlank()) return;
+        String path;
+        try {
+            path = program.getExecutablePath();
+        } catch (Exception e) {
+            return;
+        }
+        if (path == null || path.isBlank()) return;
+        Path sidecar = FrameworkBuild.sidecarPath(Path.of(path));
+        if (!Files.isRegularFile(sidecar)) return;
+        try {
+            Map<String, Object> parsed = JsonHelper.parseJson(
+                    Files.readString(sidecar, StandardCharsets.UTF_8));
+            if (parsed == null) parsed = new LinkedHashMap<>();
+            parsed.put("type_archive", archiveKey.trim());
+            if (publishedPath != null && !publishedPath.isBlank()) {
+                parsed.put("type_archive_path", publishedPath);
+            }
+            Files.writeString(sidecar, JsonHelper.toJson(parsed) + "\n", StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+        }
+    }
+
     static void recordArtifactExecutableMd5(Program program, String md5) {
         if (program == null || md5 == null || md5.isBlank()) return;
         String path;
@@ -1895,6 +2242,31 @@ public class BSimService {
             }
             if (rows == null) rows = List.of();
             store.upsert(md5, exeName, rows, gdtPath);
+            String archiveKey = "";
+            if (program != null) {
+                archiveKey = BSimTypeArchives.archiveKeyForProgram(program);
+            }
+            if (archiveKey.isEmpty()) {
+                archiveKey = BSimTypeArchives.archiveKeyForHit(exeName, gdtPath);
+            }
+            if (!gdtPath.isEmpty() && !archiveKey.isEmpty()) {
+                boolean projectOpen = false;
+                try {
+                    projectOpen = programProvider.getProject() != null;
+                } catch (Exception ignored) {
+                }
+                BSimTypeArchives.Mode mode = BSimTypeArchives.resolveMode("", projectOpen);
+                String published = signatures.publishTypeArchive(program, programProvider,
+                        archiveKey, Path.of(gdtPath), mode, warnings);
+                recordArtifactTypeArchive(program, archiveKey, published);
+                if (body != null) {
+                    body.put("type_archive", archiveKey);
+                    if (published != null && !published.isEmpty()) {
+                        body.put("type_archive_path", published);
+                    }
+                    body.put("type_archive_mode", mode.name().toLowerCase(Locale.ROOT));
+                }
+            }
             int dwarf = 0;
             int analysisOnly = 0;
             for (CorroborationEvidence.FunctionRow row : rows) {

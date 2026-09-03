@@ -282,6 +282,10 @@ class TestBsimPostgresImage(unittest.TestCase):
         self.assertIn("apply_signatures", guide)
         self.assertIn("min_signature_confidence", guide)
         self.assertIn("[bsim-sig]", guide)
+        self.assertIn("rename_named", guide)
+        self.assertIn("name_exists_elsewhere", guide)
+        self.assertIn("/refs/types/", guide)
+        self.assertIn("types_fallback_local", guide)
 
     def test_extract_script_copies_are_identical_and_emit_signatures(self):
         resource = REPO_ROOT / "src" / "main" / "resources" / "bsim" / "BSim_McpExtract.java"
