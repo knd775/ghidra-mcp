@@ -12,6 +12,7 @@ from tools.docker_image_changes import (
     copy_sources_from_instruction,
     file_matches_source,
     github_output_lines,
+    ignore_paths,
     image_contexts,
     images_for_files,
     join_continued_lines,
@@ -97,7 +98,9 @@ def test_real_dockerfiles_expose_known_copy_inputs():
     assert "docker/stubs/" in ctx["builder"]
     assert "docker/bsim/lshvector.lock" in ctx["bsim"]
     # Runtime mounts, not image bytes.
-    for sources in ctx.values():
+    for name, sources in ctx.items():
+        assert ".dockerignore" in sources
+        assert f"{IMAGES[name]}.dockerignore" in sources
         assert "docker/references.yaml" not in sources
         assert "docker/docker-compose.yml" not in sources
         assert "uv.lock" not in sources
@@ -133,6 +136,29 @@ def test_lshvector_lock_rebuilds_bsim():
 
 def test_workflow_change_rebuilds_every_image():
     assert images_for_files([WORKFLOW_PATH], REPO_ROOT) == _on(*IMAGES)
+
+
+def test_root_dockerignore_rebuilds_every_image():
+    assert ignore_paths("docker/Dockerfile.bridge") == (
+        ".dockerignore",
+        "docker/Dockerfile.bridge.dockerignore",
+    )
+    assert images_for_files([".dockerignore"], REPO_ROOT) == _on(*IMAGES)
+
+
+def test_dockerfile_specific_dockerignore_rebuilds_only_that_image():
+    assert images_for_files(
+        ["docker/Dockerfile.bridge.dockerignore"], REPO_ROOT
+    ) == _on("bridge")
+    assert images_for_files(
+        ["docker/Dockerfile.dockerignore"], REPO_ROOT
+    ) == _on("headless")
+    assert images_for_files(
+        ["docker/Dockerfile.builder.dockerignore"], REPO_ROOT
+    ) == _on("builder")
+    assert images_for_files(
+        ["docker/Dockerfile.bsim.dockerignore"], REPO_ROOT
+    ) == _on("bsim")
 
 
 def test_docs_and_compose_do_not_rebuild():
@@ -180,5 +206,7 @@ def test_context_paths_reads_from_repo_root_override(tmp_path: Path):
     # that are missing here; only bridge is overridden by writing that file.
     assert context_paths(tmp_path, "bridge") == [
         "docker/Dockerfile.bridge",
+        ".dockerignore",
+        "docker/Dockerfile.bridge.dockerignore",
         "only-this.txt",
     ]

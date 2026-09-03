@@ -4,10 +4,11 @@ ghcr.yml used to build all four images on every push. The builder fetches
 ARM GNU tarballs, headless downloads Ghidra, and bsim sparse-clones it. A
 Java-only commit paid for all of that.
 
-Each image's inputs are its Dockerfile plus every repo path its COPY/ADD
-instructions read. ``--from`` copies come from another stage, not the
-build context. ``.github/workflows/ghcr.yml`` counts as an input for every
-image so a tagging or cache change still publishes.
+Each image's inputs are its Dockerfile, the root ``.dockerignore``, the
+sibling ``<Dockerfile>.dockerignore`` BuildKit reads, and every repo path
+its COPY/ADD instructions read. ``--from`` copies come from another
+stage, not the build context. ``.github/workflows/ghcr.yml`` counts as an
+input for every image so a tagging or cache change still publishes.
 
     git diff --name-only "$BEFORE" HEAD | python -m tools.docker_image_changes
     python -m tools.docker_image_changes --all
@@ -117,10 +118,22 @@ def copy_sources_from_dockerfile(text: str) -> list[str]:
     return sources
 
 
+def ignore_paths(dockerfile: str) -> tuple[str, str]:
+    """Ignore files that can change what the context sends, even if absent.
+
+    All four GHCR jobs use ``context: .``. BuildKit applies ``.dockerignore``
+    at the context root, or ``<Dockerfile>.dockerignore`` next to the file
+    if that sibling exists (it replaces the root file, it does not merge).
+    Listing both when they are missing still matters: adding or deleting
+    either one changes the image.
+    """
+    return (".dockerignore", f"{dockerfile}.dockerignore")
+
+
 def context_paths(repo_root: Path, image: str) -> list[str]:
     dockerfile = IMAGES[image]
     text = (repo_root / dockerfile).read_text(encoding="utf-8")
-    paths = [dockerfile]
+    paths = [dockerfile, *ignore_paths(dockerfile)]
     paths.extend(copy_sources_from_dockerfile(text))
     return paths
 
