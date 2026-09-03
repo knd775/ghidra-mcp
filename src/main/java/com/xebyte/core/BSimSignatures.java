@@ -29,6 +29,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionSignature;
 import ghidra.program.model.listing.FunctionTag;
+import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.SymbolUtilities;
@@ -142,6 +143,18 @@ public final class BSimSignatures {
         SKIP_PARAM_MISMATCH
     }
 
+    /**
+     * Re-associate a local type with the current archive without changing
+     * its definition. Structural identity is required: an analyst edit is
+     * reported, not overwritten.
+     */
+    public enum RelinkDecision {
+        RELINK,
+        SKIP_NOT_IN_ARCHIVE,
+        SKIP_DIFFERS,
+        SKIP_FAILED
+    }
+
     public static String reason(Decision d) {
         return switch (d) {
             case APPLY -> "applied";
@@ -153,6 +166,26 @@ public final class BSimSignatures {
             case SKIP_ALREADY_APPLIED -> "skipped_already_applied";
             case SKIP_PARAM_MISMATCH -> "skipped_param_mismatch";
         };
+    }
+
+    public static String relinkReason(RelinkDecision d) {
+        return switch (d) {
+            case RELINK -> "relinked";
+            case SKIP_NOT_IN_ARCHIVE -> "not_in_archive";
+            case SKIP_DIFFERS -> "differs";
+            case SKIP_FAILED -> "failed";
+        };
+    }
+
+    /**
+     * {@code inArchive} is a type of the same name in the target archive;
+     * {@code equivalent} is {@link DataType#isEquivalent}. A missing type
+     * or a later edit must not be replaced.
+     */
+    public static RelinkDecision decideRelink(boolean inArchive, boolean equivalent) {
+        if (!inArchive) return RelinkDecision.SKIP_NOT_IN_ARCHIVE;
+        if (!equivalent) return RelinkDecision.SKIP_DIFFERS;
+        return RelinkDecision.RELINK;
     }
 
     /** Type work a signature application would do, computed without writing. */
@@ -341,6 +374,26 @@ public final class BSimSignatures {
             if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.substring(2);
             return "FUN_" + hex;
         }
+    }
+
+    /**
+     * Executable named on the last {@code [bsim-sig]} plate line, used to
+     * pick the archive when relinking types that were applied before
+     * project archives existed.
+     */
+    public static String provenanceExecutable(String comment) {
+        if (comment == null || comment.isBlank()) return "";
+        String found = "";
+        for (String line : comment.split("\\R")) {
+            String t = line.trim();
+            if (!t.startsWith(PROVENANCE_TAG)) continue;
+            String rest = t.substring(PROVENANCE_TAG.length()).trim();
+            if (rest.startsWith("from ")) rest = rest.substring(5);
+            int conf = rest.lastIndexOf(" conf=");
+            if (conf >= 0) rest = rest.substring(0, conf);
+            found = rest.trim();
+        }
+        return found;
     }
 
     /** True when the plate comment already carries a marker from this reference. */
@@ -545,10 +598,26 @@ public final class BSimSignatures {
          * Default is a no-op so tests that only care about the file path stay
          * focused.
          */
-        default String publishTypeArchive(Program program, ProgramProvider provider,
-                                          String archiveKey, Path fileGdt,
-                                          BSimTypeArchives.Mode mode, List<String> warnings) {
-            return null;
+        default BSimTypeArchives.PublishResult publishTypeArchive(Program program,
+                                                                  ProgramProvider provider,
+                                                                  String archiveKey, Path fileGdt,
+                                                                  BSimTypeArchives.Mode mode,
+                                                                  List<String> warnings) {
+            return BSimTypeArchives.PublishResult.NONE;
+        }
+
+        /** Named user types reachable from this function's current signature. */
+        default List<String> namedSignatureTypes(Function function) {
+            return BSimSignatures.namedSignatureTypes(function);
+        }
+
+        /**
+         * Re-associate one local type with {@code archive} when the
+         * definitions match. Writes only when {@code dryRun} is false.
+         */
+        default RelinkDecision relinkNamedType(Program program, String typeName,
+                                               DataTypeManager archive, boolean dryRun) {
+            return BSimSignatures.relinkNamedType(program, typeName, archive, dryRun);
         }
 
         default boolean archiveAvailable(Program program, ProgramProvider provider,
@@ -585,9 +654,11 @@ public final class BSimSignatures {
         }
 
         @Override
-        public String publishTypeArchive(Program program, ProgramProvider provider,
-                                         String archiveKey, Path fileGdt,
-                                         BSimTypeArchives.Mode mode, List<String> warnings) {
+        public BSimTypeArchives.PublishResult publishTypeArchive(Program program,
+                                                                 ProgramProvider provider,
+                                                                 String archiveKey, Path fileGdt,
+                                                                 BSimTypeArchives.Mode mode,
+                                                                 List<String> warnings) {
             return BSimTypeArchives.publish(program, provider, archiveKey, fileGdt, mode, warnings);
         }
 
@@ -907,5 +978,238 @@ public final class BSimSignatures {
             }
         }
         return samePath != null ? samePath : any;
+    }
+
+    // ------------------------------------------------------------------
+    // Relink already-applied signatures onto the current archive
+    // ------------------------------------------------------------------
+
+    /**
+     * Counts and skipped rows for {@code relink_types}. Unique type names
+     * across the program; an already-linked equivalent type counts as
+     * relinked so a second run reports the same numbers.
+     */
+    public static final class RelinkReport {
+        private int relinked;
+        private int skippedNotInArchive;
+        private int skippedDiffers;
+        private int failed;
+        private final Set<String> archives = new LinkedHashSet<>();
+        private final List<Map<String, Object>> skipped = new ArrayList<>();
+
+        public void addArchive(String archiveKey) {
+            if (archiveKey != null && !archiveKey.isBlank()) archives.add(archiveKey.trim());
+        }
+
+        public void add(RelinkDecision decision, String typeName, String archiveKey) {
+            if (decision == RelinkDecision.RELINK) {
+                relinked++;
+                return;
+            }
+            if (decision == RelinkDecision.SKIP_NOT_IN_ARCHIVE) skippedNotInArchive++;
+            else if (decision == RelinkDecision.SKIP_DIFFERS) skippedDiffers++;
+            else failed++;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("type", typeName == null ? "" : typeName);
+            row.put("reason", relinkReason(decision));
+            if (archiveKey != null && !archiveKey.isBlank()) row.put("archive", archiveKey);
+            skipped.add(row);
+        }
+
+        public Map<String, Object> toMap() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("relinked", relinked);
+            m.put("skipped_not_in_archive", skippedNotInArchive);
+            m.put("skipped_differs", skippedDiffers);
+            m.put("failed", failed);
+            m.put("archives", new ArrayList<>(archives));
+            return m;
+        }
+
+        public List<Map<String, Object>> skippedRows() {
+            return List.copyOf(skipped);
+        }
+    }
+
+    /** Named user types reachable from the function's current prototype. */
+    public static List<String> namedSignatureTypes(Function function) {
+        List<String> names = new ArrayList<>();
+        if (function == null) return names;
+        Set<String> seen = new LinkedHashSet<>();
+        try {
+            collectNamed(function.getReturnType(), seen, names);
+            Parameter[] params = function.getParameters();
+            if (params != null) {
+                for (Parameter p : params) {
+                    if (p != null) collectNamed(p.getDataType(), seen, names);
+                }
+            }
+            if (!names.isEmpty()) return names;
+        } catch (Exception ignored) {
+        }
+        try {
+            FunctionSignature sig = function.getSignature(true);
+            if (sig == null) return names;
+            collectNamed(sig.getReturnType(), seen, names);
+            ParameterDefinition[] args = sig.getArguments();
+            if (args != null) {
+                for (ParameterDefinition arg : args) {
+                    if (arg != null) collectNamed(arg.getDataType(), seen, names);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return names;
+    }
+
+    private static void collectNamed(DataType dt, Set<String> seen, List<String> names) {
+        if (dt == null) return;
+        if (dt instanceof Pointer p) {
+            collectNamed(p.getDataType(), seen, names);
+            return;
+        }
+        if (dt instanceof Array a) {
+            collectNamed(a.getDataType(), seen, names);
+            return;
+        }
+        if (dt instanceof BitFieldDataType b) {
+            collectNamed(b.getBaseDataType(), seen, names);
+            return;
+        }
+        if (!isNamedUserType(dt)) return;
+        if (!seen.add(dt.getName())) return;
+        names.add(dt.getName());
+        if (dt instanceof TypeDef td) {
+            collectNamed(td.getDataType(), seen, names);
+        } else if (dt instanceof Composite c) {
+            DataTypeComponent[] comps = c.getDefinedComponents();
+            if (comps != null) {
+                for (DataTypeComponent comp : comps) {
+                    collectNamed(comp.getDataType(), seen, names);
+                }
+            }
+        } else if (dt instanceof FunctionDefinition fd) {
+            collectNamed(fd.getReturnType(), seen, names);
+            ParameterDefinition[] args = fd.getArguments();
+            if (args != null) {
+                for (ParameterDefinition arg : args) {
+                    collectNamed(arg.getDataType(), seen, names);
+                }
+            }
+        }
+    }
+
+    /**
+     * If {@code typeName} exists in both the program and the archive and
+     * the definitions match, point the local type at the archive. Does
+     * not change the type's fields, name, or any function signature.
+     */
+    public static RelinkDecision relinkNamedType(Program program, String typeName,
+                                                 DataTypeManager archive, boolean dryRun) {
+        if (typeName == null || typeName.isBlank()) return RelinkDecision.SKIP_NOT_IN_ARCHIVE;
+        DataType archived = archive == null ? null : findNamed(archive, typeName);
+        DataType local = null;
+        if (program != null) {
+            try {
+                local = findNamed(program.getDataTypeManager(), typeName);
+            } catch (Exception ignored) {
+            }
+        }
+        RelinkDecision decision = decideRelink(archived != null && local != null,
+                local != null && archived != null && structurallyIdentical(local, archived));
+        if (decision != RelinkDecision.RELINK || dryRun) return decision;
+        try {
+            if (applyRelink(local, program.getDataTypeManager(), archive)) {
+                return RelinkDecision.RELINK;
+            }
+        } catch (Exception ignored) {
+            // Association is best-effort; the type stays as it was.
+        }
+        return RelinkDecision.SKIP_FAILED;
+    }
+
+    static boolean structurallyIdentical(DataType local, DataType archived) {
+        if (local == null || archived == null) return false;
+        try {
+            return local.isEquivalent(archived);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static DataType findNamed(DataTypeManager dtm, String name) {
+        if (dtm == null || name == null || name.isBlank()) return null;
+        List<DataType> found = new ArrayList<>();
+        try {
+            dtm.findDataTypes(name, found);
+        } catch (Exception e) {
+            return null;
+        }
+        DataType any = null;
+        for (DataType f : found) {
+            if (f == null || f instanceof Pointer || f instanceof Array) continue;
+            if (!isNamedUserType(f) || !name.equals(f.getName())) continue;
+            try {
+                if (BSimTypeArchives.isExternalArchive(f.getSourceArchive())) return f;
+            } catch (Exception ignored) {
+            }
+            if (any == null) any = f;
+        }
+        return any;
+    }
+
+    static boolean applyRelink(DataType local, DataTypeManager target, DataTypeManager archive) {
+        if (local == null || target == null || archive == null) return false;
+        SourceArchive archiveSource;
+        try {
+            archiveSource = archive.getLocalSourceArchive();
+        } catch (Exception e) {
+            return false;
+        }
+        if (archiveSource == null) return false;
+        SourceArchive resolved;
+        try {
+            resolved = target.resolveSourceArchive(archiveSource);
+        } catch (Exception e) {
+            resolved = archiveSource;
+        }
+        if (resolved == null) resolved = archiveSource;
+        if (alreadyLinked(local, resolved)) return true;
+        try {
+            SourceArchive current = local.getSourceArchive();
+            if (current != null && BSimTypeArchives.isExternalArchive(current)
+                    && !sameSource(current, resolved)) {
+                target.disassociate(local);
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            local.setSourceArchive(resolved);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean alreadyLinked(DataType local, SourceArchive archiveSource) {
+        if (local == null || archiveSource == null) return false;
+        try {
+            return sameSource(local.getSourceArchive(), archiveSource);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean sameSource(SourceArchive a, SourceArchive b) {
+        if (a == null || b == null) return false;
+        try {
+            if (!BSimTypeArchives.isExternalArchive(a) || !BSimTypeArchives.isExternalArchive(b)) {
+                return false;
+            }
+            return a.getSourceArchiveID() != null
+                    && a.getSourceArchiveID().equals(b.getSourceArchiveID());
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

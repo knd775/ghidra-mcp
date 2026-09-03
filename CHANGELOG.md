@@ -6,6 +6,49 @@ Complete version history for the Ghidra MCP Server project.
 
 ## v7.0.0 (unreleased) — major: tool consolidation, JSON response contract, MCP conformance suite, documentation-correctness linting
 
+### BSim: project type archives are version-controlled on ingest
+
+`bsim_ingest` created `/refs/types/<name>-<version>.gdt` in the
+headless server's local project copy and reported
+`type_archive_mode: project`. On a server-bound project that is not
+enough: the DomainFile stayed `is_versioned: false`,
+`server_repository_files("/refs/types")` was empty, and every GUI
+client connecting through Ghidra Server could not see the archive.
+Nothing failed. The archive looked shared and was not.
+
+On a server-bound project ingest now adds the archive to version
+control after the first write, and checks out / updates / checks in
+on a later ingest of the same key. The response reports
+`type_archive_versioned` and `type_archive_version`. A local project
+says `type_archive_versioned: false` with a note that the archive is
+local to this project.
+
+### BSim: `relink_types` for signatures applied before project archives
+
+A program whose types were disassociated (the v13 repair) before
+project archives existed still carries `[bsim-sig]`.
+`apply_signatures=true` then reports `skipped_already_applied` and
+imports nothing, so `lfs_t` and `i2c_inst_t` stay as the program's
+own types with no provenance.
+
+`bsim_apply_matches(relink_types=true)` re-associates those types
+with the current `type_archive_mode` without re-applying the
+signature. Structural identity is required
+(`DataType.isEquivalent`): a missing archive type or an analyst edit
+is listed under `relink_skipped` and left alone. A second run
+reports the same counts.
+
+### BSim: `rename_named=false` evidence
+
+The first live run with the new default suppressed 13 renames. All
+13 were wrong: four application functions matched to
+`sleep_until_callback` by degenerate shape, five distinct Frotz
+opcode handlers collapsed onto `ret`, and the rest onto
+`load_operand` / `branch` / `translate_from_zscii`. The earlier
+renames that happened to be correct (`z_interpret` → `interpret`,
+`z_branch` → `branch`) are what the same mechanism does when it is
+lucky. The default stays false. The table is in `docs/prompts/BSIM.md`.
+
 ### BSim: typed signatures from references (`apply_signatures`)
 
 Every corpus reference is built with `-g`, so a matched function has a
